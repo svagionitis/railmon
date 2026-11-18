@@ -316,6 +316,7 @@ train-tracker-railway-gov-gr/
 - **Deliverables:** Working SQLite connection manager with WAL support and automated test suite.
 
 ### Phase 2: Asynchronous Recorder & Deadband Filter
+*(See detailed specification in [`docs/storage-phase-2-asynchronous-recorder-and-deadband-filter.md`](./storage-phase-2-asynchronous-recorder-and-deadband-filter.md))*
 - Implement `storage/filter.py` (`DeadbandFilter`): compares position, delay, speed, and time delta against thresholds.
 - Implement `storage/recorder.py` (`TelemetryRecorder`):
   - Starts background daemon thread reading from `queue.Queue`.

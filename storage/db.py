@@ -3,11 +3,29 @@ Database connection factory and transaction manager.
 """
 
 import contextlib
+from datetime import datetime
 import os
 import sqlite3
-from typing import Generator, Optional
+from typing import Any, Generator, Optional
 
 from storage.schema import SchemaManager
+
+
+def _convert_timestamp(val: bytes) -> Any:
+    """Safely convert SQLite TIMESTAMP bytes to datetime or string."""
+    s = val.decode("utf-8")
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(s.replace(" ", "T"))
+    except Exception:
+        return s
+
+
+sqlite3.register_converter("TIMESTAMP", _convert_timestamp)
+sqlite3.register_converter("timestamp", _convert_timestamp)
 
 
 class Database:
