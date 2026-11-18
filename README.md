@@ -51,6 +51,10 @@ cd railmon
 pip install -r requirements.txt
 ```
 
+> **Note for Windows Users:**
+> It is strongly recommended to run `railmon` inside **[Windows Terminal](https://aka.ms/terminal)**.
+> If running in a standalone PowerShell / Command Prompt window (`conhost`), ensure your console font is set to **Cascadia Mono**, **Cascadia Code**, or a Unicode font with Braille glyph coverage (e.g., right-click window title bar -> *Properties* -> *Font* -> select *Cascadia Mono*). Otherwise, Braille track patterns (`U+2800`–`U+28FF`) and directional glyphs may appear as empty boxes (`□`).
+
 ---
 
 ### Launch Interactive Terminal Dashboard (TUI)

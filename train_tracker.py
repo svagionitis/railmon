@@ -379,6 +379,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if sys.platform == "win32":
         # Ensure Greek characters and unicode box/Braille symbols output cleanly on Windows console
         try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+        try:
             if hasattr(sys.stdout, "reconfigure"):
                 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             if hasattr(sys.stderr, "reconfigure"):

@@ -1,6 +1,9 @@
 @echo off
 setlocal
 
+rem Ensure console output code page is UTF-8 for Braille and Greek Unicode support
+chcp 65001 >nul 2>&1
+
 where python >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
     python "%~dp0railmon" %*
