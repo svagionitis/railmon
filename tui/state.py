@@ -89,6 +89,8 @@ class StateSnapshot:
     filter_query: str
     corridor_filter: Optional[str]
     version: int
+    is_recording: bool = False
+    recording_db: Optional[str] = None
 
 
 def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
@@ -214,6 +216,8 @@ class TrainStateStore:
         self._corridor_filter: Optional[str] = None
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
+        self._is_recording: bool = False
+        self._recording_db: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Telemetry Ingestion (Called by StreamWorker Thread)
@@ -284,6 +288,13 @@ class TrainStateStore:
                 self._status_message = message
             self._version += 1
 
+    def set_recording_status(self, is_recording: bool, db_path: Optional[str] = None) -> None:
+        """Update background telemetry persistence status and database path."""
+        with self._lock:
+            self._is_recording = is_recording
+            self._recording_db = db_path
+            self._version += 1
+
     # ------------------------------------------------------------------
     # UI State & Cursor Navigation (Called by UI Thread)
     # ------------------------------------------------------------------
@@ -319,6 +330,8 @@ class TrainStateStore:
                 filter_query=self._filter_query,
                 corridor_filter=self._corridor_filter,
                 version=self._version,
+                is_recording=self._is_recording,
+                recording_db=self._recording_db,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:

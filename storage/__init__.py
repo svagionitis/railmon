@@ -2,6 +2,15 @@
 storage - High-performance SQLite historical storage subsystem for Hellenic Railways telemetry.
 """
 
+from storage.cli_formatters import (
+    format_dwell_table,
+    format_file_size,
+    format_punctuality_table,
+    format_sessions_table,
+    format_stats_table,
+    format_train_history_table,
+    format_trips_table,
+)
 from storage.db import Database
 from storage.filter import DeadbandConfig, DeadbandFilter
 from storage.models import (
@@ -38,4 +47,11 @@ __all__ = [
     "RecorderConfig",
     "TelemetryRecorder",
     "HistoricalRepository",
+    "format_file_size",
+    "format_trips_table",
+    "format_train_history_table",
+    "format_punctuality_table",
+    "format_dwell_table",
+    "format_stats_table",
+    "format_sessions_table",
 ]

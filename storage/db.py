@@ -47,6 +47,11 @@ class Database:
             with self.connection() as conn:
                 SchemaManager.initialize_schema(conn)
 
+    def init_schema(self) -> None:
+        """Explicitly initialize all required database tables and indices."""
+        with self.connection() as conn:
+            SchemaManager.initialize_schema(conn)
+
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new SQLite connection configured with optimal ingestion pragmas."""
         if not self._is_memory:

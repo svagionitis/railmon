@@ -336,6 +336,7 @@ train-tracker-railway-gov-gr/
 - **Deliverables:** High-level Python API for querying historical data with comprehensive unit tests.
 
 ### Phase 4: CLI & System Integration
+*(See detailed specification in [`docs/storage-phase-4-cli-and-system-integration.md`](./storage-phase-4-cli-and-system-integration.md))*
 - Extend [`train_tracker.py`](../train_tracker.py) CLI parser:
   - Add global `--db <filepath>` argument (default: `railway_history.db` when enabled).
   - Add dedicated sub-command: `railmon record [--demo] [--db PATH] [--filter-deadband]` for headless recording.

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import logging
 import random
 import threading
-from typing import Generator, List, Optional, Union
+from typing import Any, Generator, Iterable, List, Optional, Union
 
 from train_tracker import RailwayGovClient, TrainPosition
 from tui.mock_engine import MockTelemetryEngine
@@ -28,6 +28,7 @@ class StreamWorker:
         client: Optional[RailwayGovClient] = None,
         mock_engine: Optional[MockTelemetryEngine] = None,
         custom_stream: Optional[Union[Generator[List[TrainPosition], None, None], Iterable[List[TrainPosition]]]] = None,
+        recorder: Optional[Any] = None,
         base_backoff_sec: float = 1.0,
         max_backoff_sec: float = 30.0,
     ):
@@ -35,6 +36,7 @@ class StreamWorker:
         self.client = client
         self.mock_engine = mock_engine
         self.custom_stream = custom_stream
+        self.recorder = recorder
 
         self.base_backoff_sec = base_backoff_sec
         self.max_backoff_sec = max_backoff_sec
@@ -108,6 +110,8 @@ class StreamWorker:
 
                     if batch:
                         self.store.update_positions(batch)
+                        if self.recorder is not None and getattr(self.recorder, "is_running", False):
+                            self.recorder.enqueue_batch(batch)
 
                 # If generator completed normally without error
                 if self._stop_event.is_set():

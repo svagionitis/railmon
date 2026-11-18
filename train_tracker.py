@@ -6,6 +6,8 @@ Python Client, Real-time SSE Monitor, and Curses TUI.
 
 import argparse
 import json
+import os
+import signal
 import ssl
 import sys
 import time
@@ -186,27 +188,25 @@ class RailwayGovClient:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct command-line argument parser for railmon."""
+    """Construct command-line argument parser for railmon supporting stream, schedules, record, and history."""
     parser = argparse.ArgumentParser(
         prog="railmon",
         description="railmon - Hellenic Railways (railway.gov.gr) Live Train Tracker & Terminal Map.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  railmon --tui          # Launch live interactive terminal map
-  railmon --tui --demo   # Launch offline interactive demo simulator
-  railmon                # Plain console live stream monitor
-  railmon --demo         # Plain console offline mock stream
-  railmon schedules      # List today's upcoming scheduled train trips
+  railmon --tui                       # Launch live interactive terminal map
+  railmon --tui --record              # Launch live terminal map and record to SQLite
+  railmon record                      # Run headless telemetry recording daemon
+  railmon record --demo               # Headless recording of synthetic demo feed
+  railmon history trips               # Inspect recorded train trips in database
+  railmon history train IC50          # Show trajectory breadcrumbs for train IC50
+  railmon history punctuality         # Corridor punctuality report
+  railmon history stats               # SQLite database diagnostics and volume
+  railmon history export IC50 -o out.json  # Export train run to GeoJSON (RFC 7946)
         """,
     )
-    parser.add_argument(
-        "mode",
-        nargs="?",
-        default="stream",
-        choices=["stream", "schedules"],
-        help="Operational mode: 'stream' for live position monitoring, 'schedules' for upcoming trips (default: stream).",
-    )
+    # Common flags on top-level
     parser.add_argument(
         "--tui",
         action="store_true",
@@ -230,16 +230,122 @@ Examples:
         help="Reconnection backoff interval in seconds for live SSE stream (default: 3.0).",
     )
     parser.add_argument(
+        "--db",
+        type=str,
+        default="railway_history.db",
+        help="Path to SQLite historical database (default: railway_history.db).",
+    )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Enable background telemetry recording to SQLite in stream and --tui modes.",
+    )
+    parser.add_argument(
+        "--no-filter-deadband",
+        action="store_true",
+        help="Disable deadband filtering (record every raw position update without compression).",
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
         version="%(prog)s 1.0.0",
     )
+
+    subparsers = parser.add_subparsers(dest="mode")
+    parser.set_defaults(mode="stream")
+
+    # 1. stream (default)
+    subparsers.add_parser(
+        "stream",
+        help="Stream live train positions to console in formatted tabular text (default).",
+    )
+
+    # 2. schedules
+    subparsers.add_parser(
+        "schedules",
+        help="Fetch and display today's upcoming train timetables.",
+    )
+
+    # Shared parser for subparsers accepting --db
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument("--db", default=argparse.SUPPRESS, help="SQLite database file path.")
+
+    # 3. record
+    p_rec = subparsers.add_parser(
+        "record",
+        parents=[db_parent],
+        help="Run headless background telemetry recording daemon.",
+    )
+    p_rec.add_argument("--demo", action="store_true", default=argparse.SUPPRESS, help="Record synthetic demo telemetry.")
+    p_rec.add_argument("--no-filter-deadband", action="store_true", default=argparse.SUPPRESS, help="Disable deadband filtering.")
+    p_rec.add_argument("--batch-size", type=int, default=50, help="Maximum buffered rows before commit (default: 50).")
+    p_rec.add_argument("--flush-interval", type=float, default=2.0, help="Maximum buffer age in seconds before flush (default: 2.0).")
+    p_rec.add_argument("--quiet", action="store_true", help="Suppress periodic terminal status updates.")
+
+    # 4. history
+    p_hist = subparsers.add_parser(
+        "history",
+        parents=[db_parent],
+        help="Query, inspect, and export historical telemetry from SQLite database.",
+    )
+    hist_subs = p_hist.add_subparsers(dest="history_action")
+
+    # history trips
+    p_trips = hist_subs.add_parser("trips", parents=[db_parent], help="List recorded train trips.")
+    p_trips.add_argument("--date", type=str, help="Filter by date (YYYY-MM-DD).")
+    p_trips.add_argument("--corridor", type=str, help="Filter by corridor name.")
+    p_trips.add_argument("--limit", type=int, default=50, help="Max trips to return (default: 50).")
+
+    # history train
+    p_train = hist_subs.add_parser("train", parents=[db_parent], help="Inspect telemetry breadcrumbs for a train.")
+    p_train.add_argument("train_number", type=str, help="Train number (e.g. 1597, IC50).")
+    p_train.add_argument("--start", type=str, help="Start ISO timestamp filter.")
+    p_train.add_argument("--end", type=str, help="End ISO timestamp filter.")
+    p_train.add_argument("--limit", type=int, default=50, help="Max rows to return (default: 50).")
+    p_train.add_argument("--desc", action="store_true", help="Order descending (newest first).")
+
+    # history punctuality
+    p_punc = hist_subs.add_parser("punctuality", parents=[db_parent], help="Corridor punctuality and delay compliance report.")
+    p_punc.add_argument("--corridor", type=str, help="Filter by corridor name.")
+    p_punc.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD).")
+    p_punc.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD).")
+    p_punc.add_argument("--threshold", type=int, default=5, help="On-time threshold in minutes (default: 5).")
+
+    # history dwell
+    p_dwell = hist_subs.add_parser("dwell", parents=[db_parent], help="Station stop and dwell duration analysis.")
+    p_dwell.add_argument("train_number", type=str, help="Train number.")
+    p_dwell.add_argument("--start", type=str, help="Start timestamp filter.")
+    p_dwell.add_argument("--end", type=str, help="End timestamp filter.")
+    p_dwell.add_argument("--speed-threshold", type=float, default=2.0, help="Speed threshold in km/h (default: 2.0).")
+    p_dwell.add_argument("--min-dwell", type=int, default=30, help="Minimum dwell seconds to detect stop (default: 30).")
+
+    # history stats
+    hist_subs.add_parser("stats", parents=[db_parent], help="Database storage diagnostics, total rows, and span.")
+
+    # history sessions
+    p_sess = hist_subs.add_parser("sessions", parents=[db_parent], help="Audit log of recording sessions.")
+    p_sess.add_argument("--limit", type=int, default=20, help="Max sessions to list (default: 20).")
+
+    # history export
+    p_exp = hist_subs.add_parser("export", parents=[db_parent], help="Export train trajectory coordinates to GeoJSON or CSV.")
+    p_exp.add_argument("train_number", type=str, help="Train identifier (e.g. 1597).")
+    p_exp.add_argument("--format", choices=["geojson", "csv"], default="geojson", help="Export format (default: geojson).")
+    p_exp.add_argument("--feature-type", choices=["LineString", "Point"], default="LineString", help="GeoJSON geometry type.")
+    p_exp.add_argument("--out", "-o", type=str, help="Destination output file path.")
+    p_exp.add_argument("--start", type=str, help="Start timestamp filter.")
+    p_exp.add_argument("--end", type=str, help="End timestamp filter.")
+
     return parser
 
 
 def run_tui_mode(
-    demo: bool = False, fps: float = 20.0, reconnect_delay: float = 3.0
+    demo: bool = False,
+    fps: float = 20.0,
+    reconnect_delay: float = 3.0,
+    record: bool = False,
+    db_path: str = "railway_history.db",
+    enable_deadband: bool = True,
 ) -> None:
     """Launch the interactive curses terminal map application.
 
@@ -247,6 +353,9 @@ def run_tui_mode(
         demo: If True, run offline mock simulation; otherwise connect to live SSE stream.
         fps: Target frames per second for curses refresh loop.
         reconnect_delay: Initial reconnect delay in seconds for live stream interruptions.
+        record: If True, persist incoming telemetry to SQLite in background.
+        db_path: Destination SQLite database file path when recording is active.
+        enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
     """
     try:
         from tui.app import run_tui
@@ -264,8 +373,26 @@ def run_tui_mode(
             return
         raise
 
+    recorder = None
+    if record:
+        from storage.db import Database
+        from storage.recorder import RecorderConfig, TelemetryRecorder
+
+        db = Database(db_path)
+        db.init_schema()
+        recorder = TelemetryRecorder(
+            db,
+            RecorderConfig(
+                mode="demo" if demo else "live",
+                enable_deadband=enable_deadband,
+            ),
+        )
+        recorder.start()
+
     # 1. Initialize thread-safe state store
     store = TrainStateStore()
+    if record:
+        store.set_recording_status(True, db_path)
 
     # 2. Load static rail infrastructure
     stations = list(load_stations().values())
@@ -274,13 +401,14 @@ def run_tui_mode(
     # 3. Configure ingestion worker
     if demo:
         engine = MockTelemetryEngine()
-        worker = StreamWorker(store=store, mock_engine=engine)
+        worker = StreamWorker(store=store, mock_engine=engine, recorder=recorder)
     else:
         client = RailwayGovClient()
         worker = StreamWorker(
             store=store,
             client=client,
             base_backoff_sec=reconnect_delay,
+            recorder=recorder,
         )
 
     # 4. Start background ingestion thread
@@ -297,15 +425,42 @@ def run_tui_mode(
         )
     finally:
         worker.stop()
+        if recorder:
+            recorder.stop()
 
 
-def run_plain_stream_mode(demo: bool = False, reconnect_delay: float = 3.0) -> None:
+def run_plain_stream_mode(
+    demo: bool = False,
+    reconnect_delay: float = 3.0,
+    record: bool = False,
+    db_path: str = "railway_history.db",
+    enable_deadband: bool = True,
+) -> None:
     """Stream train positions to stdout in formatted tabular text.
 
     Args:
         demo: If True, stream from MockTelemetryEngine; otherwise stream from live SSE feed.
         reconnect_delay: Reconnection interval for live SSE feed.
+        record: If True, persist incoming telemetry to SQLite in background.
+        db_path: Destination SQLite database file path when recording is active.
+        enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
     """
+    recorder = None
+    if record:
+        from storage.db import Database
+        from storage.recorder import RecorderConfig, TelemetryRecorder
+
+        db = Database(db_path)
+        db.init_schema()
+        recorder = TelemetryRecorder(
+            db,
+            RecorderConfig(
+                mode="demo" if demo else "live",
+                enable_deadband=enable_deadband,
+            ),
+        )
+        recorder.start()
+
     if demo:
         from tui.mock_engine import MockTelemetryEngine
 
@@ -317,14 +472,18 @@ def run_plain_stream_mode(demo: bool = False, reconnect_delay: float = 3.0) -> N
         stream = client.stream_train_positions(reconnect_delay=reconnect_delay)
         source_label = "Live SSE Stream (/api/train-stream)"
 
+    rec_label = f" | SQLite Recording: {db_path}" if record else ""
     print("=" * 70)
     print("  railway.gov.gr Live Train Tracker - CLI Monitor")
-    print(f"  Source: {source_label}")
+    print(f"  Source: {source_label}{rec_label}")
     print("=" * 70)
     print("Press Ctrl+C to stop.\n", flush=True)
 
     try:
         for batch in stream:
+            if recorder:
+                recorder.enqueue_batch(batch)
+
             print(f"\n[{time.strftime('%H:%M:%S')}] Live Trains on Network: {len(batch)}")
             print(
                 f"{'Train':<8} {'Type':<12} {'Route':<32} {'Speed':<10} {'Delay':<8} {'Position (Lat, Lng)':<22}"
@@ -349,6 +508,249 @@ def run_plain_stream_mode(demo: bool = False, reconnect_delay: float = 3.0) -> N
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nMonitoring stopped.")
+    finally:
+        if recorder:
+            recorder.stop()
+
+
+def run_record_mode(
+    db_path: str = "railway_history.db",
+    demo: bool = False,
+    enable_deadband: bool = True,
+    batch_size: int = 50,
+    flush_interval_sec: float = 2.0,
+    quiet: bool = False,
+    reconnect_delay: float = 3.0,
+) -> int:
+    """Execute dedicated headless recording daemon with terminal metrics display.
+
+    Args:
+        db_path: Destination SQLite database file path.
+        demo: If True, stream from MockTelemetryEngine; otherwise stream from live SSE feed.
+        enable_deadband: If True, apply coordinate deadband filtering.
+        batch_size: Maximum buffer size before batch commit.
+        flush_interval_sec: Maximum latency in seconds before buffer commit.
+        quiet: If True, suppress periodic status row logs.
+        reconnect_delay: Reconnection interval for live SSE feed.
+
+    Returns:
+        Exit code (0 on success).
+    """
+    from storage.cli_formatters import format_file_size
+    from storage.db import Database
+    from storage.recorder import RecorderConfig, TelemetryRecorder
+
+    db = Database(db_path)
+    db.init_schema()
+
+    config = RecorderConfig(
+        batch_size=batch_size,
+        flush_interval_sec=flush_interval_sec,
+        enable_deadband=enable_deadband,
+        mode="demo" if demo else "live",
+    )
+    recorder = TelemetryRecorder(db, config)
+    recorder.start()
+
+    source_label = "Offline Mock Simulation" if demo else "Live SSE Stream (/api/train-stream)"
+    deadband_label = "ENABLED (distance >= 15m, delay delta >= 1m)" if enable_deadband else "DISABLED (recording all raw coordinates)"
+
+    print("=" * 70)
+    print("  railmon - Hellenic Railways Telemetry Ingestion Daemon")
+    print(f"  Source: {source_label}")
+    print(f"  Database: {db_path} (WAL mode)")
+    print(f"  Deadband Compression: {deadband_label}")
+    print("=" * 70)
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now_str}] Session #{recorder.session_id} initialized. Recording started. Press Ctrl+C to stop.\n")
+
+    if not quiet:
+        print(f"  {'Timestamp':<11} | {'Trains':>6} | {'Batch Rows':>10} | {'Total Stored':>12} | {'Compressed':>10} | {'DB Size':>9}")
+        print("-" * 75)
+
+    start_time = time.time()
+    last_stat_time = time.time()
+
+    try:
+        if demo:
+            from tui.mock_engine import MockTelemetryEngine
+
+            engine = MockTelemetryEngine()
+            stream = engine.stream_positions(interval_sec=1.0)
+        else:
+            client = RailwayGovClient()
+            stream = client.stream_train_positions(reconnect_delay=reconnect_delay)
+
+        for batch in stream:
+            recorder.enqueue_batch(batch)
+
+            now = time.time()
+            if not quiet and (now - last_stat_time) >= 5.0:
+                stats = recorder.get_stats()
+                filter_stats = stats.get("filter") or {}
+                ratio = filter_stats.get("suppression_ratio_pct", 0.0)
+                try:
+                    db_size = os.path.getsize(db_path)
+                except OSError:
+                    db_size = 0
+                ts_str = time.strftime("%H:%M:%S")
+                print(
+                    f" {ts_str:<11} | {len(batch):>6} | {len(batch):>10} | "
+                    f"{stats.get('total_records_written', 0):>12} | {ratio:>9.1f}% | {format_file_size(db_size):>9}"
+                )
+                sys.stdout.flush()
+                last_stat_time = now
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Shutting down recorder... draining queue and flushing buffer...")
+        recorder.stop(timeout_sec=5.0)
+        duration = time.time() - start_time
+        stats = recorder.get_stats()
+        filter_stats = stats.get("filter") or {}
+        suppressed = filter_stats.get("suppressed_count", 0)
+        ratio = filter_stats.get("suppression_ratio_pct", 0.0)
+        try:
+            db_size = os.path.getsize(db_path)
+        except OSError:
+            db_size = 0
+
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Session #{recorder.session_id} finalized.")
+        print(f"  - Duration: {duration:.1f}s")
+        print(f"  - Total Telemetry Rows Stored: {stats.get('total_records_written', 0):,d}")
+        if enable_deadband:
+            print(f"  - Positions Filtered (Deadband): {suppressed:,d} ({ratio:.1f}% compression ratio)")
+        print(f"  - Final Database File Size: {format_file_size(db_size)}")
+
+    return 0
+
+
+def run_history_mode(args: argparse.Namespace) -> int:
+    """Query, inspect, and export historical telemetry from SQLite.
+
+    Args:
+        args: Parsed command-line arguments for 'history' subcommand.
+
+    Returns:
+        Exit code (0 on success).
+    """
+    from storage.cli_formatters import (
+        format_dwell_table,
+        format_punctuality_table,
+        format_sessions_table,
+        format_stats_table,
+        format_train_history_table,
+        format_trips_table,
+    )
+    from storage.db import Database
+    from storage.repository import HistoricalRepository
+
+    db_path = getattr(args, "db", "railway_history.db")
+    if not os.path.exists(db_path):
+        print(
+            f"[Error] SQLite database file '{db_path}' not found.\n"
+            f"Record telemetry first with:\n"
+            f"    railmon record\n"
+            f"    railmon --record\n"
+            f"    railmon --tui --record",
+            file=sys.stderr,
+        )
+        return 1
+
+    action = getattr(args, "history_action", None)
+    if not action:
+        print(
+            "Please specify a history action: trips, train, punctuality, dwell, stats, sessions, export.\n"
+            "Use 'railmon history --help' for details."
+        )
+        return 0
+
+    db = Database(db_path)
+    repo = HistoricalRepository(db)
+
+    if action == "trips":
+        trips = repo.get_active_trips(date=args.date, corridor=args.corridor, limit=args.limit)
+        print(format_trips_table(trips, date=args.date, corridor=args.corridor, db_path=db_path))
+
+    elif action == "train":
+        order = "DESC" if getattr(args, "desc", False) else "ASC"
+        rows = repo.get_train_history(
+            train_number=args.train_number,
+            start_time=args.start,
+            end_time=args.end,
+            limit=args.limit,
+            order=order,
+        )
+        print(format_train_history_table(rows, train_number=args.train_number))
+
+    elif action == "punctuality":
+        summaries = repo.get_corridor_punctuality(
+            corridor=args.corridor,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            on_time_threshold_min=args.threshold,
+        )
+        print(format_punctuality_table(summaries, threshold_min=args.threshold))
+
+    elif action == "dwell":
+        dwells = repo.get_station_dwell_times(
+            train_number=args.train_number,
+            start_time=args.start,
+            end_time=args.end,
+            speed_threshold_kmh=args.speed_threshold,
+            min_dwell_sec=args.min_dwell,
+        )
+        print(format_dwell_table(dwells, train_number=args.train_number))
+
+    elif action == "stats":
+        stats = repo.get_database_stats()
+        print(format_stats_table(stats, db_path=db_path))
+
+    elif action == "sessions":
+        sessions = repo.get_recording_sessions(limit=args.limit)
+        print(format_sessions_table(sessions))
+
+    elif action == "export":
+        fmt = getattr(args, "format", "geojson").lower()
+        if fmt == "geojson":
+            data = repo.export_trip_geojson(
+                train_number=args.train_number,
+                start_time=args.start,
+                end_time=args.end,
+                feature_type=args.feature_type,
+            )
+            out_str = json.dumps(data, indent=2, ensure_ascii=False)
+            if args.out:
+                with open(args.out, "w", encoding="utf-8") as f:
+                    f.write(out_str)
+                count = len(data.get("features", []))
+                print(f"Exported GeoJSON ({count} features) to {args.out}")
+            else:
+                print(out_str)
+        elif fmt == "csv":
+            if args.out:
+                count = repo.export_csv(
+                    query_type="telemetry",
+                    target=args.out,
+                    params={
+                        "train_number": args.train_number,
+                        "start_time": args.start,
+                        "end_time": args.end,
+                    },
+                )
+                print(f"Exported {count} CSV records to {args.out}")
+            else:
+                repo.export_csv(
+                    query_type="telemetry",
+                    target=sys.stdout,
+                    params={
+                        "train_number": args.train_number,
+                        "start_time": args.start,
+                        "end_time": args.end,
+                    },
+                )
+    return 0
 
 
 def run_schedules_mode() -> None:
@@ -398,17 +800,53 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.mode == "schedules":
             run_schedules_mode()
+        elif args.mode == "record":
+            enable_deadband = not getattr(args, "no_filter_deadband", False)
+            return run_record_mode(
+                db_path=getattr(args, "db", "railway_history.db"),
+                demo=getattr(args, "demo", False),
+                enable_deadband=enable_deadband,
+                batch_size=getattr(args, "batch_size", 50),
+                flush_interval_sec=getattr(args, "flush_interval", 2.0),
+                quiet=getattr(args, "quiet", False),
+                reconnect_delay=getattr(args, "reconnect_delay", 3.0),
+            )
+        elif args.mode == "history":
+            return run_history_mode(args)
         elif args.tui:
-            run_tui_mode(
-                demo=args.demo,
-                fps=args.fps,
-                reconnect_delay=args.reconnect_delay,
-            )
+            is_rec = getattr(args, "record", False)
+            if is_rec:
+                enable_deadband = not getattr(args, "no_filter_deadband", False)
+                run_tui_mode(
+                    demo=args.demo,
+                    fps=args.fps,
+                    reconnect_delay=args.reconnect_delay,
+                    record=True,
+                    db_path=getattr(args, "db", "railway_history.db"),
+                    enable_deadband=enable_deadband,
+                )
+            else:
+                run_tui_mode(
+                    demo=args.demo,
+                    fps=args.fps,
+                    reconnect_delay=args.reconnect_delay,
+                )
         else:
-            run_plain_stream_mode(
-                demo=args.demo,
-                reconnect_delay=args.reconnect_delay,
-            )
+            is_rec = getattr(args, "record", False)
+            if is_rec:
+                enable_deadband = not getattr(args, "no_filter_deadband", False)
+                run_plain_stream_mode(
+                    demo=args.demo,
+                    reconnect_delay=args.reconnect_delay,
+                    record=True,
+                    db_path=getattr(args, "db", "railway_history.db"),
+                    enable_deadband=enable_deadband,
+                )
+            else:
+                run_plain_stream_mode(
+                    demo=args.demo,
+                    reconnect_delay=args.reconnect_delay,
+                )
         return 0
     except KeyboardInterrupt:
         print("\nProcess interrupted by user.")

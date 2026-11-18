@@ -531,10 +531,18 @@ class TUIRenderer:
 
         cnt_attr = warn_attr if delayed_count > 0 else dim_attr
         safe_addstr(win, 0, left_w, counts_text, cnt_attr)
+        left_w += get_string_display_width(counts_text)
+
+        # Draw [● REC] status badge if recording is active
+        if snapshot.is_recording and width > left_w + 12:
+            rec_text = " [● REC]"
+            rec_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            safe_addstr(win, 0, left_w, rec_text, rec_attr)
+            left_w += get_string_display_width(rec_text)
 
         # Draw right-aligned clock
         time_x = width - get_string_display_width(time_str)
-        if time_x > left_w + get_string_display_width(counts_text):
+        if time_x > left_w:
             safe_addstr(win, 0, time_x, time_str, dim_attr)
 
     def render_map(
