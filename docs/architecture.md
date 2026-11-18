@@ -102,6 +102,17 @@ The platform officially integrates the **Hellenic Positioning System (HEPOS)**, 
              +-------------------------------------+
 ```
 
+### 2.3 Interface Boundary: Real-Time Endpoint vs. HEPOS
+
+A key architectural distinction is that the public real-time endpoint (`/api/train-stream`) does **not** communicate directly with HEPOS during client connections. 
+
+The architecture strictly decouples client telemetry distribution from positioning acquisition:
+
+1. **No Direct Runtime Endpoint Communication:** The real-time endpoint (`https://railway.gov.gr/api/train-stream`) does not query or interface with the HEPOS network during client streaming sessions. It operates purely as an edge Server-Sent Events (SSE) distribution broker.
+2. **Upstream Edge Acquisition:** Individual locomotives communicate with the HEPOS network via cellular or satellite data connections using standard NTRIP (Networked Transport of RTCM via Internet Protocol). The on-board dual-band GNSS transceiver receives Network RTK/DGNSS differential corrections directly from the 98-station HEPOS network to resolve its position to sub-decimeter accuracy locally.
+3. **Telemetry Backhaul & Central Processing:** Locomotives upload telemetry packets (corrected WGS84 latitude/longitude, altitude, speed, course, timestamp) via Starlink satellite uplink (with 4G/5G failover) to the central Acharnes Railway Center (SKA) servers. The SKA GIS engine matches the coordinates against OSE's spatial vector network, computing `chainage_m`, `railwayId`, `alongTrackDistance`, and `trackHeading`.
+4. **Downstream Telemetry Delivery:** The SKA core system pushes the consolidated, track-snapped train states to the cloud-hosted SSE broker at `railway.gov.gr`. Clients listening to `/api/train-stream` receive payloads with HEPOS-derived accuracy without imposing runtime overhead or availability dependencies on the HEPOS reference network.
+
 ---
 
 ## 3. Network & Communication Architecture
@@ -120,6 +131,9 @@ The backend exposes two primary communication interfaces: Server-Sent Events (SS
   Referer: https://railway.gov.gr/train-tracker
   User-Agent: Mozilla/5.0 ...
   ```
+
+> [!NOTE]
+> **HEPOS Decoupling:** The `/api/train-stream` SSE broker distributes pre-processed, track-snapped coordinates derived upstream from HEPOS RTK corrections. It does not initiate queries or connections to HEPOS during client streaming sessions (see [Section 2.3](#23-interface-boundary-real-time-endpoint-vs-hepos)).
 
 #### Multiplexed SSE Event Types
 
