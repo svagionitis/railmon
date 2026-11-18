@@ -4,8 +4,9 @@ Unit tests for SQLite schema creation, migrations, indexes, and integrity checks
 
 import sqlite3
 import unittest
+from unittest.mock import patch
 
-from storage.schema import CURRENT_SCHEMA_VERSION, SchemaManager
+from storage.schema import CURRENT_SCHEMA_VERSION, SCHEMA_V1_STATEMENTS, SchemaManager
 
 
 class TestStorageSchema(unittest.TestCase):
@@ -137,6 +138,73 @@ class TestStorageSchema(unittest.TestCase):
         healthy, errors = SchemaManager.verify_integrity(self.conn)
         self.assertTrue(healthy)
         self.assertEqual(len(errors), 0)
+
+    def test_schema_initialization_sets_pragma_user_version(self):
+        """initialize_schema must set SQLite header PRAGMA user_version = CURRENT_SCHEMA_VERSION."""
+        version = SchemaManager.initialize_schema(self.conn)
+        self.assertEqual(version, CURRENT_SCHEMA_VERSION)
+        user_ver = self.conn.execute("PRAGMA user_version;").fetchone()[0]
+        self.assertEqual(user_ver, CURRENT_SCHEMA_VERSION)
+        self.assertEqual(SchemaManager.get_user_version(self.conn), CURRENT_SCHEMA_VERSION)
+
+    def test_initialize_schema_backfills_pragma_user_version_on_legacy_db(self):
+        """Pre-P1-2 databases with schema_migrations=1 and user_version=0 must be upgraded to user_version=1."""
+        with self.conn:
+            for statement in SCHEMA_V1_STATEMENTS:
+                self.conn.execute(statement)
+            self.conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?);",
+                (1, "Initial V1 schema setup"),
+            )
+        self.assertEqual(self.conn.execute("PRAGMA user_version;").fetchone()[0], 0)
+
+        version = SchemaManager.initialize_schema(self.conn)
+        self.assertEqual(version, CURRENT_SCHEMA_VERSION)
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version;").fetchone()[0],
+            CURRENT_SCHEMA_VERSION,
+        )
+        count = self.conn.execute("SELECT COUNT(*) FROM schema_migrations;").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_initialize_schema_verifies_integrity_and_raises_on_fk_violation(self):
+        """initialize_schema must run verify_integrity on startup and raise DatabaseError on FK violation."""
+        SchemaManager.initialize_schema(self.conn)
+        self.conn.execute("PRAGMA foreign_keys = OFF;")
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO scheduled_trips (schedule_id, train_number, service_date)
+                VALUES ('orphan-trip', 'missing-train', '2026-11-18');
+                """
+            )
+
+        with self.assertRaises(sqlite3.DatabaseError) as ctx:
+            SchemaManager.initialize_schema(self.conn)
+        self.assertIn("Foreign key violation", str(ctx.exception))
+
+    def test_initialize_schema_raises_on_corrupted_integrity_check(self):
+        """initialize_schema must raise sqlite3.DatabaseError when verify_integrity reports corruption."""
+        with patch.object(
+            SchemaManager,
+            "verify_integrity",
+            return_value=(False, ["Integrity check failure: *** in database main ***"]),
+        ):
+            with self.assertRaises(sqlite3.DatabaseError) as ctx:
+                SchemaManager.initialize_schema(self.conn)
+            self.assertIn("Integrity check failure", str(ctx.exception))
+
+    def test_optimize_and_init_db_helper(self):
+        """init_db helper and SchemaManager.optimize must initialize schema and run PRAGMA optimize."""
+        from storage.schema import init_db
+
+        version = init_db(self.conn)
+        self.assertEqual(version, CURRENT_SCHEMA_VERSION)
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version;").fetchone()[0],
+            CURRENT_SCHEMA_VERSION,
+        )
+        SchemaManager.optimize(self.conn)
 
 
 if __name__ == "__main__":

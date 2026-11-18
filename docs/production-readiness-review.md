@@ -2,22 +2,22 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 8 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 7 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
 ## 1. Executive Summary & Scorecard
 
-`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (230/230 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
+`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (237/237 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
 
 ```text
 +-----------------------------------+--------+----------------------------------------------+
 | Dimension                         | Score  | Status & Primary Finding                     |
 +-----------------------------------+--------+----------------------------------------------+
 | Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
-| Test Suite & Empirical Benchmarks |  8/10  | 230 tests pass; 31.6k rows/s @ batch=100     |
+| Test Suite & Empirical Benchmarks |  8/10  | 237 tests pass; 31.6k rows/s @ batch=100     |
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
-| SQLite Connection & Transactions  |  9/10  | P0-5 fixed; thread-local & BEGIN IMMEDIATE   |
+| SQLite Connection & Transactions  | 10/10  | P0-5 & P1-2 fixed; user_version & integrity  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `230 passed in 14.9s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `237 passed in 14.3s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -336,8 +336,8 @@ sequenceDiagram
 - **Issue:** `cursor.execute(f"PRAGMA wal_checkpoint({mode});")` interpolated `mode` without allowlist validation, failing the security audit scan ([`../.agents/skills/security-audit/SKILL.md`](../.agents/skills/security-audit/SKILL.md#L38)) and [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L10-L12).
 - **Fix:** Validate `mode.strip().upper() in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}` (raising `ValueError` on invalid modes) and dispatch via static SQL literals in `_WAL_CHECKPOINT_SQL`.
 
-### P1-2: Missing `PRAGMA user_version` & Startup Integrity Check
-- **Location:** [`SchemaManager`](../storage/schema.py#L109-L175)
+### P1-2: Missing `PRAGMA user_version` & Startup Integrity Check [RESOLVED]
+- **Location:** [`SchemaManager`](../storage/schema.py#L112-L229) | **Plan:** [`./p1-2-pragma-user-version-startup-integrity-fix-plan.md`](./p1-2-pragma-user-version-startup-integrity-fix-plan.md)
 - **Issue:** Schema versioning uses only `schema_migrations` without updating `PRAGMA user_version`, and `SchemaManager.verify_integrity()` is never called on startup, violating [`../.agents/rules/concurrency-and-sqlite.md`](../.agents/rules/concurrency-and-sqlite.md#L29-L32) and [`../.agents/rules/release-and-versioning.md`](../.agents/rules/release-and-versioning.md#L20-L25).
 - **Fix:** Set `PRAGMA user_version = 1` inside the migration transaction and run `PRAGMA integrity_check` on initialization.
 

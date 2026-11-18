@@ -7,7 +7,7 @@ from datetime import datetime
 import os
 import sqlite3
 import threading
-from typing import Any, Dict, Generator, Optional, Set
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 from storage.schema import SchemaManager
 
@@ -57,13 +57,27 @@ class Database:
             self._shared_memory_conn = self._create_connection()
 
         if auto_migrate:
-            with self.connection() as conn:
-                SchemaManager.initialize_schema(conn)
+            try:
+                with self.connection() as conn:
+                    SchemaManager.initialize_schema(conn)
+            except Exception:
+                self.close()
+                raise
 
-    def init_schema(self) -> None:
-        """Explicitly initialize all required database tables and indices."""
+    def init_schema(self) -> int:
+        """Explicitly initialize all required database tables, indices, and verify integrity."""
         with self.connection() as conn:
-            SchemaManager.initialize_schema(conn)
+            return SchemaManager.initialize_schema(conn)
+
+    def verify_integrity(self) -> Tuple[bool, List[str]]:
+        """Run PRAGMA integrity_check and foreign_key_check on the database."""
+        with self.connection() as conn:
+            return SchemaManager.verify_integrity(conn)
+
+    def optimize(self) -> None:
+        """Run PRAGMA optimize on the active connection."""
+        with self.connection() as conn:
+            SchemaManager.optimize(conn)
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new SQLite connection configured with optimal ingestion pragmas."""

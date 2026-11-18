@@ -278,6 +278,54 @@ class TestStorageDatabase(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_database_startup_sets_user_version_and_verifies_integrity(self):
+        """Database initialization must set PRAGMA user_version = 1 and expose verify_integrity/optimize."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "user_ver.db")
+            db = Database(db_path)
+            try:
+                with db.connection() as conn:
+                    user_ver = conn.execute("PRAGMA user_version;").fetchone()[0]
+                    self.assertEqual(user_ver, 1)
+                healthy, errors = db.verify_integrity()
+                self.assertTrue(healthy)
+                self.assertEqual(errors, [])
+                db.optimize()
+            finally:
+                db.close()
+
+            # Re-open existing database idempotently
+            db2 = Database(db_path)
+            try:
+                with db2.connection() as conn:
+                    self.assertEqual(conn.execute("PRAGMA user_version;").fetchone()[0], 1)
+                healthy, errors = db2.verify_integrity()
+                self.assertTrue(healthy)
+                self.assertEqual(errors, [])
+            finally:
+                db2.close()
+
+    def test_database_startup_fails_fast_on_integrity_violation(self):
+        """Database startup must fail fast with sqlite3.DatabaseError if integrity check fails."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "corrupt_fk.db")
+            db = Database(db_path)
+            db.close()
+
+            raw_conn = sqlite3.connect(db_path)
+            raw_conn.execute("PRAGMA foreign_keys = OFF;")
+            with raw_conn:
+                raw_conn.execute(
+                    """
+                    INSERT INTO scheduled_trips (schedule_id, train_number, service_date)
+                    VALUES ('bad-trip', 'nonexistent-train', '2026-11-18');
+                    """
+                )
+            raw_conn.close()
+
+            with self.assertRaises(sqlite3.DatabaseError):
+                Database(db_path)
+
 
 if __name__ == "__main__":
     unittest.main()

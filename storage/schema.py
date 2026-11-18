@@ -7,6 +7,8 @@ from typing import List, Tuple
 
 CURRENT_SCHEMA_VERSION = 1
 
+_SET_USER_VERSION_V1_SQL = "PRAGMA user_version = 1;"
+
 SCHEMA_V1_STATEMENTS: List[str] = [
     # 0. Schema version tracking
     """
@@ -111,39 +113,77 @@ class SchemaManager:
 
     @classmethod
     def initialize_schema(cls, conn: sqlite3.Connection) -> int:
-        """Apply pending migrations up to CURRENT_SCHEMA_VERSION.
+        """Apply pending migrations up to CURRENT_SCHEMA_VERSION and verify database integrity.
 
         Returns:
             The schema version of the database after initialization/migration.
+
+        Raises:
+            sqlite3.DatabaseError: If PRAGMA integrity_check or foreign_key_check fails.
         """
         conn.execute("PRAGMA foreign_keys = ON;")
+        user_v = cls.get_user_version(conn)
         current_v = cls.get_schema_version(conn)
 
-        if current_v == 0:
-            with conn:
-                for statement in SCHEMA_V1_STATEMENTS:
-                    conn.execute(statement)
-                conn.execute(
-                    "INSERT INTO schema_migrations (version, description) VALUES (?, ?);",
-                    (1, "Initial V1 schema setup"),
-                )
-            return 1
+        if current_v == 0 or user_v < CURRENT_SCHEMA_VERSION:
+            cursor = conn.cursor()
+            try:
+                if conn.in_transaction:
+                    conn.commit()
+                cursor.execute("BEGIN IMMEDIATE;")
+                try:
+                    for statement in SCHEMA_V1_STATEMENTS:
+                        cursor.execute(statement)
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?);",
+                        (1, "Initial V1 schema setup"),
+                    )
+                    cursor.execute(_SET_USER_VERSION_V1_SQL)
+                except Exception:
+                    if conn.in_transaction:
+                        conn.rollback()
+                    raise
+                else:
+                    if conn.in_transaction:
+                        conn.commit()
+            finally:
+                cursor.close()
+            current_v = CURRENT_SCHEMA_VERSION
+
+        is_healthy, errors = cls.verify_integrity(conn)
+        if not is_healthy:
+            raise sqlite3.DatabaseError(
+                f"Database integrity check failed: {'; '.join(errors)}"
+            )
 
         return current_v
 
     @classmethod
+    def get_user_version(cls, conn: sqlite3.Connection) -> int:
+        """Query SQLite header PRAGMA user_version."""
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA user_version;")
+            res = cursor.fetchone()
+            return int(res[0]) if res and res[0] is not None else 0
+        finally:
+            cursor.close()
+
+    @classmethod
     def get_schema_version(cls, conn: sqlite3.Connection) -> int:
-        """Query current applied schema version."""
+        """Query current applied schema version from PRAGMA user_version and schema_migrations."""
+        user_v = cls.get_user_version(conn)
         cursor = conn.cursor()
         try:
             cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations';"
             )
             if not cursor.fetchone():
-                return 0
+                return user_v
             cursor.execute("SELECT MAX(version) FROM schema_migrations;")
             res = cursor.fetchone()
-            return int(res[0]) if res and res[0] is not None else 0
+            table_v = int(res[0]) if res and res[0] is not None else 0
+            return max(user_v, table_v)
         finally:
             cursor.close()
 
@@ -173,3 +213,17 @@ class SchemaManager:
             return len(errors) == 0, errors
         finally:
             cursor.close()
+
+    @classmethod
+    def optimize(cls, conn: sqlite3.Connection) -> None:
+        """Run PRAGMA optimize on the connection for query planner maintenance."""
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA optimize;")
+        finally:
+            cursor.close()
+
+
+def init_db(conn: sqlite3.Connection) -> int:
+    """Convenience entrypoint to initialize and verify the SQLite database schema."""
+    return SchemaManager.initialize_schema(conn)
