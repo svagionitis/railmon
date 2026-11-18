@@ -1,0 +1,17 @@
+# railmon runtime dependencies
+# ----------------------------------------------------------------------------
+# On Linux and macOS, railmon has ZERO external PyPI runtime dependencies!
+# Core functionality runs 100% on the Python 3.10+ standard library:
+#   - curses (Interactive Braille TUI Dashboard)
+#   - urllib.request, ssl, json (HTTP REST & live SSE stream client)
+#   - sqlite3 (High-performance WAL historical telemetry persistence)
+#   - dataclasses, threading, queue (Thread-safe concurrency engine)
+#
+# System package requirements for stripped/minimal Linux installations (e.g., Debian/Ubuntu minimal, Alpine):
+#   Debian / Ubuntu: sudo apt install python3 python3-curses python3-sqlite3
+#   Fedora / RHEL:   sudo dnf install python3 python3-curses
+#   Alpine Linux:    apk add python3 ncurses
+# ----------------------------------------------------------------------------
+
+# Windows-only: Provides native ncurses implementation on Windows consoles
+windows-curses>=2.4.0; sys_platform == "win32"

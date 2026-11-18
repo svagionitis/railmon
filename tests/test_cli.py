@@ -150,6 +150,21 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
         train_tracker.demo_cli()
         mock_main.assert_called_once()
 
+    @patch("sys.platform", "win32")
+    def test_run_tui_mode_windows_missing_curses(self):
+        """Verify friendly error message on Windows when windows-curses is missing."""
+        orig_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if "tui.app" in name or name in ("curses", "_curses"):
+                raise ModuleNotFoundError("No module named '_curses'")
+            return orig_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                train_tracker.run_tui_mode(demo=True)
+                self.assertIn("windows-curses", mock_stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

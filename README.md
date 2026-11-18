@@ -17,13 +17,15 @@
   - **Corridor Filtering (`c`)**: Filter by Athens–Thessaloniki Mainline, Proastiakos Suburban, Peloponnese, Northern Greece, or View All.
   - **Historical Breadcrumb Trails (`b`)**: Visualize train journey paths over time.
 - **Offline Simulation Mode (`--demo`)**: Full physics-based kinematic mock engine simulating trains traversing real track geometry without requiring internet access.
-- **Lightweight & Dependency-Free**: Pure standard library implementation (Python 3.10+ `curses`, `urllib`, `dataclasses`, `json`).
+- **Lightweight & Dependency-Free**: Pure standard library implementation on Linux/macOS (Python 3.10+ `curses`, `urllib`, `dataclasses`, `json`). On Windows, `windows-curses` provides native console support.
 
 ---
 
 ## Installation & Quick Start
 
 Ensure you have Python 3.10 or higher installed:
+
+### Linux / macOS
 
 ```bash
 # Clone the repository
@@ -32,29 +34,53 @@ cd railmon
 
 # Make railmon executable
 chmod +x railmon
+
+# Pure standard library - no external packages required!
+# (On minimal/stripped distributions like Debian minimal or Alpine, ensure python3-curses is installed:
+#  Debian/Ubuntu: sudo apt install python3-curses python3-sqlite3)
 ```
+
+### Windows (PowerShell / Command Prompt)
+
+```powershell
+# Clone the repository
+git clone https://github.com/svagionitis/railmon.git
+cd railmon
+
+# Install windows-curses for interactive TUI support
+pip install -r requirements.txt
+```
+
+---
 
 ### Launch Interactive Terminal Dashboard (TUI)
 
 ```bash
-# Live real-time network stream
+# Linux / macOS
 ./railmon --tui
-
-# Offline interactive simulation (no internet required)
 ./railmon --tui --demo
+
+# Windows (Command Prompt or PowerShell)
+railmon --tui
+railmon --tui --demo
+# or
+python railmon --tui
 ```
 
 ### Console Stream Mode
 
 ```bash
 # Plain text streaming output
-./railmon
+./railmon              # Linux / macOS
+railmon                # Windows
 
 # Offline mock stream
-./railmon --demo
+./railmon --demo       # Linux / macOS
+railmon --demo         # Windows
 
 # View today's scheduled trips
-./railmon schedules
+./railmon schedules    # Linux / macOS
+railmon schedules      # Windows
 ```
 
 ---

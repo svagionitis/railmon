@@ -1,0 +1,11 @@
+# Development, linting, and testing dependencies for railmon
+-r requirements.txt
+
+# Testing & coverage
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Type checking & linting
+mypy>=1.4.0
+flake8>=6.0.0
+black>=23.7.0

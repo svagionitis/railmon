@@ -248,10 +248,21 @@ def run_tui_mode(
         fps: Target frames per second for curses refresh loop.
         reconnect_delay: Initial reconnect delay in seconds for live stream interruptions.
     """
-    from tui.app import run_tui
-    from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
-    from tui.state import TrainStateStore
-    from tui.stream_worker import StreamWorker
+    try:
+        from tui.app import run_tui
+        from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
+        from tui.state import TrainStateStore
+        from tui.stream_worker import StreamWorker
+    except (ImportError, ModuleNotFoundError) as err:
+        if sys.platform == "win32" and "curses" in str(err).lower():
+            print(
+                "\n[ERROR] The interactive terminal dashboard (--tui) requires 'windows-curses' on Windows.\n"
+                "Please install it with:\n"
+                "    pip install windows-curses\n",
+                file=sys.stderr,
+            )
+            return
+        raise
 
     # 1. Initialize thread-safe state store
     store = TrainStateStore()
@@ -310,7 +321,7 @@ def run_plain_stream_mode(demo: bool = False, reconnect_delay: float = 3.0) -> N
     print("  railway.gov.gr Live Train Tracker - CLI Monitor")
     print(f"  Source: {source_label}")
     print("=" * 70)
-    print("Press Ctrl+C to stop.\n")
+    print("Press Ctrl+C to stop.\n", flush=True)
 
     try:
         for batch in stream:
@@ -334,6 +345,7 @@ def run_plain_stream_mode(demo: bool = False, reconnect_delay: float = 3.0) -> N
                     f"{f'+{t.delay}m' if t.delay else 'On-time':<8} "
                     f"({t.lat:.4f}, {t.lng:.4f})"
                 )
+            sys.stdout.flush()
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nMonitoring stopped.")
@@ -364,6 +376,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     Returns:
         Exit code (0 for clean execution).
     """
+    if sys.platform == "win32":
+        # Ensure Greek characters and unicode box/Braille symbols output cleanly on Windows console
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
