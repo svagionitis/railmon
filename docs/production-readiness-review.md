@@ -15,12 +15,12 @@
 | Dimension                         | Score  | Status & Primary Finding                     |
 +-----------------------------------+--------+----------------------------------------------+
 | Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
-| Test Suite & Empirical Benchmarks |  8/10  | 212 tests pass; 20.4k rows/s @ batch=100     |
+| Test Suite & Empirical Benchmarks |  8/10  | 214 tests pass; 20.4k rows/s @ batch=100     |
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  |  5/10  | Per-batch connection churn; no user_version  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
-| Daemon Lifecycle & Signals        |  8/10  | P0-3 fixed; TUI pause wiring pending         |
+| Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
 | Security & Data Protection        |  5/10  | Unvalidated PRAGMA f-string; no 0600 umask   |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
 | Storage Retention & Disk Bounds   |  3/10  | No retention purge; no disk_usage check      |
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `212 passed in 14.9s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `214 passed in 15.0s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `20,409.0 rows/sec` (`389.1 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 8.58 ms`, `p95 11.91 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -299,9 +299,9 @@ sequenceDiagram
 
 ---
 
-### P0-4: TUI Pause Control Fails to Pause `StreamWorker`
+### P0-4: TUI Pause Control Fails to Pause `StreamWorker` [RESOLVED]
 
-- **Location:** [`TUIApp.toggle_pause`](../tui/app.py#L265-L271) vs [`StreamWorker.pause`](../tui/stream_worker.py#L75-L83)
+- **Location:** [`TUIApp.toggle_pause`](../tui/app.py#L269-L277) vs [`StreamWorker.pause`](../tui/stream_worker.py#L75-L88) | **Plan:** [`./p0-4-tui-pause-stream-worker-fix-plan.md`](./p0-4-tui-pause-stream-worker-fix-plan.md)
 - **Root Cause:** `TUIApp.toggle_pause()` toggles `self.paused` and sets `store.set_connection_status(ConnectionStatus.PAUSED, ...)`, but never calls `self.worker.pause()` or `self.worker.resume()`.
 - **Impact:** While paused in the UI, `StreamWorker` continues consuming the SSE stream, mutating `TrainStateStore`, resetting `ConnectionStatus` back to `CONNECTED` on reconnects, and writing batches to `TelemetryRecorder`.
 - **Fix:** Invoke `self.worker.pause()` when `self.paused` is `True`, and `self.worker.resume()` when `False`.

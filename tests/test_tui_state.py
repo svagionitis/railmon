@@ -413,6 +413,7 @@ class TestStreamWorker(unittest.TestCase):
 
         # Pause
         worker.pause()
+        self.assertTrue(worker.is_paused)
         self.assertEqual(self.store.get_snapshot().connection_status, ConnectionStatus.PAUSED)
         count_at_pause = self.store.get_snapshot().total_messages_received
 
@@ -422,10 +423,46 @@ class TestStreamWorker(unittest.TestCase):
 
         # Resume
         worker.resume()
+        self.assertFalse(worker.is_paused)
         time.sleep(0.08)
         self.assertGreater(self.store.get_snapshot().total_messages_received, count_at_pause)
 
         worker.stop()
+
+    def test_stream_worker_error_while_paused_preserves_paused_status(self):
+        """Verify in-flight stream error while paused does not overwrite PAUSED status."""
+        ready_to_fail = threading.Event()
+
+        def failing_after_pause_stream() -> Generator[List[TrainPosition], None, None]:
+            yield [_create_sample_train("ic-50", "IC 50", lat=38.0)]
+            ready_to_fail.wait(timeout=1.0)
+            raise ConnectionResetError("In-flight socket timeout while paused")
+
+        worker = StreamWorker(
+            store=self.store,
+            custom_stream=failing_after_pause_stream(),
+            base_backoff_sec=0.05,
+            max_backoff_sec=0.2,
+        )
+        worker.start()
+
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline and self.store.get_snapshot().total_messages_received < 1:
+                time.sleep(0.01)
+
+            worker.pause()
+            self.assertTrue(worker.is_paused)
+            self.assertEqual(self.store.get_snapshot().connection_status, ConnectionStatus.PAUSED)
+
+            # Trigger in-flight socket error while worker is paused
+            ready_to_fail.set()
+            time.sleep(0.06)
+
+            # ConnectionStatus must remain PAUSED (not clobbered by RECONNECTING)
+            self.assertEqual(self.store.get_snapshot().connection_status, ConnectionStatus.PAUSED)
+        finally:
+            worker.stop(timeout_sec=1.0)
 
     def test_stream_worker_reconnection_backoff(self):
         """Verify StreamWorker catches stream errors, transitions to RECONNECTING, and retries."""

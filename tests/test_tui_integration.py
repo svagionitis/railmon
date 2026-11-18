@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+from tui.app import TUIApp
 from tui.geo import GREECE_PRESET, GeoProjector, Viewport
 from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
 from tui.renderer import PaneGeometry, TUIRenderer
@@ -162,6 +163,72 @@ class TestTUIHeadlessIntegration(unittest.TestCase):
             self.store.get_snapshot().connection_status,
             ConnectionStatus.DISCONNECTED,
         )
+
+    def test_tui_spacebar_pauses_and_resumes_live_stream_worker(self):
+        """TC-INT-04: Spacebar in TUIApp pauses and resumes StreamWorker ingestion and recorder writes."""
+        def fast_stream():
+            while True:
+                yield self.engine.step(1.0)
+                time.sleep(0.02)
+
+        mock_recorder = MagicMock()
+        mock_recorder.is_running = True
+
+        worker = StreamWorker(
+            store=self.store,
+            custom_stream=fast_stream(),
+            recorder=mock_recorder,
+        )
+        stdscr = MockCursesWindow(height=35, width=120)
+        app = TUIApp(
+            stdscr=stdscr,
+            store=self.store,
+            worker=worker,
+            stations=self.stations,
+            tracks=self.tracks,
+        )
+        app.rebuild_windows()
+
+        worker.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and self.store.get_snapshot().total_messages_received < 2:
+                time.sleep(0.01)
+
+            self.assertGreaterEqual(self.store.get_snapshot().total_messages_received, 2)
+
+            # 1. Press Spacebar in TUIApp to pause ingestion
+            app.process_input(ord(" "))
+            self.assertTrue(app.paused)
+            self.assertTrue(worker.is_paused)
+
+            # Wait briefly for any in-flight iteration to settle at _pause_event.wait()
+            time.sleep(0.03)
+            paused_msgs = self.store.get_snapshot().total_messages_received
+            paused_rec_calls = mock_recorder.enqueue_batch.call_count
+
+            # Wait across multiple stream ticks while paused
+            time.sleep(0.08)
+            snap_paused = self.store.get_snapshot()
+            self.assertEqual(snap_paused.connection_status, ConnectionStatus.PAUSED)
+            self.assertEqual(snap_paused.total_messages_received, paused_msgs)
+            self.assertEqual(mock_recorder.enqueue_batch.call_count, paused_rec_calls)
+
+            # 2. Press Spacebar again to resume ingestion
+            app.process_input(ord(" "))
+            self.assertFalse(app.paused)
+            self.assertFalse(worker.is_paused)
+
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and self.store.get_snapshot().total_messages_received <= paused_msgs:
+                time.sleep(0.01)
+
+            snap_resumed = self.store.get_snapshot()
+            self.assertEqual(snap_resumed.connection_status, ConnectionStatus.CONNECTED)
+            self.assertGreater(snap_resumed.total_messages_received, paused_msgs)
+            self.assertGreater(mock_recorder.enqueue_batch.call_count, paused_rec_calls)
+        finally:
+            worker.stop()
 
 
 if __name__ == "__main__":

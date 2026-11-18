@@ -394,14 +394,16 @@ class TestTUIControls(unittest.TestCase):
         self.assertEqual(self.app.search_buffer, "")
 
     def test_pause_telemetry_toggle(self):
-        """Verify Space toggles pause state and updates connection status."""
+        """Verify Space toggles pause state, invokes StreamWorker.pause/resume, and updates connection status."""
         self.assertFalse(self.app.paused)
         self.app.process_input(ord(" "))
         self.assertTrue(self.app.paused)
+        self.worker.pause.assert_called_once()
         self.assertEqual(self.store.get_snapshot().connection_status, ConnectionStatus.PAUSED)
 
         self.app.process_input(ord(" "))
         self.assertFalse(self.app.paused)
+        self.worker.resume.assert_called_once()
         self.assertEqual(self.store.get_snapshot().connection_status, ConnectionStatus.CONNECTED)
 
     # ------------------------------------------------------------------

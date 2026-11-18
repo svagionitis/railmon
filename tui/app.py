@@ -270,8 +270,10 @@ class TUIApp:
         """Toggle paused state for telemetry ingestion."""
         self.paused = not self.paused
         if self.paused:
+            self.worker.pause()
             self.store.set_connection_status(ConnectionStatus.PAUSED, "Paused by user")
         else:
+            self.worker.resume()
             self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
 
     # ------------------------------------------------------------------

@@ -51,6 +51,11 @@ class StreamWorker:
         """Check if worker thread is currently active."""
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def is_paused(self) -> bool:
+        """Check if stream ingestion is currently paused."""
+        return not self._pause_event.is_set()
+
     def start(self) -> None:
         """Start background daemon worker thread."""
         if self.is_running:
@@ -75,12 +80,12 @@ class StreamWorker:
     def pause(self) -> None:
         """Temporarily pause stream ingestion."""
         self._pause_event.clear()
-        self.store.set_connection_status(ConnectionStatus.PAUSED, "Stream paused")
+        self.store.set_connection_status(ConnectionStatus.PAUSED, "Paused by user")
 
     def resume(self) -> None:
         """Resume stream ingestion from paused state."""
         self._pause_event.set()
-        self.store.set_connection_status(ConnectionStatus.CONNECTED, "Stream active")
+        self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
 
     def _run_loop(self) -> None:
         """Main worker execution loop with exponential backoff and error recovery."""
@@ -122,6 +127,12 @@ class StreamWorker:
             except Exception as exc:
                 if self._stop_event.is_set():
                     break
+
+                # If paused while an in-flight socket read failed, preserve PAUSED state until resumed
+                if not self._pause_event.is_set():
+                    self._pause_event.wait()
+                    if self._stop_event.is_set():
+                        break
 
                 # Apply exponential backoff with jitter
                 jitter = random.uniform(0.8, 1.2)
