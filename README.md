@@ -16,6 +16,11 @@
   - **Follow Camera Mode (`f`)**: Locks viewport center on a selected train as it traverses tracks across Greece.
   - **Corridor Filtering (`c`)**: Filter by Athens–Thessaloniki Mainline, Proastiakos Suburban, Peloponnese, Northern Greece, or View All.
   - **Historical Breadcrumb Trails (`b`)**: Visualize train journey paths over time.
+- **Historical Telemetry Recording & Analytics**:
+  - Embedded zero-dependency SQLite persistence with Write-Ahead Logging (WAL) for non-blocking concurrent reading and writing.
+  - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.
+  - Headless ingestion daemon mode (`railmon record`) for server or background recording.
+  - Rich CLI analytics (`railmon history`) for punctuality reports, dwell profiling, trip summaries, and RFC 7946 GeoJSON / CSV trajectory export.
 - **Offline Simulation Mode (`--demo`)**: Full physics-based kinematic mock engine simulating trains traversing real track geometry without requiring internet access.
 - **Lightweight & Dependency-Free**: Pure standard library implementation on Linux/macOS (Python 3.10+ `curses`, `urllib`, `dataclasses`, `json`). On Windows, `windows-curses` provides native console support.
 
@@ -87,6 +92,34 @@ railmon --demo         # Windows
 railmon schedules      # Windows
 ```
 
+### Historical Recording & Terminal Analytics
+
+```bash
+# Record live telemetry as a headless daemon
+./railmon record
+
+# Record to custom database with deadband compression
+./railmon record --db railway_2026.db --deadband
+
+# Run interactive TUI with persistent background recording ([● REC] badge)
+./railmon --tui --record
+
+# Inspect recorded database statistics
+./railmon history stats
+
+# View corridor punctuality and average delay reports
+./railmon history punctuality
+
+# Inspect chronologically ordered telemetry for a specific train
+./railmon history train IC52 --limit 50
+
+# Analyze station dwell times and halts
+./railmon history dwell IC50 --min-dwell 30
+
+# Export train journey as RFC 7946 GeoJSON (ready for QGIS, Kepler.gl)
+./railmon history export IC52 --format geojson --out ic52.geojson
+```
+
 ---
 
 ## Controls Reference (TUI)
@@ -117,8 +150,17 @@ railmon schedules      # Windows
   - [`tui/mock_engine.py`](./tui/mock_engine.py): Offline physics simulation and track graph kinematics.
   - [`tui/stream_worker.py`](./tui/stream_worker.py): Background SSE ingestion thread.
   - [`tui/app.py`](./tui/app.py): Application coordinator and event loop.
+- [`storage/`](./storage/): Embedded SQLite historical persistence subsystem:
+  - [`storage/db.py`](./storage/db.py): High-performance WAL connection coordinator.
+  - [`storage/recorder.py`](./storage/recorder.py): Asynchronous background batch persistence daemon.
+  - [`storage/filter.py`](./storage/filter.py): Deadband filtering and coordinate compression engine.
+  - [`storage/repository.py`](./storage/repository.py): Analytical query engine, DTOs, and GeoJSON/CSV exporters.
+  - [`storage/cli_formatters.py`](./storage/cli_formatters.py): Zero-dependency tabular terminal reporting formatters.
+- [`scripts/`](./scripts/): Development and profiling utilities:
+  - [`scripts/benchmark_storage.py`](./scripts/benchmark_storage.py): Ingestion throughput, read latency, and deadband benchmarking harness.
+- [`docs/historical-storage-sqlite.md`](./docs/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.
 - [`docs/architecture.md`](./docs/architecture.md): In-depth architectural analysis and reverse engineering report of the `railway.gov.gr` platform.
-- [`tests/`](./tests/): Comprehensive automated test suite (100+ tests).
+- [`tests/`](./tests/): Comprehensive automated test suite (200+ tests).
 
 ---
 

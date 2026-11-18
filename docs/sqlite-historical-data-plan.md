@@ -348,10 +348,12 @@ train-tracker-railway-gov-gr/
 - **Deliverables:** End-to-end integration across CLI, TUI, and headless daemon modes.
 
 ### Phase 5: Verification, Benchmarking & Documentation
+*(See detailed specification in [`docs/storage-phase-5-verification-benchmarking-and-documentation.md`](./storage-phase-5-verification-benchmarking-and-documentation.md))*
 - Execute automated integration tests simulating long-running telemetry streams.
 - Measure disk write overhead and confirm WAL checkpointing behavior.
 - Document schema, CLI commands, and SQL analysis recipes in [`docs/historical-storage-sqlite.md`](./historical-storage-sqlite.md).
 - Update [`README.md`](../README.md) and [`docs/architecture.md`](./architecture.md).
+- **Deliverables:** Production-grade test suite, benchmarking harness, comprehensive historical storage guide, and synchronized repository documentation.
 
 ---
 

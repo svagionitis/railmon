@@ -431,48 +431,111 @@ To render crisp railway vector lines without bulky full-block characters, the en
 
 ---
 
-## 7. Command-Line Interface & Operational Guide
+## 8. Embedded SQLite Historical Telemetry Persistence Layer
+
+In addition to live terminal monitoring and Curses TUI visualization, `railmon` features an embedded, zero-dependency persistence layer implemented in `storage/` that persists live and synthetic telemetry into an embedded SQLite database (`railway_history.db`).
+
+```mermaid
+flowchart TD
+    subgraph Ingestion ["Ingestion Sources"]
+        LiveSSE["Live SSE (/api/train-stream)"]
+        DemoMock["Offline Mock Engine"]
+    end
+
+    subgraph MemoryLayer ["Thread-Safe In-Memory Pipeline"]
+        Worker["StreamWorker Daemon"]
+        Store["TrainStateStore (Curses Snapshot)"]
+        Queue["Ingestion FIFO Queue (maxsize=10,000)"]
+    end
+
+    subgraph StorageLayer ["Persistence Subsystem (storage/)"]
+        Recorder["TelemetryRecorder Daemon (recorder.py)"]
+        Filter["DeadbandFilter (filter.py)\n- 15m distance threshold\n- 1 min delay change\n- 60s heartbeat"]
+        Batch["Batch Buffer (50 records or 2.0s flush)"]
+        DB[("SQLite Database (db.py)\n- PRAGMA journal_mode = WAL\n- PRAGMA synchronous = NORMAL\n- PRAGMA foreign_keys = ON")]
+    end
+
+    subgraph QueryLayer ["Historical Query & Analytics (storage/repository.py)"]
+        CLIQuery["CLI History Commands (railmon history ...)"]
+        GIS["RFC 7946 GeoJSON / CSV Exporter"]
+        Ext["External Analytics (Pandas, QGIS)"]
+    end
+
+    LiveSSE --> Worker
+    DemoMock --> Worker
+    Worker -->|Update UI Snapshot| Store
+    Worker -->|Enqueue (Non-blocking)| Queue
+    Queue --> Recorder
+    Recorder --> Filter
+    Filter --> Batch
+    Batch -->|Atomic Batch Commit| DB
+    DB -.->|Concurrent WAL Reads| CLIQuery
+    DB -.->|Concurrent WAL Reads| GIS
+    DB -.->|Concurrent WAL Reads| Ext
+```
+
+### 8.1 Write-Ahead Logging & Concurrency Model
+* **Decoupled Producers:** Neither network ingestion (`StreamWorker`) nor Curses rendering performs disk I/O.
+* **Asynchronous Ingestion Daemon:** `TelemetryRecorder` runs as a dedicated daemon thread, batching inserts into transactions (`executemany`) to avoid I/O thrashing.
+* **Non-Blocking WAL Mode:** `PRAGMA journal_mode = WAL` guarantees that analytical queries never block ongoing ingestion transactions.
+* **Deadband Compression:** `DeadbandFilter` evaluates coordinate displacement, speed deltas, and delay changes to eliminate redundant stationary updates, reducing disk footprint by 40–60%.
+
+### 8.2 Historical Storage Architecture & Manual
+For full schema DDL, indexing details, and a cookbook of 10+ operational SQL queries, see [`docs/historical-storage-sqlite.md`](./historical-storage-sqlite.md).
+
+---
+
+## 9. Command-Line Interface & Operational Guide
 
 The primary entry point [`train_tracker.py`](../train_tracker.py) provides a modern CLI interface powered by `argparse`.
 
-### 7.1 CLI Syntax & Options
+### 9.1 CLI Syntax & Options
 
 ```text
 usage: train_tracker.py [-h] [--tui] [--demo] [--fps FPS]
                         [--reconnect-delay RECONNECT_DELAY] [-v]
-                        [{stream,schedules}]
+                        [--record] [--db DB]
+                        [{stream,schedules,record,history}] ...
 ```
 
 | Argument / Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `mode` | Positional | `"stream"` | Operational mode: `stream` for real-time monitoring, `schedules` for timetable trips. |
+| `mode` | Positional / Subcommand | `"stream"` | Operational mode: `stream`, `schedules`, `record`, `history`. |
 | `--tui` | Flag | `False` | Launch interactive full-screen Curses terminal map dashboard. |
 | `--demo` | Flag | `False` | Run offline using synthetic telemetry engine (no live network required). |
+| `--record` | Flag | `False` | Concurrently persist incoming telemetry to SQLite during TUI or stream mode. |
+| `--db` | String | `"railway_history.db"` | Path to SQLite database file for recording or analytical queries. |
 | `--fps` | `float` | `20.0` | Target frame rate for TUI rendering loop ($5.0 - 60.0\text{ FPS}$). |
 | `--reconnect-delay`| `float` | `3.0` | Reconnection backoff interval in seconds for live SSE stream interruptions. |
 | `-v`, `--version` | Flag | N/A | Display version number and exit. |
 | `-h`, `--help` | Flag | N/A | Display usage instructions, options, and examples. |
 
-### 7.2 Execution Examples
+### 9.2 Execution Examples
 
 ```bash
 # 1. Live Interactive Terminal Map Dashboard
 python3 train_tracker.py --tui
 
-# 2. Offline Interactive Terminal Map Simulator (for demos / testing)
+# 2. Interactive Terminal Map with Active Telemetry Persistence ([● REC] badge)
+python3 train_tracker.py --tui --record
+
+# 3. Headless Ingestion Daemon (Dedicated recording service)
+python3 train_tracker.py record --deadband --db /var/data/railway_history.db
+
+# 4. Plain Text Console Monitor (Live SSE Feed with persistence)
+python3 train_tracker.py stream --record
+
+# 5. Offline Interactive Terminal Map Simulator (for demos / testing)
 python3 train_tracker.py --tui --demo
 
-# 3. Plain Text Console Monitor (Live SSE Feed)
-python3 train_tracker.py
+# 6. Historical Punctuality & Delay Analysis
+python3 train_tracker.py history punctuality
 
-# 4. Plain Text Console Monitor (Offline Simulation)
-python3 train_tracker.py --demo
-
-# 5. Inspect Today's Upcoming Scheduled Services
-python3 train_tracker.py schedules
+# 7. Export Trajectory as RFC 7946 GeoJSON for QGIS / Kepler.gl
+python3 train_tracker.py history export IC52 --format geojson --out ic52.geojson
 ```
 
-### 7.3 Interactive Keyboard Controls (TUI Mode)
+### 9.3 Interactive Keyboard Controls (TUI Mode)
 
 | Key(s) | Mode | Action | Description |
 | :--- | :---: | :--- | :--- |
@@ -490,12 +553,20 @@ python3 train_tracker.py schedules
 
 ---
 
-## 8. Implementation References
+## 10. Implementation References
 
 * **Python Source Code:** [`train_tracker.py`](../train_tracker.py)
 * **TUI Package Entry Point:** [`tui/__init__.py`](../tui/__init__.py)
+* **SQLite Persistence Package:** [`storage/__init__.py`](../storage/__init__.py)
+* **Historical Storage Guide & SQL Cookbook:** [`docs/historical-storage-sqlite.md`](./historical-storage-sqlite.md)
+* **Storage Implementation Plans:**
+  - [Phase 1: Schema Setup](./storage-phase-1-infrastructure-and-schema.md)
+  - [Phase 2: Asynchronous Recorder & Deadband Filter](./storage-phase-2-asynchronous-recorder-and-deadband-filter.md)
+  - [Phase 3: Historical Repository & Query Engine](./storage-phase-3-historical-repository-and-query-engine.md)
+  - [Phase 4: CLI & System Integration](./storage-phase-4-cli-and-system-integration.md)
+  - [Phase 5: Verification, Benchmarking & Documentation](./storage-phase-5-verification-benchmarking-and-documentation.md)
+* **Master Storage Plan:** [`docs/sqlite-historical-data-plan.md`](./sqlite-historical-data-plan.md)
 * **Master TUI Implementation Plan:** [`docs/tui-map-implementation-plan.md`](./tui-map-implementation-plan.md)
-* **Phase 6 Specification (Verification & CLI):** [`docs/phase-6-verification-automated-tests-cli-integration.md`](./phase-6-verification-automated-tests-cli-integration.md)
 * **Architecture Rules:** [`.agents/rules/architecture.md`](../.agents/rules/architecture.md)
 * **Python Language Rules:** [`.agents/rules/python-idioms.md`](../.agents/rules/python-idioms.md)
 * **Testing Guidelines:** [`.agents/rules/testing.md`](../.agents/rules/testing.md)
