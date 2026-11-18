@@ -5,9 +5,12 @@ Unit tests for Database connection management, WAL pragmas, and transactions.
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 
 from storage.db import Database
+from storage.recorder import RecorderConfig, TelemetryRecorder
+from train_tracker import TrainPosition
 
 
 class TestStorageDatabase(unittest.TestCase):
@@ -92,6 +95,145 @@ class TestStorageDatabase(unittest.TestCase):
                 self.assertTrue(os.path.exists(nested_db_path))
             finally:
                 db.close()
+
+    def test_file_database_reuses_thread_local_connection(self):
+        """File-backed Database must reuse the thread's persistent sqlite3.Connection across calls."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "reuse.db")
+            db = Database(db_path)
+            try:
+                with db.connection() as conn1:
+                    pass
+                with db.connection() as conn2:
+                    pass
+                with db.transaction() as cur:
+                    tx_conn = cur.connection
+
+                self.assertIs(conn1, conn2)
+                self.assertIs(conn1, tx_conn)
+            finally:
+                db.close()
+
+    def test_file_database_isolates_connections_across_threads(self):
+        """Different threads must receive isolated connections, and close() must clean up all."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "thread_isolated.db")
+            db = Database(db_path)
+            try:
+                with db.connection() as main_conn:
+                    pass
+
+                worker_conns = []
+
+                def worker():
+                    with db.connection() as w_conn1:
+                        worker_conns.append(w_conn1)
+                    with db.connection() as w_conn2:
+                        worker_conns.append(w_conn2)
+
+                t = threading.Thread(target=worker)
+                t.start()
+                t.join(timeout=2.0)
+
+                self.assertEqual(len(worker_conns), 2)
+                self.assertIs(worker_conns[0], worker_conns[1])
+                self.assertIsNot(main_conn, worker_conns[0])
+            finally:
+                db.close()
+
+            self.assertEqual(len(getattr(db, "_open_connections", set())), 0)
+
+    def test_connection_configures_busy_timeout_pragma(self):
+        """Every SQLite connection must configure PRAGMA busy_timeout = 5000."""
+        mem_db = Database(":memory:")
+        try:
+            with mem_db.connection() as conn:
+                timeout_ms = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+                self.assertEqual(timeout_ms, 5000)
+        finally:
+            mem_db.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "busy_timeout.db")
+            file_db = Database(db_path)
+            try:
+                with file_db.connection() as conn:
+                    timeout_ms = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+                    self.assertEqual(timeout_ms, 5000)
+            finally:
+                file_db.close()
+
+    def test_transaction_uses_begin_immediate(self):
+        """Database.transaction() must acquire a transaction immediately on entry via BEGIN IMMEDIATE."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "begin_imm.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    # With BEGIN IMMEDIATE executed on entry, in_transaction is immediately True
+                    # before any DML statement is executed by the caller.
+                    self.assertTrue(cur.connection.in_transaction)
+                    cur.execute("SELECT COUNT(*) FROM trains;")
+                with db.connection() as conn:
+                    self.assertFalse(conn.in_transaction)
+            finally:
+                db.close()
+
+    def test_in_memory_database_cross_thread_sharing_and_recorder(self):
+        """TelemetryRecorder background thread must write to :memory: Database without ProgrammingError."""
+        db = Database(":memory:")
+        config = RecorderConfig(
+            batch_size=5,
+            flush_interval_sec=0.05,
+            enable_deadband=False,
+        )
+        recorder = TelemetryRecorder(db, config=config)
+        try:
+            recorder.start()
+            positions = [
+                TrainPosition(
+                    id=f"mem-{i}",
+                    train_number=f"MEM-{i}",
+                    locomotive_number="120-001",
+                    name=f"Train {i}",
+                    train_type="IC",
+                    service_type="Passenger",
+                    status="Normal",
+                    origin="ATH",
+                    destination="SKG",
+                    next_station="LAR",
+                    speed=100.0,
+                    course=10.0,
+                    track_heading=10.0,
+                    lat=38.0 + i * 0.01,
+                    lng=23.7 + i * 0.01,
+                    altitude=100.0,
+                    delay=0,
+                    progress=0.5,
+                    chainage_m=10000,
+                    corridor="ATH-SKG",
+                    distance_to_destination_m=20000,
+                    timestamp="2026-11-18T12:00:00Z",
+                    schedule_id=f"SCH-{i}",
+                )
+                for i in range(5)
+            ]
+            recorder.enqueue_batch(positions)
+
+            # Perform concurrent reads from MainThread while recorder flushes on worker thread
+            for _ in range(5):
+                with db.connection() as conn:
+                    conn.execute("SELECT COUNT(*) FROM telemetry_history;").fetchone()
+
+            recorder.stop(timeout_sec=2.0)
+
+            with db.connection() as conn:
+                total = conn.execute("SELECT COUNT(*) FROM telemetry_history;").fetchone()[0]
+                self.assertEqual(total, 5)
+        finally:
+            if recorder.is_running:
+                recorder.stop(timeout_sec=2.0)
+            db.close()
 
 
 if __name__ == "__main__":

@@ -768,87 +768,90 @@ def run_history_mode(args: argparse.Namespace) -> int:
     db = Database(db_path)
     repo = HistoricalRepository(db)
 
-    if action == "trips":
-        trips = repo.get_active_trips(date=args.date, corridor=args.corridor, limit=args.limit)
-        print(format_trips_table(trips, date=args.date, corridor=args.corridor, db_path=db_path))
+    try:
+        if action == "trips":
+            trips = repo.get_active_trips(date=args.date, corridor=args.corridor, limit=args.limit)
+            print(format_trips_table(trips, date=args.date, corridor=args.corridor, db_path=db_path))
 
-    elif action == "train":
-        order = "DESC" if getattr(args, "desc", False) else "ASC"
-        rows = repo.get_train_history(
-            train_number=args.train_number,
-            start_time=args.start,
-            end_time=args.end,
-            limit=args.limit,
-            order=order,
-        )
-        print(format_train_history_table(rows, train_number=args.train_number))
-
-    elif action == "punctuality":
-        summaries = repo.get_corridor_punctuality(
-            corridor=args.corridor,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            on_time_threshold_min=args.threshold,
-        )
-        print(format_punctuality_table(summaries, threshold_min=args.threshold))
-
-    elif action == "dwell":
-        dwells = repo.get_station_dwell_times(
-            train_number=args.train_number,
-            start_time=args.start,
-            end_time=args.end,
-            speed_threshold_kmh=args.speed_threshold,
-            min_dwell_sec=args.min_dwell,
-        )
-        print(format_dwell_table(dwells, train_number=args.train_number))
-
-    elif action == "stats":
-        stats = repo.get_database_stats()
-        print(format_stats_table(stats, db_path=db_path))
-
-    elif action == "sessions":
-        sessions = repo.get_recording_sessions(limit=args.limit)
-        print(format_sessions_table(sessions))
-
-    elif action == "export":
-        fmt = getattr(args, "format", "geojson").lower()
-        if fmt == "geojson":
-            data = repo.export_trip_geojson(
+        elif action == "train":
+            order = "DESC" if getattr(args, "desc", False) else "ASC"
+            rows = repo.get_train_history(
                 train_number=args.train_number,
                 start_time=args.start,
                 end_time=args.end,
-                feature_type=args.feature_type,
+                limit=args.limit,
+                order=order,
             )
-            out_str = json.dumps(data, indent=2, ensure_ascii=False)
-            if args.out:
-                with open(args.out, "w", encoding="utf-8") as f:
-                    f.write(out_str)
-                count = len(data.get("features", []))
-                print(f"Exported GeoJSON ({count} features) to {args.out}")
-            else:
-                print(out_str)
-        elif fmt == "csv":
-            if args.out:
-                count = repo.export_csv(
-                    query_type="telemetry",
-                    target=args.out,
-                    params={
-                        "train_number": args.train_number,
-                        "start_time": args.start,
-                        "end_time": args.end,
-                    },
+            print(format_train_history_table(rows, train_number=args.train_number))
+
+        elif action == "punctuality":
+            summaries = repo.get_corridor_punctuality(
+                corridor=args.corridor,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                on_time_threshold_min=args.threshold,
+            )
+            print(format_punctuality_table(summaries, threshold_min=args.threshold))
+
+        elif action == "dwell":
+            dwells = repo.get_station_dwell_times(
+                train_number=args.train_number,
+                start_time=args.start,
+                end_time=args.end,
+                speed_threshold_kmh=args.speed_threshold,
+                min_dwell_sec=args.min_dwell,
+            )
+            print(format_dwell_table(dwells, train_number=args.train_number))
+
+        elif action == "stats":
+            stats = repo.get_database_stats()
+            print(format_stats_table(stats, db_path=db_path))
+
+        elif action == "sessions":
+            sessions = repo.get_recording_sessions(limit=args.limit)
+            print(format_sessions_table(sessions))
+
+        elif action == "export":
+            fmt = getattr(args, "format", "geojson").lower()
+            if fmt == "geojson":
+                data = repo.export_trip_geojson(
+                    train_number=args.train_number,
+                    start_time=args.start,
+                    end_time=args.end,
+                    feature_type=args.feature_type,
                 )
-                print(f"Exported {count} CSV records to {args.out}")
-            else:
-                repo.export_csv(
-                    query_type="telemetry",
-                    target=sys.stdout,
-                    params={
-                        "train_number": args.train_number,
-                        "start_time": args.start,
-                        "end_time": args.end,
-                    },
-                )
+                out_str = json.dumps(data, indent=2, ensure_ascii=False)
+                if args.out:
+                    with open(args.out, "w", encoding="utf-8") as f:
+                        f.write(out_str)
+                    count = len(data.get("features", []))
+                    print(f"Exported GeoJSON ({count} features) to {args.out}")
+                else:
+                    print(out_str)
+            elif fmt == "csv":
+                if args.out:
+                    count = repo.export_csv(
+                        query_type="telemetry",
+                        target=args.out,
+                        params={
+                            "train_number": args.train_number,
+                            "start_time": args.start,
+                            "end_time": args.end,
+                        },
+                    )
+                    print(f"Exported {count} CSV records to {args.out}")
+                else:
+                    repo.export_csv(
+                        query_type="telemetry",
+                        target=sys.stdout,
+                        params={
+                            "train_number": args.train_number,
+                            "start_time": args.start,
+                            "end_time": args.end,
+                        },
+                    )
+    finally:
+        db.close()
     return 0
 
 

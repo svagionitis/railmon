@@ -2,22 +2,22 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (5 P0 blockers, 9 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (1 P0 blocker, 9 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
 ## 1. Executive Summary & Scorecard
 
-`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (201/201 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
+`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (219/219 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
 
 ```text
 +-----------------------------------+--------+----------------------------------------------+
 | Dimension                         | Score  | Status & Primary Finding                     |
 +-----------------------------------+--------+----------------------------------------------+
 | Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
-| Test Suite & Empirical Benchmarks |  8/10  | 214 tests pass; 20.4k rows/s @ batch=100     |
+| Test Suite & Empirical Benchmarks |  8/10  | 219 tests pass; 31.6k rows/s @ batch=100     |
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
-| SQLite Connection & Transactions  |  5/10  | Per-batch connection churn; no user_version  |
+| SQLite Connection & Transactions  |  9/10  | P0-5 fixed; thread-local & BEGIN IMMEDIATE   |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
@@ -32,12 +32,12 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `214 passed in 15.0s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
-| Write Throughput (`batch_size=100`) | `20,409.0 rows/sec` (`389.1 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
+| Unit & Integration Suite | `219 passed in 15.0s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
-| Read Latency (`get_train_history`) | `mean 8.58 ms`, `p95 11.91 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
-| Read Latency (`get_corridor_punctuality`) | `mean 4.96 ms`, `p95 7.28 ms` | `mean <= 15 ms`, `p95 <= 30 ms` | PASS |
-| Security SQL Injection Scan | 1 match ([`../storage/db.py`](../storage/db.py#L112)) | 0 matches | **FAIL** |
+| Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
+| Read Latency (`get_corridor_punctuality`) | `mean 3.03 ms`, `p95 4.61 ms` | `mean <= 15 ms`, `p95 <= 30 ms` | PASS |
+| Security SQL Injection Scan | 1 match ([`../storage/db.py`](../storage/db.py#L140)) | 0 matches | **FAIL** |
 
 ---
 
@@ -308,9 +308,9 @@ sequenceDiagram
 
 ---
 
-### P0-5: Per-Transaction SQLite Connection Churn & Cross-Thread `:memory:` Sharing
+### P0-5: Per-Transaction SQLite Connection Churn & Cross-Thread `:memory:` Sharing [RESOLVED]
 
-- **Location:** [`Database._create_connection`](../storage/db.py#L55-L80), [`Database.connection`](../storage/db.py#L83-L92), [`Database.transaction`](../storage/db.py#L95-L103)
+- **Location:** [`Database._create_connection`](../storage/db.py#L60-L87), [`Database.connection`](../storage/db.py#L101-L111), [`Database.transaction`](../storage/db.py#L113-L132) | **Plan:** [`./p0-5-sqlite-connection-churn-memory-sharing-fix-plan.md`](./p0-5-sqlite-connection-churn-memory-sharing-fix-plan.md)
 - **Root Cause:**
   1. For file databases, `Database.connection()` opens a new `sqlite3.Connection`, executes 5 `PRAGMA` statements (including `PRAGMA cache_size = -64000`), yields it for a single query or batch flush, and calls `conn.close()`. Closing the connection after every transaction destroys the 64 MB page cache and incurs repeated file-open/WAL-header parsing overhead.
   2. `Database._create_connection()` does not execute `PRAGMA busy_timeout = 5000;` and `Database.transaction()` uses deferred transactions (`with conn:`) instead of `BEGIN IMMEDIATE`, violating [`../.agents/rules/concurrency-and-sqlite.md`](../.agents/rules/concurrency-and-sqlite.md#L14-L27).

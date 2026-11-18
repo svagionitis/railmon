@@ -73,6 +73,8 @@ class TestStreamWorkerRecorderIntegration(unittest.TestCase):
         self.db.init_schema()
 
     def tearDown(self):
+        if hasattr(self, "db"):
+            self.db.close()
         self.temp_dir.cleanup()
 
     def test_worker_forwards_batches_to_recorder(self):
@@ -160,6 +162,8 @@ class TestHeadlessRecordDaemon(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir.name, "daemon_test.db")
 
     def tearDown(self):
+        if hasattr(self, "db"):
+            self.db.close()
         self.temp_dir.cleanup()
 
     def test_run_record_mode_demo_lifecycle(self):
@@ -192,9 +196,12 @@ class TestHeadlessRecordDaemon(unittest.TestCase):
                 self.assertIn("Session #", out_str)
 
         db = Database(self.db_path)
-        repo = HistoricalRepository(db)
-        stats = repo.get_database_stats()
-        self.assertGreater(stats.total_telemetry_rows, 0)
+        try:
+            repo = HistoricalRepository(db)
+            stats = repo.get_database_stats()
+            self.assertGreater(stats.total_telemetry_rows, 0)
+        finally:
+            db.close()
 
 
 class TestHistoryCLIIntegration(unittest.TestCase):
@@ -225,6 +232,8 @@ class TestHistoryCLIIntegration(unittest.TestCase):
         self.parser = build_parser()
 
     def tearDown(self):
+        if hasattr(self, "db"):
+            self.db.close()
         self.temp_dir.cleanup()
 
     def test_history_missing_database_error(self):

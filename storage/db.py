@@ -6,7 +6,8 @@ import contextlib
 from datetime import datetime
 import os
 import sqlite3
-from typing import Any, Generator, Optional
+import threading
+from typing import Any, Generator, Optional, Set
 
 from storage.schema import SchemaManager
 
@@ -38,6 +39,11 @@ class Database:
         self.db_path = db_path
         self._is_memory = (db_path == ":memory:") or db_path.startswith("file::memory:")
 
+        self._local = threading.local()
+        self._conn_lock = threading.Lock()
+        self._open_connections: Set[sqlite3.Connection] = set()
+        self._memory_lock = threading.RLock()
+
         # For in-memory databases, maintain persistent connection to prevent schema teardown
         self._shared_memory_conn: Optional[sqlite3.Connection] = None
         if self._is_memory:
@@ -61,8 +67,9 @@ class Database:
 
         conn = sqlite3.connect(
             self.db_path,
-            timeout=30.0,
+            timeout=5.0,
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
         )
         conn.row_factory = sqlite3.Row
 
@@ -71,6 +78,7 @@ class Database:
             if not self._is_memory:
                 cursor.execute("PRAGMA journal_mode = WAL;")
                 cursor.execute("PRAGMA synchronous = NORMAL;")
+            cursor.execute("PRAGMA busy_timeout = 5000;")
             cursor.execute("PRAGMA foreign_keys = ON;")
             cursor.execute("PRAGMA temp_store = MEMORY;")
             cursor.execute("PRAGMA cache_size = -64000;")  # 64MB cache
@@ -79,26 +87,49 @@ class Database:
 
         return conn
 
+    def _get_thread_connection(self) -> sqlite3.Connection:
+        """Return the current thread's persistent SQLite connection, creating it if needed."""
+        conn: Optional[sqlite3.Connection] = getattr(self._local, "conn", None)
+        with self._conn_lock:
+            if conn is not None and conn in self._open_connections:
+                return conn
+
+        conn = self._create_connection()
+        with self._conn_lock:
+            self._open_connections.add(conn)
+        self._local.conn = conn
+        return conn
+
     @contextlib.contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """Context manager yielding an active SQLite connection."""
-        if self._is_memory and self._shared_memory_conn is not None:
-            yield self._shared_memory_conn
+        """Context manager yielding an active thread-scoped SQLite connection."""
+        if self._is_memory:
+            with self._memory_lock:
+                if self._shared_memory_conn is None:
+                    self._shared_memory_conn = self._create_connection()
+                yield self._shared_memory_conn
         else:
-            conn = self._create_connection()
-            try:
-                yield conn
-            finally:
-                conn.close()
+            conn = self._get_thread_connection()
+            yield conn
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
-        """Context manager for atomic transactions (commits on success, rolls back on error)."""
+        """Context manager for atomic write transactions using BEGIN IMMEDIATE."""
         with self.connection() as conn:
             cursor = conn.cursor()
             try:
-                with conn:  # Context manager on conn manages BEGIN / COMMIT / ROLLBACK
+                if conn.in_transaction:
+                    conn.commit()
+                cursor.execute("BEGIN IMMEDIATE;")
+                try:
                     yield cursor
+                except Exception:
+                    if conn.in_transaction:
+                        conn.rollback()
+                    raise
+                else:
+                    if conn.in_transaction:
+                        conn.commit()
             finally:
                 cursor.close()
 
@@ -125,7 +156,36 @@ class Database:
         return total
 
     def close(self) -> None:
-        """Close shared memory connection if open."""
-        if self._shared_memory_conn is not None:
-            self._shared_memory_conn.close()
-            self._shared_memory_conn = None
+        """Close all open thread-local connections and any shared memory connection."""
+        with self._memory_lock:
+            if self._shared_memory_conn is not None:
+                try:
+                    self._shared_memory_conn.close()
+                except Exception:
+                    pass
+                self._shared_memory_conn = None
+
+        with self._conn_lock:
+            conns = list(self._open_connections)
+            self._open_connections.clear()
+
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        if hasattr(self._local, "conn"):
+            self._local.conn = None
+
+    def __enter__(self) -> "Database":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
