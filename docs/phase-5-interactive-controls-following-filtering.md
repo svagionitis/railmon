@@ -199,7 +199,7 @@ PRESET_CONFIGS = {
 
 When a preset is activated:
 1. `projector.fit_bounding_box(preset_bbox)` frames the bounding box inside the map window.
-2. `store.set_corridor_filter(corridor_filter)` narrows the active train roster.
+2. `store.set_corridor_filter(corridor_filter)` narrows the active train roster. Note: In live telemetry, corridor matching incorporates operational aliases (e.g. `PIRAIR`), service type indicators, and geographic bounding box fallback (see [Corridor Presets Filtering Resolution](./corridor-presets-filtering-issue.md)).
 3. If auto-follow is active and the followed train is outside the new bounding box, auto-follow mode is safely deactivated.
 
 ---

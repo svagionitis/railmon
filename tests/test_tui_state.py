@@ -198,6 +198,68 @@ class TestTrainStateStore(unittest.TestCase):
         snapshot = self.store.get_snapshot()
         self.assertEqual(len(snapshot.filtered_trains), 3)
 
+    def test_corridor_filtering_real_world_telemetry(self):
+        """Verify real-world telemetry with aliases or missing corridor tags filter correctly."""
+        p_suburban = TrainPosition.from_dict({
+            "id": "2232",
+            "trainNumber": "2232",
+            "serviceType": "Suburban",
+            "origin": "Άνω Λιόσια",
+            "destination": "Αεροδρόμιο",
+            "nextStation": "Νερατζιώτισσα",
+            "lat": 38.050842,
+            "lng": 23.782449,
+            "speed": 100.0,
+            "corridor": "PIRAIR",
+        })
+        p_pathe = TrainPosition.from_dict({
+            "id": "ic-52",
+            "trainNumber": "IC 52",
+            "serviceType": "Intercity",
+            "origin": "Αθήνα",
+            "destination": "Θεσσαλονίκη",
+            "nextStation": "Λάρισα",
+            "lat": 39.638,
+            "lng": 22.422,
+            "speed": 140.0,
+            "corridor": None,
+        })
+        p_northern = TrainPosition.from_dict({
+            "id": "3672",
+            "trainNumber": "3672",
+            "serviceType": "Regional",
+            "origin": "Θεσσαλονίκη",
+            "destination": "Σέρρες",
+            "lat": 41.09,
+            "lng": 23.55,
+            "speed": 80.0,
+            "corridor": None,
+        })
+
+        self.store.update_positions([p_suburban, p_pathe, p_northern])
+
+        # Preset 0: All trains
+        self.store.set_corridor_filter(None)
+        self.assertEqual(len(self.store.get_snapshot().filtered_trains), 3)
+
+        # Preset 1: Proastiakos
+        self.store.set_corridor_filter("PROASTIAKOS")
+        filtered_proast = self.store.get_snapshot().filtered_trains
+        self.assertEqual(len(filtered_proast), 1)
+        self.assertEqual(filtered_proast[0].position.train_number, "2232")
+
+        # Preset 2: PATHE Mainline
+        self.store.set_corridor_filter("PATHE")
+        filtered_pathe = self.store.get_snapshot().filtered_trains
+        self.assertEqual(len(filtered_pathe), 1)
+        self.assertEqual(filtered_pathe[0].position.train_number, "IC 52")
+
+        # Preset 3: Northern Greece
+        self.store.set_corridor_filter("NORTHERN")
+        filtered_north = self.store.get_snapshot().filtered_trains
+        self.assertEqual(len(filtered_north), 1)
+        self.assertEqual(filtered_north[0].position.train_number, "3672")
+
     def test_follow_mode_toggle(self):
         """Verify follow-mode requires a valid selection."""
         # Cannot enable follow mode with nothing selected

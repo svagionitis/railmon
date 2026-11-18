@@ -271,6 +271,63 @@ class TestTUIControls(unittest.TestCase):
         self.assertIsNone(snap0.corridor_filter)
         self.assertAlmostEqual(self.app.projector.viewport.center.lat, GREECE_PRESET.center.lat, places=2)
 
+    def test_preset_shortcuts_with_live_telemetry(self):
+        """Verify 0..3 keys filter real-world trains with PIRAIR or missing corridor tags."""
+        self.store.clear()
+        t_suburban = TrainPosition.from_dict({
+            "id": "t-sub",
+            "trainNumber": "2232",
+            "serviceType": "Suburban",
+            "lat": 38.050842,
+            "lng": 23.782449,
+            "speed": 95.0,
+            "corridor": "PIRAIR",
+        })
+        t_ic = TrainPosition.from_dict({
+            "id": "t-ic",
+            "trainNumber": "52",
+            "serviceType": "Intercity",
+            "lat": 39.638,
+            "lng": 22.422,
+            "speed": 130.0,
+            "corridor": None,
+        })
+        t_north = TrainPosition.from_dict({
+            "id": "t-north",
+            "trainNumber": "3672",
+            "serviceType": "Regional",
+            "origin": "Thessaloniki",
+            "destination": "Serres",
+            "lat": 41.09,
+            "lng": 23.55,
+            "speed": 75.0,
+            "corridor": None,
+        })
+        self.store.update_positions([t_suburban, t_ic, t_north])
+
+        # Preset 1: Proastiakos
+        self.app.process_input(ord("1"))
+        train_numbers = [t.position.train_number for t in self.store.get_snapshot().filtered_trains]
+        self.assertIn("2232", train_numbers)
+        self.assertNotIn("3672", train_numbers)
+
+        # Preset 2: PATHE
+        self.app.process_input(ord("2"))
+        train_numbers = [t.position.train_number for t in self.store.get_snapshot().filtered_trains]
+        self.assertIn("52", train_numbers)
+        self.assertNotIn("3672", train_numbers)
+
+        # Preset 3: Northern
+        self.app.process_input(ord("3"))
+        train_numbers = [t.position.train_number for t in self.store.get_snapshot().filtered_trains]
+        self.assertIn("3672", train_numbers)
+        self.assertNotIn("2232", train_numbers)
+
+        # Preset 0: All Greece
+        self.app.process_input(ord("0"))
+        train_numbers = [t.position.train_number for t in self.store.get_snapshot().filtered_trains]
+        self.assertEqual(len(train_numbers), 3)
+
     # ------------------------------------------------------------------
     # Train Selection & Auto-Follow Tests
     # ------------------------------------------------------------------

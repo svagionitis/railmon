@@ -286,7 +286,14 @@ def get_train_color_pair(record: TrainRecord) -> int:
     service_type = (pos.service_type or "").upper()
     corridor = (pos.corridor or "").upper()
 
-    if "PROAST" in train_type or "SUBURBAN" in train_type or corridor == "PROASTIAKOS":
+    if (
+        "PROAST" in train_type
+        or "SUBURBAN" in train_type
+        or "PROAST" in service_type
+        or "SUBURBAN" in service_type
+        or "PROAST" in corridor
+        or corridor in ("PIRAIR", "KIATO", "AERODROMIO", "CHALKIDA")
+    ):
         return PAIR_TRAIN_PROAST
     if "FREIGHT" in train_type or "CARGO" in train_type or "ΕΜΠΟΡ" in service_type:
         return PAIR_TRAIN_FREIGHT
