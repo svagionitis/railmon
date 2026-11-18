@@ -119,6 +119,37 @@ class TelemetryHistoryRow:
     id: Optional[int] = None
 
     @classmethod
+    def from_db_row(cls, row: Any) -> "TelemetryHistoryRow":
+        """Instantiate a TelemetryHistoryRow from a sqlite3.Row or dict-like object."""
+        rec_at = row["recorded_at"]
+        if hasattr(rec_at, "isoformat"):
+            rec_at_str = rec_at.isoformat().replace("+00:00", "Z")
+        else:
+            rec_at_str = str(rec_at).replace("+00:00", "Z")
+
+        keys = row.keys() if hasattr(row, "keys") else row
+
+        return cls(
+            train_number=str(row["train_number"]),
+            recorded_at=rec_at_str,
+            lat=float(row["lat"]),
+            lng=float(row["lng"]),
+            speed=float(row["speed"]),
+            course=float(row["course"]),
+            schedule_id=row["schedule_id"] if row["schedule_id"] is not None else None,
+            track_heading=float(row["track_heading"]) if row["track_heading"] is not None else None,
+            altitude=float(row["altitude"]) if row["altitude"] is not None else None,
+            delay_min=int(row["delay_min"]) if row["delay_min"] is not None else 0,
+            status=str(row["status"]) if row["status"] is not None else "Κανονική",
+            progress=float(row["progress"]) if row["progress"] is not None else None,
+            chainage_m=int(row["chainage_m"]) if row["chainage_m"] is not None else None,
+            dist_to_dest_m=int(row["dist_to_dest_m"]) if row["dist_to_dest_m"] is not None else None,
+            next_station=row["next_station"] if row["next_station"] is not None else None,
+            corridor=row["corridor"] if row["corridor"] is not None else None,
+            id=int(row["id"]) if "id" in keys and row["id"] is not None else None,
+        )
+
+    @classmethod
     def from_train_position(
         cls, pos: TrainPosition, recorded_at: Optional[str] = None
     ) -> "TelemetryHistoryRow":
@@ -176,6 +207,32 @@ class RecordingSessionDB:
     total_records_written: int = 0
     session_id: Optional[int] = None
 
+    @classmethod
+    def from_db_row(cls, row: Any) -> "RecordingSessionDB":
+        """Instantiate a RecordingSessionDB from a sqlite3.Row or dict-like object."""
+        started = row["started_at"]
+        started_str = (
+            started.isoformat().replace("+00:00", "Z")
+            if hasattr(started, "isoformat")
+            else str(started).replace("+00:00", "Z")
+        )
+        ended = row["ended_at"]
+        ended_str = (
+            ended.isoformat().replace("+00:00", "Z")
+            if hasattr(ended, "isoformat")
+            else (str(ended).replace("+00:00", "Z") if ended is not None else None)
+        )
+        keys = row.keys() if hasattr(row, "keys") else row
+
+        return cls(
+            started_at=started_str,
+            mode=str(row["mode"]),
+            client_version=str(row["client_version"]),
+            ended_at=ended_str,
+            total_records_written=int(row["total_records_written"] or 0),
+            session_id=int(row["session_id"]) if "session_id" in keys and row["session_id"] is not None else None,
+        )
+
     def to_db_row(self) -> Tuple[Any, ...]:
         """Convert dataclass to parameter tuple matching INSERT statement."""
         return (
@@ -185,3 +242,196 @@ class RecordingSessionDB:
             self.total_records_written,
             self.client_version,
         )
+
+
+@dataclass(frozen=True)
+class TripSummary:
+    """Aggregated summary of a distinct train service recorded in telemetry history."""
+
+    train_number: str
+    service_date: str
+    first_seen: str
+    last_seen: str
+    total_points: int
+    max_delay_min: int
+    avg_delay_min: float
+    max_speed_kmh: float
+    avg_speed_kmh: float
+    schedule_id: Optional[str] = None
+    corridor: Optional[str] = None
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+
+    @classmethod
+    def from_db_row(cls, row: Any) -> "TripSummary":
+        """Instantiate a TripSummary from a sqlite3.Row or dict-like object."""
+        first_seen = row["first_seen"]
+        first_seen_str = (
+            first_seen.isoformat().replace("+00:00", "Z")
+            if hasattr(first_seen, "isoformat")
+            else str(first_seen).replace("+00:00", "Z")
+        )
+        last_seen = row["last_seen"]
+        last_seen_str = (
+            last_seen.isoformat().replace("+00:00", "Z")
+            if hasattr(last_seen, "isoformat")
+            else str(last_seen).replace("+00:00", "Z")
+        )
+        keys = row.keys() if hasattr(row, "keys") else row
+
+        return cls(
+            train_number=str(row["train_number"]),
+            service_date=str(row["service_date"]),
+            first_seen=first_seen_str,
+            last_seen=last_seen_str,
+            total_points=int(row["total_points"]),
+            max_delay_min=int(row["max_delay_min"] or 0),
+            avg_delay_min=float(row["avg_delay_min"] or 0.0),
+            max_speed_kmh=float(row["max_speed_kmh"] or 0.0),
+            avg_speed_kmh=float(row["avg_speed_kmh"] or 0.0),
+            schedule_id=row["schedule_id"]
+            if "schedule_id" in keys and row["schedule_id"] is not None
+            else None,
+            corridor=row["corridor"]
+            if "corridor" in keys and row["corridor"] is not None
+            else None,
+            origin=row["origin"]
+            if "origin" in keys and row["origin"] is not None
+            else None,
+            destination=row["destination"]
+            if "destination" in keys and row["destination"] is not None
+            else None,
+        )
+
+
+@dataclass(frozen=True)
+class CorridorPunctualitySummary:
+    """Operational punctuality and delay metrics for a railway corridor."""
+
+    corridor: str
+    total_trips: int
+    total_observations: int
+    avg_delay_min: float
+    max_delay_min: int
+    on_time_count: int
+    delayed_count: int
+    severe_delay_count: int
+    punctuality_rate_pct: float
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+    @classmethod
+    def from_db_row(
+        cls,
+        row: Any,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> "CorridorPunctualitySummary":
+        """Instantiate a CorridorPunctualitySummary from a sqlite3.Row or dict-like object."""
+        return cls(
+            corridor=str(row["corridor"]),
+            total_trips=int(row["total_trips"]),
+            total_observations=int(row["total_observations"]),
+            avg_delay_min=float(row["avg_delay_min"] or 0.0),
+            max_delay_min=int(row["max_delay_min"] or 0),
+            on_time_count=int(row["on_time_count"] or 0),
+            delayed_count=int(row["delayed_count"] or 0),
+            severe_delay_count=int(row["severe_delay_count"] or 0),
+            punctuality_rate_pct=float(row["punctuality_rate_pct"] or 0.0),
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+
+@dataclass(frozen=True)
+class StationDwellRecord:
+    """Station stop and dwell duration analysis derived from telemetry speed profiles."""
+
+    train_number: str
+    station_name: str
+    arrival_time: str
+    departure_time: str
+    dwell_seconds: int
+    arrival_delay_min: int
+    departure_delay_min: int
+
+    @classmethod
+    def from_db_row(cls, row: Any) -> "StationDwellRecord":
+        """Instantiate a StationDwellRecord from a sqlite3.Row or dict-like object."""
+        arr = row["arrival_time"]
+        arr_str = (
+            arr.isoformat().replace("+00:00", "Z")
+            if hasattr(arr, "isoformat")
+            else str(arr).replace("+00:00", "Z")
+        )
+        dep = row["departure_time"]
+        dep_str = (
+            dep.isoformat().replace("+00:00", "Z")
+            if hasattr(dep, "isoformat")
+            else str(dep).replace("+00:00", "Z")
+        )
+
+        return cls(
+            train_number=str(row["train_number"]),
+            station_name=str(row["station_name"]),
+            arrival_time=arr_str,
+            departure_time=dep_str,
+            dwell_seconds=int(row["dwell_seconds"] or 0),
+            arrival_delay_min=int(row["arrival_delay_min"] or 0),
+            departure_delay_min=int(row["departure_delay_min"] or 0),
+        )
+
+
+@dataclass(frozen=True)
+class SpeedProfilePoint:
+    """Spatial and kinematic point along a railway track for speed/chainage profiling."""
+
+    recorded_at: str
+    speed_kmh: float
+    lat: float
+    lng: float
+    chainage_m: Optional[int] = None
+    dist_to_dest_m: Optional[int] = None
+    altitude: Optional[float] = None
+
+    @classmethod
+    def from_db_row(cls, row: Any) -> "SpeedProfilePoint":
+        """Instantiate a SpeedProfilePoint from a sqlite3.Row or dict-like object."""
+        rec = row["recorded_at"]
+        rec_str = (
+            rec.isoformat().replace("+00:00", "Z")
+            if hasattr(rec, "isoformat")
+            else str(rec).replace("+00:00", "Z")
+        )
+        keys = row.keys() if hasattr(row, "keys") else row
+
+        return cls(
+            recorded_at=rec_str,
+            speed_kmh=float(row["speed"]),
+            lat=float(row["lat"]),
+            lng=float(row["lng"]),
+            chainage_m=int(row["chainage_m"])
+            if "chainage_m" in keys and row["chainage_m"] is not None
+            else None,
+            dist_to_dest_m=int(row["dist_to_dest_m"])
+            if "dist_to_dest_m" in keys and row["dist_to_dest_m"] is not None
+            else None,
+            altitude=float(row["altitude"])
+            if "altitude" in keys and row["altitude"] is not None
+            else None,
+        )
+
+
+@dataclass(frozen=True)
+class DatabaseStats:
+    """High-level storage and audit metrics for the SQLite database."""
+
+    total_telemetry_rows: int
+    total_trains: int
+    total_trips: int
+    total_sessions: int
+    file_size_bytes: int
+    earliest_record: Optional[str]
+    latest_record: Optional[str]
+    wal_mode_enabled: bool
+

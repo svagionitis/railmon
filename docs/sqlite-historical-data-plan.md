@@ -326,6 +326,7 @@ train-tracker-railway-gov-gr/
 - **Deliverables:** Verified asynchronous batch writer with zero thread contention.
 
 ### Phase 3: Historical Repository & Query Engine
+*(See detailed specification in [`docs/storage-phase-3-historical-repository-and-query-engine.md`](./storage-phase-3-historical-repository-and-query-engine.md))*
 - Implement `storage/repository.py` (`HistoricalRepository`):
   - `get_train_history(train_number, start_time, end_time) -> List[TelemetryHistoryRow]`
   - `get_corridor_punctuality(corridor, date) -> Dict[str, Any]`
