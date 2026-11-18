@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (1 P0 blocker, 9 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 9 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
@@ -23,7 +23,7 @@
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
 | Security & Data Protection        |  5/10  | Unvalidated PRAGMA f-string; no 0600 umask   |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
-| Storage Retention & Disk Bounds   |  3/10  | No retention purge; no disk_usage check      |
+| Storage Retention & Disk Bounds   |  9/10  | P0-6 fixed; archival & disk_usage check      |
 | Packaging & Versioning            |  3/10  | Missing pyproject.toml and __version__       |
 +-----------------------------------+--------+----------------------------------------------+
 ```
@@ -319,13 +319,13 @@ sequenceDiagram
 
 ---
 
-### P0-6: Unbounded Storage Growth & Missing Disk-Full Circuit Breaker
+### P0-6: Unbounded Storage Growth & Missing Disk-Full Circuit Breaker [RESOLVED]
 
-- **Location:** [`../storage/recorder.py`](../storage/recorder.py), [`../storage/repository.py`](../storage/repository.py), [`../train_tracker.py`](../train_tracker.py#L274-L285)
-- **Root Cause:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L26-L29). No `--retention-days` option, no historical row pruning routine, and no `shutil.disk_usage()` check exist before batch commits.
+- **Location:** [`../storage/recorder.py`](../storage/recorder.py), [`../storage/repository.py`](../storage/repository.py), [`../train_tracker.py`](../train_tracker.py#L274-L285) | **Plan:** [`./p0-6-unbounded-storage-disk-circuit-breaker-fix-plan.md`](./p0-6-unbounded-storage-disk-circuit-breaker-fix-plan.md)
+- **Root Cause:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L26-L29). No `--retention-days` option, no zero-data-loss historical row archival routine, and no `shutil.disk_usage()` check exist before batch commits.
 - **Fix:**
   1. Check `shutil.disk_usage(parent_dir).free < 100 * 1024 * 1024` inside `TelemetryRecorder._flush_buffer()`; if below 100 MB, log `CRITICAL` and halt recording.
-  2. Add `HistoricalRepository.purge_before(cutoff_iso: str) -> int` and expose `--retention-days` on `railmon record`.
+  2. Add `HistoricalRepository.archive_before(cutoff_iso: str, archive_path: Optional[str] = None) -> int` to move aged telemetry and parent metadata into an archive SQLite database before evicting from the hot database, and expose `--retention-days` / `--archive-db` on `railmon record`.
 
 ---
 
@@ -426,7 +426,7 @@ sequenceDiagram
 |  3. Trap SIGTERM/SIGINT/SIGHUP & checkpoint WAL on recorder shutdown    |
 |  4. Wire TUIApp.toggle_pause() to StreamWorker.pause()/resume()         |
 |  5. Persist thread-local SQLite connections + BEGIN IMMEDIATE + timeout |
-|  6. Add shutil.disk_usage circuit breaker & --retention-days purge      |
+|  6. Add shutil.disk_usage circuit breaker & --retention-days archival   |
 +-------------------------------------------------------------------------+
                                     |
                                     v

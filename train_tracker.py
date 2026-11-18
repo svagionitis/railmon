@@ -262,6 +262,17 @@ class RailwayGovClient:
                     time.sleep(reconnect_delay)
 
 
+def _positive_int(val: str) -> int:
+    """Argparse validator ensuring a positive integer (> 0)."""
+    try:
+        parsed = int(val)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid int value: '{val}'") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"value must be a positive integer (> 0), got {parsed}")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct command-line argument parser for railmon supporting stream, schedules, record, and history."""
     parser = argparse.ArgumentParser(
@@ -321,6 +332,18 @@ Examples:
         help="Disable deadband filtering (record every raw position update without compression).",
     )
     parser.add_argument(
+        "--retention-days",
+        type=_positive_int,
+        default=None,
+        help="Rolling retention window in days; archives older telemetry rows to an archive SQLite DB.",
+    )
+    parser.add_argument(
+        "--archive-db",
+        type=str,
+        default=None,
+        help="Path to archive SQLite database for aged telemetry (default: <db_stem>_archive.db).",
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
@@ -357,6 +380,18 @@ Examples:
     p_rec.add_argument("--batch-size", type=int, default=50, help="Maximum buffered rows before commit (default: 50).")
     p_rec.add_argument("--flush-interval", type=float, default=2.0, help="Maximum buffer age in seconds before flush (default: 2.0).")
     p_rec.add_argument("--quiet", action="store_true", help="Suppress periodic terminal status updates.")
+    p_rec.add_argument(
+        "--retention-days",
+        type=_positive_int,
+        default=argparse.SUPPRESS,
+        help="Rolling retention window in days; archives older telemetry rows to an archive SQLite DB.",
+    )
+    p_rec.add_argument(
+        "--archive-db",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Path to archive SQLite database for aged telemetry (default: <db_stem>_archive.db).",
+    )
 
     # 4. history
     p_hist = subparsers.add_parser(
@@ -411,6 +446,12 @@ Examples:
     p_exp.add_argument("--start", type=str, help="Start timestamp filter.")
     p_exp.add_argument("--end", type=str, help="End timestamp filter.")
 
+    # history archive
+    p_arch = hist_subs.add_parser("archive", parents=[db_parent], help="Archive aged telemetry rows to an archive SQLite database.")
+    p_arch.add_argument("--before", type=str, help="ISO-8601 UTC cutoff timestamp (e.g. 2026-11-01T00:00:00Z).")
+    p_arch.add_argument("--retention-days", type=_positive_int, help="Archive telemetry rows older than N days.")
+    p_arch.add_argument("--archive-db", type=str, help="Target archive SQLite database file path (default: <db_stem>_archive.db).")
+
     return parser
 
 
@@ -421,6 +462,8 @@ def run_tui_mode(
     record: bool = False,
     db_path: str = "railway_history.db",
     enable_deadband: bool = True,
+    retention_days: Optional[int] = None,
+    archive_path: Optional[str] = None,
 ) -> None:
     """Launch the interactive curses terminal map application.
 
@@ -461,6 +504,8 @@ def run_tui_mode(
             RecorderConfig(
                 mode="demo" if demo else "live",
                 enable_deadband=enable_deadband,
+                retention_days=retention_days,
+                archive_path=archive_path,
             ),
         )
         recorder.start()
@@ -516,6 +561,8 @@ def run_plain_stream_mode(
     record: bool = False,
     db_path: str = "railway_history.db",
     enable_deadband: bool = True,
+    retention_days: Optional[int] = None,
+    archive_path: Optional[str] = None,
 ) -> None:
     """Stream train positions to stdout in formatted tabular text.
 
@@ -539,6 +586,8 @@ def run_plain_stream_mode(
             RecorderConfig(
                 mode="demo" if demo else "live",
                 enable_deadband=enable_deadband,
+                retention_days=retention_days,
+                archive_path=archive_path,
             ),
         )
         recorder.start()
@@ -613,6 +662,8 @@ def run_record_mode(
     flush_interval_sec: float = 2.0,
     quiet: bool = False,
     reconnect_delay: float = 3.0,
+    retention_days: Optional[int] = None,
+    archive_path: Optional[str] = None,
 ) -> int:
     """Execute dedicated headless recording daemon with terminal metrics display.
 
@@ -640,6 +691,8 @@ def run_record_mode(
         flush_interval_sec=flush_interval_sec,
         enable_deadband=enable_deadband,
         mode="demo" if demo else "live",
+        retention_days=retention_days,
+        archive_path=archive_path,
     )
     recorder = TelemetryRecorder(db, config)
     recorder.start()
@@ -678,9 +731,13 @@ def run_record_mode(
                 )
 
             for batch in stream:
-                if stop_event.is_set():
+                if stop_event.is_set() or recorder.disk_full_tripped:
+                    stop_event.set()
                     break
                 recorder.enqueue_batch(batch)
+                if recorder.disk_full_tripped:
+                    stop_event.set()
+                    break
 
                 now = time.time()
                 if not quiet and (now - last_stat_time) >= 5.0:
@@ -850,6 +907,25 @@ def run_history_mode(args: argparse.Namespace) -> int:
                             "end_time": args.end,
                         },
                     )
+
+        elif action == "archive":
+            from datetime import datetime, timedelta, timezone
+
+            before_iso = getattr(args, "before", None)
+            ret_days = getattr(args, "retention_days", None)
+            if not before_iso and ret_days is None:
+                print(
+                    "[Error] Specify either '--before <ISO-TIMESTAMP>' or '--retention-days <DAYS>' for 'railmon history archive'.",
+                    file=sys.stderr,
+                )
+                return 1
+            if not before_iso and ret_days is not None:
+                cutoff_dt = datetime.now(timezone.utc) - timedelta(days=ret_days)
+                before_iso = cutoff_dt.isoformat().replace("+00:00", "Z")
+
+            arch_path = repo.resolve_archive_path(getattr(args, "archive_db", None))
+            archived_count = repo.archive_before(str(before_iso), archive_path=arch_path)
+            print(f"Archived {archived_count:,d} telemetry records older than {before_iso} to {arch_path}")
     finally:
         db.close()
     return 0
@@ -904,29 +980,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             run_schedules_mode()
         elif args.mode == "record":
             enable_deadband = not getattr(args, "no_filter_deadband", False)
-            return run_record_mode(
-                db_path=getattr(args, "db", "railway_history.db"),
-                demo=getattr(args, "demo", False),
-                enable_deadband=enable_deadband,
-                batch_size=getattr(args, "batch_size", 50),
-                flush_interval_sec=getattr(args, "flush_interval", 2.0),
-                quiet=getattr(args, "quiet", False),
-                reconnect_delay=getattr(args, "reconnect_delay", 3.0),
-            )
+            rec_kwargs: Dict[str, Any] = {
+                "db_path": getattr(args, "db", "railway_history.db"),
+                "demo": getattr(args, "demo", False),
+                "enable_deadband": enable_deadband,
+                "batch_size": getattr(args, "batch_size", 50),
+                "flush_interval_sec": getattr(args, "flush_interval", 2.0),
+                "quiet": getattr(args, "quiet", False),
+                "reconnect_delay": getattr(args, "reconnect_delay", 3.0),
+            }
+            if getattr(args, "retention_days", None) is not None:
+                rec_kwargs["retention_days"] = args.retention_days
+            if getattr(args, "archive_db", None) is not None:
+                rec_kwargs["archive_path"] = args.archive_db
+            return run_record_mode(**rec_kwargs)
         elif args.mode == "history":
             return run_history_mode(args)
         elif args.tui:
             is_rec = getattr(args, "record", False)
             if is_rec:
                 enable_deadband = not getattr(args, "no_filter_deadband", False)
-                run_tui_mode(
-                    demo=args.demo,
-                    fps=args.fps,
-                    reconnect_delay=args.reconnect_delay,
-                    record=True,
-                    db_path=getattr(args, "db", "railway_history.db"),
-                    enable_deadband=enable_deadband,
-                )
+                tui_kwargs: Dict[str, Any] = {
+                    "demo": args.demo,
+                    "fps": args.fps,
+                    "reconnect_delay": args.reconnect_delay,
+                    "record": True,
+                    "db_path": getattr(args, "db", "railway_history.db"),
+                    "enable_deadband": enable_deadband,
+                }
+                if getattr(args, "retention_days", None) is not None:
+                    tui_kwargs["retention_days"] = args.retention_days
+                if getattr(args, "archive_db", None) is not None:
+                    tui_kwargs["archive_path"] = args.archive_db
+                run_tui_mode(**tui_kwargs)
             else:
                 run_tui_mode(
                     demo=args.demo,
@@ -937,13 +1023,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             is_rec = getattr(args, "record", False)
             if is_rec:
                 enable_deadband = not getattr(args, "no_filter_deadband", False)
-                run_plain_stream_mode(
-                    demo=args.demo,
-                    reconnect_delay=args.reconnect_delay,
-                    record=True,
-                    db_path=getattr(args, "db", "railway_history.db"),
-                    enable_deadband=enable_deadband,
-                )
+                stream_kwargs: Dict[str, Any] = {
+                    "demo": args.demo,
+                    "reconnect_delay": args.reconnect_delay,
+                    "record": True,
+                    "db_path": getattr(args, "db", "railway_history.db"),
+                    "enable_deadband": enable_deadband,
+                }
+                if getattr(args, "retention_days", None) is not None:
+                    stream_kwargs["retention_days"] = args.retention_days
+                if getattr(args, "archive_db", None) is not None:
+                    stream_kwargs["archive_path"] = args.archive_db
+                run_plain_stream_mode(**stream_kwargs)
             else:
                 run_plain_stream_mode(
                     demo=args.demo,

@@ -481,6 +481,120 @@ class TestHistoricalRepository(unittest.TestCase):
         self.assertEqual(len(write_errors), 0, f"Write errors occurred: {write_errors}")
         self.assertEqual(len(read_errors), 0, f"Read errors occurred: {read_errors}")
 
+    def test_archive_before_moves_expired_rows_and_metadata_to_archive_db(self):
+        """archive_before must copy aged telemetry and parent metadata to archive DB before deleting from hot DB."""
+        archive_db_path = os.path.join(self.temp_dir, "test_repo_archive.db")
+
+        with self.db.transaction() as cur:
+            cur.execute(
+                """
+                INSERT INTO scheduled_trips (schedule_id, train_number, origin, destination, corridor, service_date)
+                VALUES ('SCH-OLD', '1597', 'ATH', 'SKG', 'ATH-SKG', '2026-10-01');
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO schedule_stops (schedule_id, stop_sequence, station_id, station_name, delay_sec)
+                VALUES ('SCH-OLD', 1, 'ST-ATH', 'ATHENS', 0);
+                """
+            )
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                    track_heading, altitude, delay_min, status, progress, chainage_m,
+                    dist_to_dest_m, next_station, corridor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    ('1597', 'SCH-OLD', '2026-10-01T08:00:00Z', 38.001, 23.701, 50.0, 180.0, 180.0, 50.0, 0, 'Normal', 0.1, 1000, 499000, 'SKA', 'ATH-SKG'),
+                    ('1597', 'SCH-OLD', '2026-10-01T08:05:00Z', 38.020, 23.715, 90.0, 180.0, 180.0, 55.0, 1, 'Normal', 0.2, 5000, 495000, 'OINOI', 'ATH-SKG'),
+                ],
+            )
+
+        archived_count = self.repo.archive_before(
+            "2026-11-01T00:00:00Z",
+            archive_path=archive_db_path,
+        )
+        self.assertEqual(archived_count, 2)
+        self.assertTrue(os.path.exists(archive_db_path))
+
+        # Verify hot database evicted the 2 aged rows and old unreferenced trip, keeping the 8 active rows
+        hot_stats = self.repo.get_database_stats()
+        self.assertEqual(hot_stats.total_telemetry_rows, 8)
+        self.assertEqual(hot_stats.total_trips, 1)
+        hot_1597 = self.repo.get_train_history("1597")
+        self.assertEqual(len(hot_1597), 4)
+        self.assertTrue(all(r.recorded_at >= "2026-11-18" for r in hot_1597))
+
+        # Verify archive database contains the 2 archived rows + parent train, trip, and stop
+        archive_db = Database(archive_db_path)
+        try:
+            archive_repo = HistoricalRepository(archive_db)
+            arch_rows = archive_repo.get_train_history("1597")
+            self.assertEqual(len(arch_rows), 2)
+            self.assertEqual(arch_rows[0].recorded_at, "2026-10-01T08:00:00Z")
+            self.assertEqual(arch_rows[1].recorded_at, "2026-10-01T08:05:00Z")
+
+            arch_trips = archive_repo.get_active_trips(service_date="2026-10-01")
+            self.assertEqual(len(arch_trips), 1)
+            self.assertEqual(arch_trips[0].schedule_id, "SCH-OLD")
+            self.assertEqual(arch_trips[0].origin, "ATH")
+
+            with archive_db.connection() as arch_conn:
+                cur = arch_conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM schedule_stops WHERE schedule_id = 'SCH-OLD'")
+                self.assertEqual(cur.fetchone()[0], 1)
+        finally:
+            archive_db.close()
+
+    def test_archive_before_is_idempotent_and_accumulates_windows(self):
+        """archive_before must accumulate sequential cutoff windows into the same archive DB without loss."""
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                    track_heading, altitude, delay_min, status, progress, chainage_m,
+                    dist_to_dest_m, next_station, corridor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    ('1597', None, '2026-10-01T08:00:00Z', 38.001, 23.701, 50.0, 180.0, 180.0, 50.0, 0, 'Normal', 0.1, 1000, 499000, 'SKA', 'ATH-SKG'),
+                    ('1597', None, '2026-10-20T08:00:00Z', 38.020, 23.715, 90.0, 180.0, 180.0, 55.0, 1, 'Normal', 0.2, 5000, 495000, 'OINOI', 'ATH-SKG'),
+                ],
+            )
+
+        # First window (< 2026-10-15) using default archive path (<stem>_archive.db)
+        count1 = self.repo.archive_before("2026-10-15T00:00:00Z")
+        self.assertEqual(count1, 1)
+
+        # Re-running with same cutoff archives 0 rows
+        count_repeat = self.repo.archive_before("2026-10-15T00:00:00Z")
+        self.assertEqual(count_repeat, 0)
+
+        # Second window (< 2026-11-01) appends to existing archive DB
+        count2 = self.repo.archive_before("2026-11-01T00:00:00Z")
+        self.assertEqual(count2, 1)
+
+        default_archive_path = self.repo.resolve_archive_path()
+        archive_db = Database(default_archive_path)
+        try:
+            archive_repo = HistoricalRepository(archive_db)
+            arch_rows = archive_repo.get_train_history("1597")
+            self.assertEqual(len(arch_rows), 2)
+        finally:
+            archive_db.close()
+
+    def test_archive_before_validates_cutoff_and_same_db_path(self):
+        """archive_before must reject empty cutoff timestamps or archiving into the active DB path."""
+        with self.assertRaises(ValueError):
+            self.repo.archive_before("")
+        with self.assertRaises(ValueError):
+            self.repo.archive_before("   ")
+        with self.assertRaises(ValueError):
+            self.repo.archive_before("2026-11-01T00:00:00Z", archive_path=self.db_path)
+
 
 if __name__ == "__main__":
     unittest.main()

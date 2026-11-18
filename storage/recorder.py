@@ -3,9 +3,11 @@ Asynchronous background telemetry recorder and batch persistence daemon.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
+import os
 import queue
+import shutil
 import threading
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -16,6 +18,8 @@ from storage.models import TelemetryHistoryRow
 from train_tracker import TrainPosition
 
 logger = logging.getLogger("railmon." + __name__)
+
+MIN_FREE_DISK_BYTES: int = 100 * 1024 * 1024  # 100 MB disk-full circuit breaker threshold
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,10 @@ class RecorderConfig:
     deadband_config: Optional[DeadbandConfig] = None
     client_version: str = "1.0.0"
     mode: str = "live"                       # 'live' or 'demo'
+    retention_days: Optional[int] = None     # Rolling retention window in days (archives older telemetry)
+    archive_path: Optional[str] = None       # Target SQLite archive file path (defaults to <db_stem>_archive.db)
+    min_free_disk_bytes: int = MIN_FREE_DISK_BYTES
+    retention_archive_interval_sec: float = 3600.0
 
 
 class TelemetryRecorder:
@@ -44,6 +52,9 @@ class TelemetryRecorder:
     ):
         self.db = db
         self.config = config or RecorderConfig()
+        if self.config.retention_days is not None and self.config.retention_days <= 0:
+            raise ValueError("retention_days must be a positive integer")
+
         self.filter = (
             DeadbandFilter(self.config.deadband_config)
             if self.config.enable_deadband
@@ -60,7 +71,10 @@ class TelemetryRecorder:
         self._session_started_at: str = ""
         self._total_records_written: int = 0
         self._total_batches_flushed: int = 0
+        self._total_records_archived: int = 0
         self._last_flush_time: float = 0.0
+        self._last_archive_time: float = 0.0
+        self._disk_full_tripped: bool = False
 
         self._lock = threading.Lock()
 
@@ -74,6 +88,82 @@ class TelemetryRecorder:
         """Return the active audit recording session ID."""
         return self._session_id
 
+    @property
+    def disk_full_tripped(self) -> bool:
+        """Return True if the disk-full circuit breaker has tripped (< 100 MB free)."""
+        return self._disk_full_tripped
+
+    def _has_sufficient_disk_space(self) -> bool:
+        """Probe available disk capacity via shutil.disk_usage; trip circuit breaker if < min_free_disk_bytes."""
+        if self._disk_full_tripped:
+            return False
+        if self.db._is_memory or self.config.min_free_disk_bytes <= 0:
+            return True
+
+        dirs_to_check = [os.path.dirname(os.path.abspath(self.db.db_path)) or "."]
+        if self.config.archive_path and not self.config.archive_path.startswith("file::memory:") and self.config.archive_path != ":memory:":
+            arch_dir = os.path.dirname(os.path.abspath(self.config.archive_path)) or "."
+            if arch_dir not in dirs_to_check:
+                dirs_to_check.append(arch_dir)
+
+        for target_dir in dirs_to_check:
+            check_dir = target_dir if os.path.exists(target_dir) else "."
+            try:
+                usage = shutil.disk_usage(check_dir)
+            except OSError as exc:
+                logger.warning("Unable to query disk usage for '%s': %s", check_dir, exc)
+                continue
+
+            if usage.free < self.config.min_free_disk_bytes:
+                self._disk_full_tripped = True
+                self._stop_event.set()
+                logger.critical(
+                    "Disk space critically low on '%s' (%d bytes free < %d bytes required). "
+                    "Halting TelemetryRecorder to prevent database corruption.",
+                    check_dir,
+                    usage.free,
+                    self.config.min_free_disk_bytes,
+                )
+                while not self._queue.empty():
+                    try:
+                        self._queue.get_nowait()
+                        self._queue.task_done()
+                    except queue.Empty:
+                        break
+                return False
+
+        return True
+
+    def _run_retention_archive(self) -> int:
+        """Archive historical telemetry older than configured retention_days into archive SQLite DB."""
+        if self.config.retention_days is None or self._disk_full_tripped:
+            return 0
+        if not self._has_sufficient_disk_space():
+            return 0
+
+        from storage.repository import HistoricalRepository
+
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(days=self.config.retention_days)
+        cutoff_iso = cutoff_dt.isoformat().replace("+00:00", "Z")
+        try:
+            repo = HistoricalRepository(self.db)
+            target_archive = repo.resolve_archive_path(self.config.archive_path)
+            archived = repo.archive_before(cutoff_iso, archive_path=target_archive)
+            self._total_records_archived += archived
+            self._last_archive_time = time.time()
+            if archived > 0:
+                logger.info(
+                    "Retention policy (--retention-days=%d) archived %d telemetry rows older than %s to '%s'.",
+                    self.config.retention_days,
+                    archived,
+                    cutoff_iso,
+                    target_archive,
+                )
+            return archived
+        except Exception as exc:
+            logger.error("Failed to execute retention archival before %s: %s", cutoff_iso, exc)
+            return 0
+
     def start(self) -> None:
         """Start the background recorder daemon and initialize audit session."""
         with self._lock:
@@ -81,10 +171,19 @@ class TelemetryRecorder:
                 return
 
             self._stop_event.clear()
+            self._disk_full_tripped = False
             self._session_started_at = datetime.utcnow().isoformat() + "Z"
             self._total_records_written = 0
             self._total_batches_flushed = 0
+            self._total_records_archived = 0
             self._last_flush_time = time.time()
+            self._last_archive_time = time.time()
+
+            if not self._has_sufficient_disk_space():
+                return
+
+            if self.config.retention_days is not None:
+                self._run_retention_archive()
 
             # Create session in recording_sessions table
             with self.db.transaction() as cur:
@@ -111,7 +210,7 @@ class TelemetryRecorder:
         and finalize the recording session.
         """
         with self._lock:
-            if not self.is_running:
+            if not self.is_running and not self._disk_full_tripped:
                 return
 
             self._stop_event.set()
@@ -124,31 +223,32 @@ class TelemetryRecorder:
         if self._thread:
             self._thread.join(timeout=timeout_sec)
 
-        # Finalize session audit and checkpoint WAL
+        # Finalize session audit and checkpoint WAL (skip disk writes if disk-full circuit tripped)
         with self._lock:
-            ended_at = datetime.utcnow().isoformat() + "Z"
-            if self._session_id is not None:
-                try:
-                    with self.db.transaction() as cur:
-                        cur.execute(
-                            """
-                            UPDATE recording_sessions
-                            SET ended_at = ?, total_records_written = ?
-                            WHERE session_id = ?
-                            """,
-                            (ended_at, self._total_records_written, self._session_id),
+            if not self._disk_full_tripped:
+                ended_at = datetime.utcnow().isoformat() + "Z"
+                if self._session_id is not None:
+                    try:
+                        with self.db.transaction() as cur:
+                            cur.execute(
+                                """
+                                UPDATE recording_sessions
+                                SET ended_at = ?, total_records_written = ?
+                                WHERE session_id = ?
+                                """,
+                                (ended_at, self._total_records_written, self._session_id),
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to finalize recording session %s: %s",
+                            self._session_id,
+                            exc,
                         )
-                except Exception as exc:
-                    logger.error(
-                        "Failed to finalize recording session %s: %s",
-                        self._session_id,
-                        exc,
-                    )
 
-            try:
-                self.db.checkpoint_wal("TRUNCATE")
-            except Exception as exc:
-                logger.warning("WAL checkpoint on recorder stop encountered an error: %s", exc)
+                try:
+                    self.db.checkpoint_wal("TRUNCATE")
+                except Exception as exc:
+                    logger.warning("WAL checkpoint on recorder stop encountered an error: %s", exc)
 
             logger.info(
                 "TelemetryRecorder stopped. Session %s ended. Total rows written: %d",
@@ -158,9 +258,9 @@ class TelemetryRecorder:
 
     def enqueue(self, position: TrainPosition) -> bool:
         """
-        Enqueue a single train position. Non-blocking; returns False if queue is saturated.
+        Enqueue a single train position. Non-blocking; returns False if queue is saturated or halted.
         """
-        if not self.is_running:
+        if not self.is_running or self._disk_full_tripped or self._stop_event.is_set():
             return False
         try:
             self._queue.put_nowait(position)
@@ -176,7 +276,7 @@ class TelemetryRecorder:
         """
         Enqueue a batch of positions. Non-blocking; returns count of successfully enqueued items.
         """
-        if not self.is_running or not positions:
+        if not self.is_running or self._disk_full_tripped or self._stop_event.is_set() or not positions:
             return 0
         try:
             self._queue.put_nowait(positions)
@@ -218,28 +318,38 @@ class TelemetryRecorder:
                 buffer.clear()
                 self._last_flush_time = time.time()
 
-        # Draining phase on shutdown
-        while not self._queue.empty():
-            try:
-                item = self._queue.get_nowait()
-                if item is not None:
-                    if isinstance(item, list):
-                        buffer.extend(item)
-                    else:
-                        buffer.append(item)
-                self._queue.task_done()
-            except queue.Empty:
-                break
+            if (
+                not self._disk_full_tripped
+                and self.config.retention_days is not None
+                and (now - self._last_archive_time) >= self.config.retention_archive_interval_sec
+            ):
+                self._run_retention_archive()
 
-        if buffer:
-            self._flush_buffer(buffer)
+        # Draining phase on shutdown (skip if disk-full circuit breaker tripped)
+        if not self._disk_full_tripped:
+            while not self._queue.empty():
+                try:
+                    item = self._queue.get_nowait()
+                    if item is not None:
+                        if isinstance(item, list):
+                            buffer.extend(item)
+                        else:
+                            buffer.append(item)
+                    self._queue.task_done()
+                except queue.Empty:
+                    break
+
+            if buffer:
+                self._flush_buffer(buffer)
+                buffer.clear()
+        else:
             buffer.clear()
 
     def _flush_buffer(self, items: List[TrainPosition]) -> int:
         """
         Filter items, extract train records, and write to database within a single transaction.
         """
-        if not items:
+        if not items or self._disk_full_tripped:
             return 0
 
         # Apply deadband filter if configured
@@ -253,6 +363,9 @@ class TelemetryRecorder:
             admitted = items
 
         if not admitted:
+            return 0
+
+        if not self._has_sufficient_disk_space():
             return 0
 
         # Distinct train register rows
@@ -370,6 +483,8 @@ class TelemetryRecorder:
             "queue_size": self._queue.qsize(),
             "total_records_written": self._total_records_written,
             "total_batches_flushed": self._total_batches_flushed,
+            "total_records_archived": self._total_records_archived,
+            "disk_full_tripped": self._disk_full_tripped,
             "filter": filter_stats,
         }
 

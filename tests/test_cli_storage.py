@@ -157,6 +157,47 @@ class TestCLIStorageParsing(unittest.TestCase):
         self.assertEqual(args.feature_type, "LineString")
         self.assertEqual(args.out, "run.geojson")
 
+    def test_record_subcommand_retention_days_and_archive_db_options(self):
+        """TC-CLI-P4-14: 'record' and top-level parser accept --retention-days and --archive-db."""
+        args_rec = self.parser.parse_args([
+            "record",
+            "--retention-days", "30",
+            "--archive-db", "custom_archive.db",
+        ])
+        self.assertEqual(args_rec.mode, "record")
+        self.assertEqual(args_rec.retention_days, 30)
+        self.assertEqual(args_rec.archive_db, "custom_archive.db")
+
+        args_top = self.parser.parse_args([
+            "--record",
+            "--retention-days", "14",
+            "--archive-db", "top_archive.db",
+        ])
+        self.assertTrue(args_top.record)
+        self.assertEqual(args_top.retention_days, 14)
+        self.assertEqual(args_top.archive_db, "top_archive.db")
+
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as cm:
+                self.parser.parse_args(["record", "--retention-days", "0"])
+            self.assertEqual(cm.exception.code, 2)
+
+            with self.assertRaises(SystemExit) as cm2:
+                self.parser.parse_args(["record", "--retention-days", "-5"])
+            self.assertEqual(cm2.exception.code, 2)
+
+    def test_history_archive_subcommand(self):
+        """TC-CLI-P4-16: 'history archive' parses --before, --retention-days, and --archive-db."""
+        args = self.parser.parse_args([
+            "history", "archive",
+            "--before", "2026-11-01T00:00:00Z",
+            "--archive-db", "archived_telemetry.db",
+        ])
+        self.assertEqual(args.mode, "history")
+        self.assertEqual(args.history_action, "archive")
+        self.assertEqual(args.before, "2026-11-01T00:00:00Z")
+        self.assertEqual(args.archive_db, "archived_telemetry.db")
+
 
 class TestCLIRouting(unittest.TestCase):
     """Test suite for main() routing to Phase 4 handlers."""
@@ -208,6 +249,29 @@ class TestCLIRouting(unittest.TestCase):
             record=True,
             db_path="stream_rec.db",
             enable_deadband=True,
+        )
+
+    @patch("train_tracker.run_record_mode", return_value=0)
+    def test_main_passes_retention_days_and_archive_path_to_run_record_mode(self, mock_rec):
+        """TC-CLI-P4-15: main(['record', '--retention-days', '30', '--archive-db', 'arch.db']) forwards archival options."""
+        ret = main([
+            "record",
+            "--demo",
+            "--db", "hot.db",
+            "--retention-days", "30",
+            "--archive-db", "arch.db",
+        ])
+        self.assertEqual(ret, 0)
+        mock_rec.assert_called_once_with(
+            db_path="hot.db",
+            demo=True,
+            enable_deadband=True,
+            batch_size=50,
+            flush_interval_sec=2.0,
+            quiet=False,
+            reconnect_delay=3.0,
+            retention_days=30,
+            archive_path="arch.db",
         )
 
 

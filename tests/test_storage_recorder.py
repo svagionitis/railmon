@@ -367,6 +367,143 @@ class TestTelemetryRecorder(unittest.TestCase):
             self.assertIsNotNone(sess["ended_at"])
             self.assertEqual(sess["total_records_written"], 5)
 
+    def test_disk_full_circuit_breaker_halts_recording_below_100mb(self):
+        """TelemetryRecorder must log CRITICAL, trip circuit breaker, and halt writes if free disk < 100 MB."""
+        from collections import namedtuple
+        from unittest.mock import patch
+
+        DiskUsage = namedtuple("usage", ["total", "used", "free"])
+        low_disk = DiskUsage(
+            total=10 * 1024 * 1024 * 1024,
+            used=10 * 1024 * 1024 * 1024 - 50 * 1024 * 1024,
+            free=50 * 1024 * 1024,  # 50 MB (< 100 MB threshold)
+        )
+
+        config = RecorderConfig(
+            batch_size=2,
+            flush_interval_sec=0.1,
+            enable_deadband=False,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+        self.recorder.start()
+
+        with patch("shutil.disk_usage", return_value=low_disk):
+            with self.assertLogs("railmon.storage.recorder", level="CRITICAL") as cm:
+                self.recorder.enqueue_batch([
+                    _create_sample_position("LOW-1", lat=38.01),
+                    _create_sample_position("LOW-2", lat=38.02),
+                ])
+                time.sleep(0.3)
+
+            self.assertTrue(any("critically low" in msg.lower() or "disk" in msg.lower() for msg in cm.output))
+            self.assertTrue(self.recorder.disk_full_tripped)
+            # Subsequent enqueue calls must be rejected immediately
+            self.assertFalse(self.recorder.enqueue(_create_sample_position("LOW-3")))
+            self.assertEqual(self.recorder.enqueue_batch([_create_sample_position("LOW-4")]), 0)
+
+        self.recorder.stop()
+
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS total FROM telemetry_history")
+            self.assertEqual(cur.fetchone()["total"], 0)
+
+    def test_disk_full_circuit_breaker_allows_writes_above_100mb(self):
+        """TelemetryRecorder must commit normally when free disk space >= 100 MB."""
+        from collections import namedtuple
+        from unittest.mock import patch
+
+        DiskUsage = namedtuple("usage", ["total", "used", "free"])
+        healthy_disk = DiskUsage(
+            total=10 * 1024 * 1024 * 1024,
+            used=5 * 1024 * 1024 * 1024,
+            free=500 * 1024 * 1024,  # 500 MB (>= 100 MB threshold)
+        )
+
+        config = RecorderConfig(
+            batch_size=2,
+            flush_interval_sec=0.1,
+            enable_deadband=False,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+
+        with patch("shutil.disk_usage", return_value=healthy_disk):
+            self.recorder.start()
+            self.recorder.enqueue_batch([
+                _create_sample_position("OK-1", lat=38.01),
+                _create_sample_position("OK-2", lat=38.02),
+            ])
+            time.sleep(0.3)
+            self.assertFalse(self.recorder.disk_full_tripped)
+            self.recorder.stop()
+
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS total FROM telemetry_history")
+            self.assertEqual(cur.fetchone()["total"], 2)
+
+    def test_recorder_retention_days_archives_aged_telemetry_on_start(self):
+        """Starting TelemetryRecorder with retention_days must archive aged telemetry into archive DB."""
+        from storage.repository import HistoricalRepository
+
+        archive_db_path = os.path.join(self.temp_dir, "recorder_archive.db")
+
+        # Seed aged row (2020-01-01) and recent row
+        with self.db.transaction() as cur:
+            cur.execute(
+                """
+                INSERT INTO trains (train_number, default_name, first_observed_at, last_observed_at)
+                VALUES ('IC50', 'Intercity 50', '2020-01-01T08:00:00Z', '2026-11-18T12:00:00Z');
+                """
+            )
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    ("IC50", None, "2020-01-01T08:00:00Z", 38.0, 23.5, 100.0, 10.0),
+                    ("IC50", None, "2020-01-01T08:05:00Z", 38.1, 23.6, 110.0, 12.0),
+                ],
+            )
+
+        config = RecorderConfig(
+            batch_size=1,
+            flush_interval_sec=0.1,
+            enable_deadband=False,
+            retention_days=30,
+            archive_path=archive_db_path,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+        self.recorder.start()
+
+        # Enqueue a live position
+        self.recorder.enqueue(_create_sample_position("IC50", timestamp="2026-11-18T12:00:00Z"))
+        time.sleep(0.25)
+        self.recorder.stop()
+
+        # Verify hot DB only has the 1 recent row
+        hot_repo = HistoricalRepository(self.db)
+        hot_rows = hot_repo.get_train_history("IC50")
+        self.assertEqual(len(hot_rows), 1)
+        self.assertEqual(hot_rows[0].recorded_at, "2026-11-18T12:00:00Z")
+
+        # Verify archive DB received the 2 aged rows from 2020-01-01
+        self.assertTrue(os.path.exists(archive_db_path))
+        arch_db = Database(archive_db_path)
+        try:
+            arch_repo = HistoricalRepository(arch_db)
+            arch_rows = arch_repo.get_train_history("IC50")
+            self.assertEqual(len(arch_rows), 2)
+            self.assertEqual(arch_rows[0].recorded_at, "2020-01-01T08:00:00Z")
+            self.assertEqual(arch_rows[1].recorded_at, "2020-01-01T08:05:00Z")
+        finally:
+            arch_db.close()
+
+        stats = self.recorder.get_stats()
+        self.assertEqual(stats.get("total_records_archived"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

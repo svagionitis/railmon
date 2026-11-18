@@ -770,3 +770,238 @@ class HistoricalRepository:
             latest_record=str(latest) if latest is not None else None,
             wal_mode_enabled=wal_enabled,
         )
+
+    def resolve_archive_path(self, archive_path: Optional[str] = None) -> str:
+        """Resolve and validate target SQLite archive database path."""
+        if archive_path is not None and archive_path.strip():
+            resolved = archive_path.strip()
+        elif self.db._is_memory:
+            raise ValueError("archive_path must be explicitly provided for in-memory databases")
+        else:
+            base, ext = os.path.splitext(self.db.db_path)
+            resolved = f"{base}_archive{ext or '.db'}"
+
+        if not self.db._is_memory and not resolved.startswith("file::memory:") and resolved != ":memory:":
+            if os.path.abspath(resolved) == os.path.abspath(self.db.db_path):
+                raise ValueError("archive_path cannot be identical to the active database path")
+        return resolved
+
+    def archive_before(
+        self,
+        cutoff_iso: str,
+        archive_path: Optional[str] = None,
+    ) -> int:
+        """
+        Archive historical telemetry records older than cutoff_iso (exclusive)
+        along with referenced trains, scheduled_trips, and schedule_stops into
+        an archive SQLite database before evicting them from the hot database.
+
+        Args:
+            cutoff_iso: ISO-8601 UTC timestamp cutoff (e.g., '2026-11-01T00:00:00Z').
+            archive_path: Target archive SQLite database path (defaults to <db_stem>_archive.db).
+
+        Returns:
+            Number of telemetry_history rows archived and removed from the hot database.
+        """
+        if not cutoff_iso or not cutoff_iso.strip():
+            raise ValueError("cutoff_iso must be a non-empty ISO-8601 timestamp string")
+
+        cutoff_clean = cutoff_iso.strip()
+        cutoff_date = cutoff_clean[:10]
+        target_archive_path = self.resolve_archive_path(archive_path)
+
+        # 1. Read aged telemetry rows and referenced parent records from hot database
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                        track_heading, altitude, delay_min, status, progress, chainage_m,
+                        dist_to_dest_m, next_station, corridor
+                    FROM telemetry_history
+                    WHERE recorded_at < ?
+                    ORDER BY recorded_at ASC, id ASC;
+                    """,
+                    (cutoff_clean,),
+                )
+                telemetry_rows = [tuple(r) for r in cur.fetchall()]
+                if not telemetry_rows:
+                    return 0
+
+                train_numbers = sorted({str(r[1]) for r in telemetry_rows if r[1] is not None})
+                schedule_ids = {str(r[2]) for r in telemetry_rows if r[2] is not None}
+
+                if len(cutoff_date) == 10:
+                    cur.execute(
+                        """
+                        SELECT schedule_id, train_number
+                        FROM scheduled_trips
+                        WHERE service_date < ?;
+                        """,
+                        (cutoff_date,),
+                    )
+                    for row in cur.fetchall():
+                        schedule_ids.add(str(row[0]))
+                        if row[1] is not None:
+                            train_numbers.append(str(row[1]))
+                    train_numbers = sorted(set(train_numbers))
+
+                train_rows: List[ Any ] = []
+                if train_numbers:
+                    placeholders = ",".join("?" for _ in train_numbers)
+                    cur.execute(
+                        f"""
+                        SELECT
+                            train_number, locomotive_number, default_name, train_type,
+                            service_type, first_observed_at, last_observed_at
+                        FROM trains
+                        WHERE train_number IN ({placeholders});
+                        """,
+                        train_numbers,
+                    )
+                    for r in cur.fetchall():
+                        first_obs = r[5].isoformat().replace("+00:00", "Z") if hasattr(r[5], "isoformat") else str(r[5])
+                        last_obs = r[6].isoformat().replace("+00:00", "Z") if hasattr(r[6], "isoformat") else str(r[6])
+                        train_rows.append((r[0], r[1], r[2], r[3], r[4], first_obs, last_obs))
+
+                trip_rows: List[Any] = []
+                stop_rows: List[Any] = []
+                sorted_schedule_ids = sorted(schedule_ids)
+                if sorted_schedule_ids:
+                    sched_placeholders = ",".join("?" for _ in sorted_schedule_ids)
+                    cur.execute(
+                        f"""
+                        SELECT
+                            schedule_id, train_number, origin, destination, corridor,
+                            service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
+                        FROM scheduled_trips
+                        WHERE schedule_id IN ({sched_placeholders});
+                        """,
+                        sorted_schedule_ids,
+                    )
+                    for r in cur.fetchall():
+                        s_dep = r[6].isoformat().replace("+00:00", "Z") if hasattr(r[6], "isoformat") else r[6]
+                        s_arr = r[7].isoformat().replace("+00:00", "Z") if hasattr(r[7], "isoformat") else r[7]
+                        c_at = r[9].isoformat().replace("+00:00", "Z") if hasattr(r[9], "isoformat") else r[9]
+                        trip_rows.append((r[0], r[1], r[2], r[3], r[4], r[5], s_dep, s_arr, r[8], c_at))
+
+                    cur.execute(
+                        f"""
+                        SELECT
+                            schedule_id, stop_sequence, station_id, station_name,
+                            scheduled_arrival, scheduled_departure, actual_arrival,
+                            actual_departure, platform, delay_sec
+                        FROM schedule_stops
+                        WHERE schedule_id IN ({sched_placeholders})
+                        ORDER BY schedule_id ASC, stop_sequence ASC;
+                        """,
+                        sorted_schedule_ids,
+                    )
+                    for r in cur.fetchall():
+                        sa = r[4].isoformat().replace("+00:00", "Z") if hasattr(r[4], "isoformat") else r[4]
+                        sd = r[5].isoformat().replace("+00:00", "Z") if hasattr(r[5], "isoformat") else r[5]
+                        aa = r[6].isoformat().replace("+00:00", "Z") if hasattr(r[6], "isoformat") else r[6]
+                        ad = r[7].isoformat().replace("+00:00", "Z") if hasattr(r[7], "isoformat") else r[7]
+                        stop_rows.append((r[0], r[1], r[2], r[3], sa, sd, aa, ad, r[8], r[9]))
+            finally:
+                cur.close()
+
+        normalized_telemetry = []
+        for r in telemetry_rows:
+            rec_at = r[3].isoformat().replace("+00:00", "Z") if hasattr(r[3], "isoformat") else str(r[3])
+            normalized_telemetry.append((
+                r[0], r[1], r[2], rec_at, r[4], r[5], r[6], r[7],
+                r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16],
+            ))
+
+        # 2. Persist rows into Archive SQLite database first (Zero-Data-Loss guarantee)
+        archive_db = Database(target_archive_path)
+        try:
+            with archive_db.transaction() as arch_cur:
+                if train_rows:
+                    arch_cur.executemany(
+                        """
+                        INSERT INTO trains (
+                            train_number, locomotive_number, default_name, train_type, service_type,
+                            first_observed_at, last_observed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(train_number) DO UPDATE SET
+                            locomotive_number = COALESCE(excluded.locomotive_number, trains.locomotive_number),
+                            default_name = COALESCE(excluded.default_name, trains.default_name),
+                            train_type = COALESCE(excluded.train_type, trains.train_type),
+                            service_type = COALESCE(excluded.service_type, trains.service_type),
+                            first_observed_at = MIN(trains.first_observed_at, excluded.first_observed_at),
+                            last_observed_at = MAX(trains.last_observed_at, excluded.last_observed_at);
+                        """,
+                        train_rows,
+                    )
+
+                if trip_rows:
+                    arch_cur.executemany(
+                        """
+                        INSERT INTO scheduled_trips (
+                            schedule_id, train_number, origin, destination, corridor,
+                            service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(schedule_id) DO UPDATE SET
+                            origin = COALESCE(scheduled_trips.origin, excluded.origin),
+                            destination = COALESCE(scheduled_trips.destination, excluded.destination),
+                            corridor = COALESCE(scheduled_trips.corridor, excluded.corridor);
+                        """,
+                        trip_rows,
+                    )
+
+                if stop_rows:
+                    arch_cur.executemany(
+                        """
+                        INSERT OR IGNORE INTO schedule_stops (
+                            schedule_id, stop_sequence, station_id, station_name,
+                            scheduled_arrival, scheduled_departure, actual_arrival,
+                            actual_departure, platform, delay_sec
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        stop_rows,
+                    )
+
+                arch_cur.executemany(
+                    """
+                    INSERT OR IGNORE INTO telemetry_history (
+                        id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                        track_heading, altitude, delay_min, status, progress, chainage_m,
+                        dist_to_dest_m, next_station, corridor
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    normalized_telemetry,
+                )
+            archive_db.checkpoint_wal("TRUNCATE")
+        finally:
+            archive_db.close()
+
+        # 3. Evict archived telemetry rows and unreferenced old trips from hot database
+        with self.db.transaction() as hot_cur:
+            hot_cur.execute(
+                "DELETE FROM telemetry_history WHERE recorded_at < ?;",
+                (cutoff_clean,),
+            )
+            deleted_count = (
+                hot_cur.rowcount
+                if hot_cur.rowcount is not None and hot_cur.rowcount >= 0
+                else len(normalized_telemetry)
+            )
+
+            if len(cutoff_date) == 10:
+                hot_cur.execute(
+                    """
+                    DELETE FROM scheduled_trips
+                    WHERE service_date < ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telemetry_history
+                          WHERE telemetry_history.schedule_id = scheduled_trips.schedule_id
+                      );
+                    """,
+                    (cutoff_date,),
+                )
+
+        return deleted_count
