@@ -357,9 +357,146 @@ The Python client implementation is housed in [`train_tracker.py`](../train_trac
 
 ---
 
-## 6. Implementation References
+## 6. Console TUI Map & Presentation Architecture
+
+The presentation layer provides a live, interactive, real-time terminal map dashboard displaying the Hellenic railway network, station nodes, and live train positions directly inside ANSI/VT100 and Curses terminal emulators.
+
+### 6.1 Presentation Architecture & Component Topology
+
+```text
++-------------------------------------------------------------------------------+
+|                      TUI Architecture & Threading Model                       |
++-------------------------------------------------------------------------------+
+
+       [Live /api/train-stream]          [Offline MockTelemetryEngine]
+                   \                                /
+                    \                              /
+                     v                            v
+               +----------------------------------------+
+               |  StreamWorker Thread (daemon=True)     |
+               |  - Background SSE ingestion            |
+               |  - Exponential backoff & reconnection  |
+               +----------------------------------------+
+                                   |
+                                   v  yield List[TrainPosition]
+               +----------------------------------------+
+               |      TrainStateStore (Thread-Safe)     |
+               |  - trains: Dict[str, TrainRecord]      |
+               |  - Historical breadcrumbs (last 15 pts)|
+               |  - Active train selection cursor       |
+               |  - Auto-follow mode lock               |
+               |  - Text search & corridor filters      |
+               +----------------------------------------+
+                                   |
+                   +---------------+---------------+
+                   | get_snapshot() (mutex locked) |
+                   v                               v
+         [Map Canvas Engine]             [Sidebar & Status Panes]
+         - WGS84 -> Braille subpixels    - Header: Network metrics
+         - Bresenham track rasterizer    - Roster: Sorted train list
+         - Station markers & labels      - Inspector: Telemetry card
+         - Heading glyphs (▲►▼◄)         - Status bar & input prompt
+                   \                               /
+                    +--------------+--------------+
+                                   |
+                                   v
+                     [Double-Buffered Curses Loop]
+                     - noutrefresh() on subwindows
+                     - doupdate() single screen flush
+                     - 15-20 FPS frame rate timing
+                                   |
+                                   v
+                         [Terminal stdout]
+```
+
+### 6.2 Package Structure (`tui/`)
+
+- [`tui/app.py`](../tui/app.py): Main Curses application controller, modal event loop (`NORMAL`, `SEARCH`, `HELP`), camera kinematics, and signal handling.
+- [`tui/renderer.py`](../tui/renderer.py): Dynamic multi-pane layout partitioner (`PaneGeometry`), curses color pairs, Braille blitter, and component renderers.
+- [`tui/geo.py`](../tui/geo.py): Geospatial projection engine ([`GeoProjector`](../tui/geo.py)), aspect-ratio compensation, and sub-pixel [`BrailleCanvas`](../tui/geo.py).
+- [`tui/state.py`](../tui/state.py): Mutex-synchronized repository ([`TrainStateStore`](../tui/state.py)) holding train records, breadcrumbs, and filter state.
+- [`tui/stream_worker.py`](../tui/stream_worker.py): Ingestion daemon ([`StreamWorker`](../tui/stream_worker.py)) decoupling network I/O from UI refresh loops.
+- [`tui/mock_engine.py`](../tui/mock_engine.py): Offline physics simulation engine ([`MockTelemetryEngine`](../tui/mock_engine.py)) generating synthetic train movements across Greek rail corridors.
+- `tui/data/`: Static geographic datasets containing verified station coordinates ([`stations.json`](../tui/data/stations.json)) and track polylines ([`tracks.json`](../tui/data/tracks.json)).
+
+### 6.3 Geospatial Projection & Braille Sub-Pixel Canvas
+
+Terminal character cells have an approximate vertical-to-horizontal aspect ratio $R \approx 2.0$. The projection pipeline translates WGS84 geographic coordinates into terminal screen space with aspect-ratio compensation:
+
+$$X = \text{Center}_X + S_x \cdot (\text{lng} - \text{lng}_0) \cdot \cos(\text{lat}_0)$$
+
+$$Y = \text{Center}_Y - \frac{S_x}{R} \cdot (\text{lat} - \text{lat}_0)$$
+
+To render crisp railway vector lines without bulky full-block characters, the engine implements a **Braille Sub-Pixel Canvas** mapping each character cell to a $2 \times 4$ dot matrix (`\u2800` – `\u28FF`), rasterizing track polylines via Bresenham's line algorithm at four times the vertical resolution of standard character cells.
+
+---
+
+## 7. Command-Line Interface & Operational Guide
+
+The primary entry point [`train_tracker.py`](../train_tracker.py) provides a modern CLI interface powered by `argparse`.
+
+### 7.1 CLI Syntax & Options
+
+```text
+usage: train_tracker.py [-h] [--tui] [--demo] [--fps FPS]
+                        [--reconnect-delay RECONNECT_DELAY] [-v]
+                        [{stream,schedules}]
+```
+
+| Argument / Flag | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `mode` | Positional | `"stream"` | Operational mode: `stream` for real-time monitoring, `schedules` for timetable trips. |
+| `--tui` | Flag | `False` | Launch interactive full-screen Curses terminal map dashboard. |
+| `--demo` | Flag | `False` | Run offline using synthetic telemetry engine (no live network required). |
+| `--fps` | `float` | `20.0` | Target frame rate for TUI rendering loop ($5.0 - 60.0\text{ FPS}$). |
+| `--reconnect-delay`| `float` | `3.0` | Reconnection backoff interval in seconds for live SSE stream interruptions. |
+| `-v`, `--version` | Flag | N/A | Display version number and exit. |
+| `-h`, `--help` | Flag | N/A | Display usage instructions, options, and examples. |
+
+### 7.2 Execution Examples
+
+```bash
+# 1. Live Interactive Terminal Map Dashboard
+python3 train_tracker.py --tui
+
+# 2. Offline Interactive Terminal Map Simulator (for demos / testing)
+python3 train_tracker.py --tui --demo
+
+# 3. Plain Text Console Monitor (Live SSE Feed)
+python3 train_tracker.py
+
+# 4. Plain Text Console Monitor (Offline Simulation)
+python3 train_tracker.py --demo
+
+# 5. Inspect Today's Upcoming Scheduled Services
+python3 train_tracker.py schedules
+```
+
+### 7.3 Interactive Keyboard Controls (TUI Mode)
+
+| Key(s) | Mode | Action | Description |
+| :--- | :---: | :--- | :--- |
+| `q`, `Q` | NORMAL | **Quit** | Cleanly exit dashboard and restore terminal attributes. |
+| `h/j/k/l`, Arrows | NORMAL | **Pan Viewport** | Shift map West, South, North, East (breaks follow mode). |
+| `+`, `-` | NORMAL | **Zoom In / Out** | Scale viewport magnification ($0.2\times$ to $25.0\times$). |
+| `0, 1, 2, 3` | NORMAL | **Corridor Presets** | Jump to `0` Greece, `1` Suburban, `2` PATHE, `3` North. |
+| `Tab`, `p` | NORMAL | **Select Train** | Cycle cursor to next / previous train in active roster. |
+| `f`, `F` | NORMAL | **Auto-Follow** | Lock / unlock map camera centering on selected train. |
+| `c`, `C` | NORMAL | **Clear Filters** | Reset search query, corridor filter, and selection. |
+| `/` | NORMAL | **Open Search** | Enter interactive live query filtering in status bar. |
+| `Enter` / `Esc` | SEARCH | **Commit / Cancel** | Apply query and return to NORMAL / revert search. |
+| `Space` | NORMAL | **Pause / Resume** | Temporarily pause live stream ingestion. |
+| `?` | NORMAL | **Help Modal** | Open fullscreen keybindings and symbols overlay. |
+
+---
+
+## 8. Implementation References
 
 * **Python Source Code:** [`train_tracker.py`](../train_tracker.py)
-* **Agent Architecture Guidelines:** [`.agents/rules/architecture.md`](../.agents/rules/architecture.md)
+* **TUI Package Entry Point:** [`tui/__init__.py`](../tui/__init__.py)
+* **Master TUI Implementation Plan:** [`docs/tui-map-implementation-plan.md`](./tui-map-implementation-plan.md)
+* **Phase 6 Specification (Verification & CLI):** [`docs/phase-6-verification-automated-tests-cli-integration.md`](./phase-6-verification-automated-tests-cli-integration.md)
+* **Architecture Rules:** [`.agents/rules/architecture.md`](../.agents/rules/architecture.md)
 * **Python Language Rules:** [`.agents/rules/python-idioms.md`](../.agents/rules/python-idioms.md)
+* **Testing Guidelines:** [`.agents/rules/testing.md`](../.agents/rules/testing.md)
 * **Path Resolution Policy:** [`.agents/rules/markdown-relative-paths.md`](../.agents/rules/markdown-relative-paths.md)

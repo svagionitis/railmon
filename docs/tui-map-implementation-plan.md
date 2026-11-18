@@ -275,6 +275,7 @@ flowchart TD
 - **Acceptance Criteria:** Smooth transitions, responsive keyboard event dispatch, and clear visual indicators for active follow and filter modes.
 
 ### Phase 6: Verification, Automated Tests & CLI Integration
+*(Detailed specification: [Phase 6 Implementation Plan](./phase-6-verification-automated-tests-cli-integration.md))*
 - **Files:** `train_tracker.py`, `tests/test_tracker.py`, `docs/architecture.md`
 - **Deliverables:**
   - Expose `--tui` and `--demo` flags in `train_tracker.py` CLI:
