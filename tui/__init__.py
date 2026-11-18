@@ -1,5 +1,6 @@
 """Terminal User Interface (TUI) package for Hellenic Railways live tracker."""
 
+from tui.app import TUIApp, run_tui
 from tui.geo import BoundingBox, BrailleCanvas, GeoPoint, GeoProjector, Viewport
 from tui.mock_engine import (
     MockTelemetryEngine,
@@ -10,6 +11,15 @@ from tui.mock_engine import (
     haversine_distance,
     load_stations,
     load_tracks,
+)
+from tui.renderer import (
+    PaneGeometry,
+    TUIRenderer,
+    calculate_scroll_offset,
+    format_progress_bar,
+    get_compass_bearing,
+    get_delay_color_pair,
+    get_heading_glyph,
 )
 from tui.state import (
     ConnectionStatus,
@@ -40,4 +50,13 @@ __all__ = [
     "StateSnapshot",
     "TrainStateStore",
     "StreamWorker",
+    "PaneGeometry",
+    "TUIRenderer",
+    "TUIApp",
+    "run_tui",
+    "get_heading_glyph",
+    "get_compass_bearing",
+    "get_delay_color_pair",
+    "format_progress_bar",
+    "calculate_scroll_offset",
 ]

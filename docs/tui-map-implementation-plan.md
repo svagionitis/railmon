@@ -255,6 +255,7 @@ flowchart TD
 - **Acceptance Criteria:** Multi-threaded test verifying safe concurrent writes from stream worker and reads from UI loop without race conditions.
 
 ### Phase 4: Curses TUI Layout & Multi-Pane Rendering
+*(Detailed specification: [Phase 4 Implementation Plan](./phase-4-curses-tui-layout-multi-pane-rendering.md))*
 - **Files:** `tui/renderer.py`, `tui/app.py`
 - **Deliverables:**
   - Dynamic panel split: Map viewport (left / 65% width), Train roster (right-top / 35% width), Inspector panel (right-bottom), Status bar (bottom line).
