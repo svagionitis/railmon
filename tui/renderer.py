@@ -842,6 +842,9 @@ class TUIRenderer:
         snapshot: StateSnapshot,
         width: int,
         msg_rate: float = 0.0,
+        search_mode: bool = False,
+        search_buffer: str = "",
+        paused: bool = False,
     ) -> None:
         """Render the bottom status bar and keybindings cheat sheet.
 
@@ -850,41 +853,135 @@ class TUIRenderer:
             snapshot: Current StateSnapshot.
             width: Total window width.
             msg_rate: Telemetry ingestion message rate in msg/sec.
+            search_mode: Whether interactive search input mode is active.
+            search_buffer: Current search text buffer.
+            paused: Whether ingestion is paused.
         """
         win.erase()
         status_attr = safe_color_pair(PAIR_STATUS_BAR, curses.A_REVERSE)
         connected_attr = safe_color_pair(PAIR_CONNECTED, curses.A_BOLD) | curses.A_BOLD
         warn_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
         alert_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+        prompt_attr = safe_color_pair(PAIR_ROSTER_SELECT, curses.A_BOLD) | curses.A_BOLD
 
         # Background bar fill
         safe_addstr(win, 0, 0, " " * width, status_attr)
 
+        if search_mode:
+            # Interactive search input prompt
+            prompt_text = f" Search filter: {search_buffer}█"
+            hint_text = "(Enter: Apply, Esc: Cancel) "
+            safe_addstr(win, 0, 0, prompt_text, prompt_attr, max_w=max(0, width - len(hint_text)))
+            hint_x = max(0, width - len(hint_text))
+            safe_addstr(win, 0, hint_x, hint_text, status_attr)
+            return
+
         # Keybindings cheat sheet
-        shortcuts = " [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [f] Follow  [/] Filter  [0..3] Presets"
-        safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=width - 24)
+        follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
+        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24))
 
         # Connection status badge
-        status = snapshot.connection_status
-        if status == ConnectionStatus.CONNECTED:
-            badge = f" ● LIVE ({msg_rate:3.1f} msg/s) "
-            b_attr = connected_attr
-        elif status == ConnectionStatus.CONNECTING:
-            badge = " ○ CONNECTING... "
-            b_attr = status_attr
-        elif status == ConnectionStatus.RECONNECTING:
-            badge = " ⟳ RECONNECTING... "
+        if paused:
+            badge = " ❚❚ PAUSED "
             b_attr = warn_attr
-        elif status == ConnectionStatus.ERROR:
-            badge = " ✕ CONN ERROR "
-            b_attr = alert_attr
         else:
-            badge = " ● DEMO MODE "
-            b_attr = connected_attr
+            status = snapshot.connection_status
+            if status == ConnectionStatus.CONNECTED:
+                badge = f" ● LIVE ({msg_rate:3.1f} msg/s) "
+                b_attr = connected_attr
+            elif status == ConnectionStatus.CONNECTING:
+                badge = " ○ CONNECTING... "
+                b_attr = status_attr
+            elif status == ConnectionStatus.RECONNECTING:
+                badge = " ⟳ RECONNECTING... "
+                b_attr = warn_attr
+            elif status == ConnectionStatus.ERROR:
+                badge = " ✕ CONN ERROR "
+                b_attr = alert_attr
+            else:
+                badge = " ● DEMO MODE "
+                b_attr = connected_attr
 
         badge_w = get_string_display_width(badge)
         badge_x = max(0, width - badge_w)
         safe_addstr(win, 0, badge_x, badge, b_attr)
+
+    def render_help_modal(self, win: Any, height: int, width: int) -> None:
+        """Render centered keybinding guide and symbols reference dialog overlay.
+
+        Args:
+            win: Root curses window to overlay onto.
+            height: Total terminal screen height.
+            width: Total terminal screen width.
+        """
+        box_h = min(22, max(16, height - 2))
+        box_w = min(74, max(46, width - 4))
+        start_y = max(1, (height - box_h) // 2)
+        start_x = max(1, (width - box_w) // 2)
+
+        border_attr = safe_color_pair(PAIR_BORDER, curses.A_BOLD) | curses.A_BOLD
+        header_attr = safe_color_pair(PAIR_HEADER, curses.A_BOLD) | curses.A_BOLD
+        text_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL)
+        key_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+        dim_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL) | curses.A_DIM
+
+        # Draw box background fill
+        for row in range(box_h):
+            safe_addstr(win, start_y + row, start_x, " " * box_w, text_attr)
+
+        # Draw border
+        top_border = "+" + "-" * (box_w - 2) + "+"
+        bot_border = "+" + "-" * (box_w - 2) + "+"
+        safe_addstr(win, start_y, start_x, top_border, border_attr)
+        safe_addstr(win, start_y + box_h - 1, start_x, bot_border, border_attr)
+        for r in range(1, box_h - 1):
+            safe_addstr(win, start_y + r, start_x, "|", border_attr)
+            safe_addstr(win, start_y + r, start_x + box_w - 1, "|", border_attr)
+
+        # Title
+        title = " KEYBOARD CONTROLS & SYSTEM REFERENCE "
+        t_x = max(start_x + 2, start_x + (box_w - len(title)) // 2)
+        safe_addstr(win, start_y, t_x, title, header_attr)
+
+        help_sections = [
+            ("NAVIGATION & VIEWPORT", [
+                ("h/j/k/l, Arrows", "Pan viewport West / South / North / East"),
+                ("+ / =, - / _", "Zoom In / Zoom Out (0.2x to 25.0x)"),
+                ("0, 1, 2, 3", "Presets (0: Greece, 1: Suburban, 2: PATHE, 3: North)"),
+            ]),
+            ("TRAIN SELECTION & TRACKING", [
+                ("Tab, n / p", "Select Next / Previous train in active roster"),
+                ("f / F", "Toggle real-time auto-follow camera lock"),
+                ("c / C", "Clear search filter, corridor filter & selection"),
+            ]),
+            ("SEARCH & SYSTEM CONTROLS", [
+                ("/, Esc", "Enter search filter mode / Cancel and return"),
+                ("Space", "Pause / resume live telemetry ingestion"),
+                ("?, q", "Toggle this help dialog / Clean exit dashboard"),
+            ]),
+            ("SYMBOLS & COLOR LEGEND", [
+                ("▲►▼◄ Headings", "Green: On-time (<=3m)  Yellow: Delay (4-10m)"),
+                ("◉ Station   · Trail", "Red: Alert (>10m)    Cyan: Suburban  Magenta: Cargo"),
+            ]),
+        ]
+
+        curr_y = start_y + 1
+        for sec_title, items in help_sections:
+            if curr_y >= start_y + box_h - 2:
+                break
+            safe_addstr(win, curr_y, start_x + 2, f"[{sec_title}]", header_attr, max_w=box_w - 4)
+            curr_y += 1
+            for k_label, desc in items:
+                if curr_y >= start_y + box_h - 2:
+                    break
+                safe_addstr(win, curr_y, start_x + 3, f"{k_label:<19}", key_attr, max_w=19)
+                safe_addstr(win, curr_y, start_x + 22, desc, text_attr, max_w=box_w - 24)
+                curr_y += 1
+
+        footer_msg = " [Press ? or any key to close] "
+        f_x = max(start_x + 2, start_x + (box_w - len(footer_msg)) // 2)
+        safe_addstr(win, start_y + box_h - 1, f_x, footer_msg, dim_attr)
 
     def render_all(
         self,
@@ -893,6 +990,10 @@ class TUIRenderer:
         snapshot: StateSnapshot,
         projector: GeoProjector,
         msg_rate: float = 0.0,
+        search_mode: bool = False,
+        search_buffer: str = "",
+        show_help: bool = False,
+        paused: bool = False,
     ) -> None:
         """Render all dashboard panes to their respective subwindow buffers.
 
@@ -902,6 +1003,10 @@ class TUIRenderer:
             snapshot: Atomic point-in-time state snapshot from TrainStateStore.
             projector: GeoProjector configured for the map canvas viewport.
             msg_rate: Ingestion frequency in messages per second.
+            search_mode: Whether interactive search input mode is active.
+            search_buffer: Current search text buffer.
+            show_help: Whether modal help overlay dialog should be rendered.
+            paused: Whether live ingestion is paused.
         """
         if not geometry.is_valid:
             if "root" in windows:
@@ -917,4 +1022,15 @@ class TUIRenderer:
         if "inspector" in windows:
             self.render_inspector(windows["inspector"], snapshot)
         if "status" in windows:
-            self.render_status_bar(windows["status"], snapshot, geometry.status_w, msg_rate=msg_rate)
+            self.render_status_bar(
+                windows["status"],
+                snapshot,
+                geometry.status_w,
+                msg_rate=msg_rate,
+                search_mode=search_mode,
+                search_buffer=search_buffer,
+                paused=paused,
+            )
+
+        if show_help and "root" in windows:
+            self.render_help_modal(windows["root"], geometry.term_height, geometry.term_width)

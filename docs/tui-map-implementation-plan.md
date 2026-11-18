@@ -265,6 +265,7 @@ flowchart TD
 - **Acceptance Criteria:** Flawless rendering without cursor stutter; responsive resizing on `curses.KEY_RESIZE` / `SIGWINCH`.
 
 ### Phase 5: Interactive Controls, Following & Filtering
+*(Detailed specification: [Phase 5 Implementation Plan](./phase-5-interactive-controls-following-filtering.md))*
 - **Files:** `tui/app.py`, `tui/state.py`
 - **Deliverables:**
   - Panning (`h/j/k/l` or arrows) and Zooming (`+`, `-`).
