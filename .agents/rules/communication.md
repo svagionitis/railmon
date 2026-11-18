@@ -16,5 +16,5 @@
 - **Function Names:** Keep function names short, clear, and descriptive: fewer than 30 characters.
 - **Enums over Booleans:** Use strongly typed `Enum` instead of boolean parameters in function signatures to make call sites readable and explicit.
 - **Readability & Spacing:** Add empty lines between logical blocks of code to let the code breathe.
-- **Contextual Comments:** Add small, focused comments explaining *what* a block does and *why*. Use ASCII diagrams to clarify complex protocol frames, coordinate systems, or stream state transitions.
+- **Contextual Comments & Diagrams:** Add small, focused comments explaining *what* a block does and *why*. Use ASCII diagrams to clarify complex protocol frames, coordinate systems, or stream state transitions in code comments. In Markdown documentation, provide both ASCII diagrams and Mermaid diagrams, and ensure all referenced filenames use document-relative paths per `.agents/rules/diagrams-and-visual-documentation.md`.
 - **Member Encapsulation:** Prefix internal methods and variables with `_` unless public access is intended.
