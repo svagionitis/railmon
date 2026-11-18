@@ -215,6 +215,71 @@ class TestHistoricalRepository(unittest.TestCase):
         self.assertEqual(dwell.arrival_delay_min, 1)
         self.assertEqual(dwell.departure_delay_min, 3)
 
+    def test_station_dwell_times_multiple_visits_same_station(self):
+        """Verify multiple visits to the same station across trips/days do not collapse."""
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                    track_heading, altitude, delay_min, status, progress, chainage_m,
+                    dist_to_dest_m, next_station, corridor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    ('2232', None, '2026-11-19T10:09:00Z', 38.460, 23.590, 50.0, 90.0, 90.0, 20.0, 4, 'Normal', 0.8, 8000, 2000, 'CHALKIS', 'ATH-HAL'),
+                    ('2232', None, '2026-11-19T10:10:00Z', 38.463, 23.595, 0.0, 90.0, 90.0, 20.0, 5, 'Stationary', 0.9, 9000, 1000, 'CHALKIS', 'ATH-HAL'),
+                    ('2232', None, '2026-11-19T10:12:00Z', 38.463, 23.595, 0.2, 90.0, 90.0, 20.0, 6, 'Stationary', 0.9, 9000, 1000, 'CHALKIS', 'ATH-HAL'),
+                    ('2232', None, '2026-11-19T10:13:00Z', 38.468, 23.600, 40.0, 95.0, 95.0, 22.0, 6, 'Normal', 1.0, 10000, 0, 'TERMINAL', 'ATH-HAL'),
+                ],
+            )
+
+        dwells = self.repo.get_station_dwell_times(
+            "2232",
+            speed_threshold_kmh=2.0,
+            min_dwell_sec=20,
+        )
+        self.assertEqual(len(dwells), 2)
+        self.assertEqual(dwells[0].station_name, "CHALKIS")
+        self.assertEqual(dwells[0].arrival_time, "2026-11-18T10:10:00Z")
+        self.assertEqual(dwells[0].departure_time, "2026-11-18T10:11:30Z")
+        self.assertEqual(dwells[0].dwell_seconds, 90)
+        self.assertEqual(dwells[0].arrival_delay_min, 1)
+        self.assertEqual(dwells[0].departure_delay_min, 3)
+
+        self.assertEqual(dwells[1].station_name, "CHALKIS")
+        self.assertEqual(dwells[1].arrival_time, "2026-11-19T10:10:00Z")
+        self.assertEqual(dwells[1].departure_time, "2026-11-19T10:12:00Z")
+        self.assertEqual(dwells[1].dwell_seconds, 120)
+        self.assertEqual(dwells[1].arrival_delay_min, 5)
+        self.assertEqual(dwells[1].departure_delay_min, 6)
+
+    def test_station_dwell_times_temporal_gap_separation(self):
+        """Verify stationary records separated by >30 minutes without moving frames split into distinct dwells."""
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                    track_heading, altitude, delay_min, status, progress, chainage_m,
+                    dist_to_dest_m, next_station, corridor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                [
+                    ('2232', None, '2026-11-18T14:00:00Z', 38.463, 23.595, 0.0, 90.0, 90.0, 20.0, 2, 'Stationary', 0.9, 9000, 1000, 'CHALKIS', 'ATH-HAL'),
+                    ('2232', None, '2026-11-18T14:01:00Z', 38.463, 23.595, 0.0, 90.0, 90.0, 20.0, 2, 'Stationary', 0.9, 9000, 1000, 'CHALKIS', 'ATH-HAL'),
+                ],
+            )
+
+        dwells = self.repo.get_station_dwell_times(
+            "2232",
+            speed_threshold_kmh=2.0,
+            min_dwell_sec=20,
+        )
+        self.assertEqual(len(dwells), 2)
+        self.assertEqual(dwells[0].dwell_seconds, 90)
+        self.assertEqual(dwells[1].dwell_seconds, 60)
+
     def test_export_trip_geojson_linestring(self):
         """Verify RFC 7946 GeoJSON LineString trajectory export."""
         geojson = self.repo.export_trip_geojson("1597", feature_type="LineString")

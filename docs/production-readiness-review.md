@@ -1,0 +1,481 @@
+# Production Readiness & Architecture Review: `railmon`
+
+> **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
+> **Date:** 2026-11-18  
+> **Verdict:** **NOT READY** for unattended production deployment (6 P0 blockers, 9 P1 deficiencies, 6 P2 compliance gaps)
+
+---
+
+## 1. Executive Summary & Scorecard
+
+`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (201/201 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
+
+```text
++-----------------------------------+--------+----------------------------------------------+
+| Dimension                         | Score  | Status & Primary Finding                     |
++-----------------------------------+--------+----------------------------------------------+
+| Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
+| Test Suite & Empirical Benchmarks |  8/10  | 201 tests pass; 20.4k rows/s @ batch=100     |
+| Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
+| SQLite Connection & Transactions  |  5/10  | Per-batch connection churn; no user_version  |
+| Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
+| Resilience & Stream Handling      |  4/10  | Client swallows URLError; raw print in TUI   |
+| Daemon Lifecycle & Signals        |  4/10  | No SIGTERM/SIGHUP handler; pause broken      |
+| Security & Data Protection        |  5/10  | Unvalidated PRAGMA f-string; no 0600 umask   |
+| Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
+| Storage Retention & Disk Bounds   |  3/10  | No retention purge; no disk_usage check      |
+| Packaging & Versioning            |  3/10  | Missing pyproject.toml and __version__       |
++-----------------------------------+--------+----------------------------------------------+
+```
+
+### Empirical Verification Metrics
+
+| Gate / Benchmark | Result | Reference Target | Status |
+|---|---|---|---|
+| Unit & Integration Suite | `201 passed in 16.3s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Write Throughput (`batch_size=100`) | `20,409.0 rows/sec` (`389.1 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
+| Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
+| Read Latency (`get_train_history`) | `mean 8.58 ms`, `p95 11.91 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
+| Read Latency (`get_corridor_punctuality`) | `mean 4.96 ms`, `p95 7.28 ms` | `mean <= 15 ms`, `p95 <= 30 ms` | PASS |
+| Security SQL Injection Scan | 1 match ([`../storage/db.py`](../storage/db.py#L112)) | 0 matches | **FAIL** |
+
+---
+
+## 2. System Architecture & Data Flow
+
+### A. Component Topology (ASCII)
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Upstream: railway.gov.gr Services                          |
+|             SSE (/api/train-stream)           REST (/api/public/*)                |
++-----------------------------------------------------------------------------------+
+                         |                                |
+                         v                                v
++-----------------------------------------------------------------------------------+
+|                     Ingestion Layer (../train_tracker.py)                         |
+|  +-----------------------------------+   +-------------------------------------+  |
+|  |         RailwayGovClient          |   |        MockTelemetryEngine          |  |
+|  |       (../train_tracker.py)       |   |        (../tui/mock_engine.py)      |  |
+|  +-----------------------------------+   +-------------------------------------+  |
+|                         \                               /                         |
+|                          v                             v                          |
+|                    +-----------------------------------------+                    |
+|                    |        StreamWorker (Daemon Thread)     |                    |
+|                    |          (../tui/stream_worker.py)      |                    |
+|                    +-----------------------------------------+                    |
++-----------------------------------------------------------------------------------+
+                         |                                |
+        update_positions |                                | enqueue_batch (nowait)
+                         v                                v
++-----------------------------------------+    +------------------------------------+
+|       State Layer (../tui/state.py)     |    |  Persistence Layer (../storage/)   |
+|  +-----------------------------------+  |    |  +------------------------------+  |
+|  |     TrainStateStore (RLock)       |  |    |  | TelemetryRecorder (Thread)   |  |
+|  +-----------------------------------+  |    |  |   (../storage/recorder.py)   |  |
+|                    |                    |    |  +------------------------------+  |
+|       get_snapshot v                    |    |                 |                  |
+|  +-----------------------------------+  |    |                 v                  |
+|  |     StateSnapshot (Immutable)     |  |    |  +------------------------------+  |
+|  +-----------------------------------+  |    |  | DeadbandFilter (15m / 60s)   |  |
++-----------------------------------------+    |  |   (../storage/filter.py)     |  |
+                     |                         |  +------------------------------+  |
+                     v                         |                 |                  |
++-----------------------------------------+    |      executemany v                 |
+|      Presentation Layer (../tui/)       |    |  +------------------------------+  |
+|  +-----------------------------------+  |    |  |   Database (SQLite3 WAL)     |  |
+|  |      TUIApp (../tui/app.py)       |  |    |  |     (../storage/db.py)       |  |
+|  |  GeoProjector (../tui/geo.py)     |  |    |  +------------------------------+  |
+|  |  TUIRenderer (../tui/renderer.py) |  |    |                 |                  |
+|  +-----------------------------------+  |    |                 v                  |
++-----------------------------------------+    |  +------------------------------+  |
+                                               |  |    HistoricalRepository      |  |
+                                               |  |  (../storage/repository.py)  |  |
+                                               |  +------------------------------+  |
+                                               +------------------------------------+
+```
+
+### B. Component Topology (Mermaid)
+
+```mermaid
+flowchart TD
+    subgraph Upstream ["Upstream Services (railway.gov.gr)"]
+        SSE["SSE Stream (/api/train-stream)"]
+        REST["REST API (/api/public/*)"]
+    end
+
+    subgraph Ingestion ["Ingestion Layer (../train_tracker.py)"]
+        Client["RailwayGovClient (../train_tracker.py)"]
+        Mock["MockTelemetryEngine (../tui/mock_engine.py)"]
+        Worker["StreamWorker (../tui/stream_worker.py)"]
+    end
+
+    subgraph State ["State Layer (../tui/state.py)"]
+        Store["TrainStateStore (RLock)"]
+        Snap["StateSnapshot (Immutable)"]
+    end
+
+    subgraph Presentation ["Presentation Layer (../tui/)"]
+        App["TUIApp (../tui/app.py)"]
+        Geo["GeoProjector & BrailleCanvas (../tui/geo.py)"]
+        Rend["TUIRenderer (../tui/renderer.py)"]
+    end
+
+    subgraph Persistence ["Persistence Layer (../storage/)"]
+        Rec["TelemetryRecorder (../storage/recorder.py)"]
+        Filt["DeadbandFilter (../storage/filter.py)"]
+        DB[("Database SQLite WAL (../storage/db.py)")]
+        Repo["HistoricalRepository (../storage/repository.py)"]
+    end
+
+    SSE --> Client
+    REST --> Client
+    Client --> Worker
+    Mock --> Worker
+    Worker -->|update_positions| Store
+    Worker -->|enqueue_batch| Rec
+    Store -->|get_snapshot| Snap
+    Snap --> App
+    App --> Geo
+    App --> Rend
+    Rec --> Filt
+    Filt -->|executemany| DB
+    DB --> Repo
+```
+
+### C. Storage Entity-Relationship Model
+
+```text
++------------------+       1:N       +--------------------+
+|      trains      | --------------> |  scheduled_trips   |
+| (train_number PK)|                 |  (schedule_id PK)  |
++------------------+                 +--------------------+
+         |                                    |        |
+         | 1:N                            1:N |        | 1:N
+         v                                    v        v
++-----------------------------------------------+    +--------------------+
+|               telemetry_history               |    |   schedule_stops   |
+| (id PK, train_number FK, schedule_id FK, ...) |    |      (id PK)       |
++-----------------------------------------------+    +--------------------+
+```
+
+```mermaid
+erDiagram
+    trains ||--o{ scheduled_trips : "operates"
+    trains ||--o{ telemetry_history : "emits"
+    scheduled_trips ||--o{ telemetry_history : "links"
+    scheduled_trips ||--o{ schedule_stops : "contains"
+    recording_sessions {
+        int session_id PK
+        timestamp started_at
+        timestamp ended_at
+        string mode
+        int total_records_written
+    }
+```
+
+---
+
+## 3. Critical Production Blockers (P0)
+
+### P0-1: Station Dwell Query Collapses Multi-Trip Stops [RESOLVED]
+
+- **Location:** [`HistoricalRepository.get_station_dwell_times`](../storage/repository.py#L301-L398) | **Plan:** [`./p0-1-station-dwell-multi-trip-fix-plan.md`](./p0-1-station-dwell-multi-trip-fix-plan.md)
+- **Root Cause:** The CTE filters `speed <= ?` and groups exclusively by `GROUP BY next_station` ([`../storage/repository.py`](../storage/repository.py#L327)). It lacks contiguous sequence partitioning (islands-and-gaps) or trip partitioning. Every stop by the same `train_number` at the same station across multiple days collapses into a single aggregate group where `MIN(recorded_at)` is day 1 arrival and `MAX(recorded_at)` is day $N$ departure, inflating `dwell_seconds` to $>86,400\text{ s}$. Additionally, the correlated subqueries at [`../storage/repository.py`](../storage/repository.py#L336-L339) match `(train_number, recorded_at)` without constraining `next_station`.
+- **Fix:** Partition contiguous stationary frames into discrete islands using `LAG()` state/gap detection and `FIRST_VALUE()` window functions:
+
+```sql
+WITH annotated AS (
+    SELECT
+        id,
+        train_number,
+        schedule_id,
+        next_station AS station_name,
+        recorded_at,
+        COALESCE(delay_min, 0) AS delay_min,
+        CASE WHEN speed <= ? AND next_station IS NOT NULL THEN 1 ELSE 0 END AS is_stopped,
+        LAG(CASE WHEN speed <= ? AND next_station IS NOT NULL THEN 1 ELSE 0 END, 1, 0)
+            OVER (ORDER BY recorded_at ASC, id ASC) AS prev_stopped,
+        LAG(next_station) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_station,
+        LAG(schedule_id) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_schedule,
+        LAG(recorded_at) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_recorded_at
+    FROM telemetry_history
+    WHERE train_number = ?
+      AND (? IS NULL OR recorded_at >= ?)
+      AND (? IS NULL OR recorded_at <= ?)
+),
+islands AS (
+    SELECT
+        id,
+        train_number,
+        station_name,
+        recorded_at,
+        delay_min,
+        SUM(
+            CASE
+                WHEN prev_stopped = 0
+                  OR prev_station IS NOT station_name
+                  OR COALESCE(prev_schedule, '') != COALESCE(schedule_id, '')
+                  OR (JULIANDAY(recorded_at) - JULIANDAY(prev_recorded_at)) * 86400.0 > 1800.0
+                THEN 1
+                ELSE 0
+            END
+        ) OVER (ORDER BY recorded_at ASC, id ASC) AS island_id
+    FROM annotated
+    WHERE is_stopped = 1
+),
+island_delays AS (
+    SELECT
+        train_number,
+        station_name,
+        recorded_at,
+        island_id,
+        FIRST_VALUE(delay_min) OVER (
+            PARTITION BY island_id ORDER BY recorded_at ASC, id ASC
+        ) AS arrival_delay_min,
+        FIRST_VALUE(delay_min) OVER (
+            PARTITION BY island_id ORDER BY recorded_at DESC, id DESC
+        ) AS departure_delay_min
+    FROM islands
+)
+SELECT
+    train_number,
+    station_name,
+    MIN(recorded_at) AS arrival_time,
+    MAX(recorded_at) AS departure_time,
+    CAST(ROUND((JULIANDAY(MAX(recorded_at)) - JULIANDAY(MIN(recorded_at))) * 86400.0) AS INTEGER) AS dwell_seconds,
+    MIN(arrival_delay_min) AS arrival_delay_min,
+    MIN(departure_delay_min) AS departure_delay_min
+FROM island_delays
+GROUP BY train_number, station_name, island_id
+HAVING dwell_seconds >= ?
+ORDER BY arrival_time ASC;
+```
+
+---
+
+### P0-2: SSE Exception Swallowing, Curses Buffer Corruption & Blocking Shutdown
+
+- **Location:** [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L137-L188) and [`StreamWorker._run_loop`](../tui/stream_worker.py#L85-L138)
+- **Root Cause:** `stream_train_positions()` wraps its infinite loop in `except (urllib.error.URLError, TimeoutError)` ([`../train_tracker.py`](../train_tracker.py#L185-L187)), prints directly to `sys.stdout`, and sleeps for `reconnect_delay`.
+
+```text
+Current Broken Failure Sequence:
+RailwayGovClient                sys.stdout (Curses TUI)             StreamWorker
+       |                                  |                              |
+       |-- URLError / TimeoutError ------>|                              |
+       |-- print("[Stream Warning]...") ->| (Corrupts Curses Screen)     |
+       |-- time.sleep(3.0) -------------->|                              | (Never notified;
+       |                                  |                              |  status stays CONNECTED;
+       |                                  |                              |  backoff bypassed)
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as RailwayGovClient (../train_tracker.py)
+    participant T as Terminal / Curses Buffer
+    participant W as StreamWorker (../tui/stream_worker.py)
+    C->>C: urlopen(/api/train-stream) raises URLError
+    C->>T: print("[Stream Warning]...") (Corrupts TUI)
+    C->>C: time.sleep(reconnect_delay) (Blocks stop_event)
+    Note over W: Never receives exception; status stuck on CONNECTED
+```
+
+- **Impact:**
+  1. **TUI Corruption:** Violates [`../.agents/rules/logging-and-observability.md`](../.agents/rules/logging-and-observability.md#L5-L8). Raw `print()` overwrites curses windows.
+  2. **Dead Reconnection Engine:** `StreamWorker` never enters its `except Exception:` block ([`../tui/stream_worker.py`](../tui/stream_worker.py#L120)), never updates `ConnectionStatus.RECONNECTING`, and never applies exponential backoff with jitter.
+  3. **Uninterruptible Read/Sleep:** `stream_train_positions()` lacks a `stop_event` parameter, blocking shutdown for up to 30s (`urlopen` timeout).
+- **Fix:** Remove the `while True` catch-and-print loop from `RailwayGovClient.stream_train_positions()` so a single stream attempt yields batches and raises connection errors directly to `StreamWorker` (or accepts an optional `stop_event: threading.Event` and uses `logger.warning`).
+
+---
+
+### P0-3: Missing `SIGTERM` / `SIGHUP` Handlers & Uncheckpointed WAL Teardown
+
+- **Location:** [`run_record_mode`](../train_tracker.py#L516-L626), [`run_plain_stream_mode`](../train_tracker.py#L432-L514), [`TelemetryRecorder.stop`](../storage/recorder.py#L108-L145)
+- **Root Cause:** `signal` is imported at [`../train_tracker.py`](../train_tracker.py#L10) and [`../tui/app.py`](../tui/app.py#L12) but never bound. Process termination via `SIGTERM` (Docker, `systemd`, Kubernetes) kills the interpreter immediately without running `finally:` blocks. Furthermore, `TelemetryRecorder.stop()` never invokes `self.db.checkpoint_wal("TRUNCATE")`.
+- **Impact:** Queued frames in `TelemetryRecorder._queue` are lost, `recording_sessions.ended_at` stays `NULL`, and `-wal` files remain unmerged on shutdown.
+- **Fix:** Bind `SIGINT`, `SIGTERM`, and `SIGHUP` (on POSIX) to set a shared `stop_event: threading.Event` per [`../.agents/rules/lifecycle-and-signal-handling.md`](../.agents/rules/lifecycle-and-signal-handling.md#L10-L18), and invoke `self.db.checkpoint_wal("TRUNCATE")` at the end of `TelemetryRecorder.stop()`.
+
+---
+
+### P0-4: TUI Pause Control Fails to Pause `StreamWorker`
+
+- **Location:** [`TUIApp.toggle_pause`](../tui/app.py#L265-L271) vs [`StreamWorker.pause`](../tui/stream_worker.py#L75-L83)
+- **Root Cause:** `TUIApp.toggle_pause()` toggles `self.paused` and sets `store.set_connection_status(ConnectionStatus.PAUSED, ...)`, but never calls `self.worker.pause()` or `self.worker.resume()`.
+- **Impact:** While paused in the UI, `StreamWorker` continues consuming the SSE stream, mutating `TrainStateStore`, resetting `ConnectionStatus` back to `CONNECTED` on reconnects, and writing batches to `TelemetryRecorder`.
+- **Fix:** Invoke `self.worker.pause()` when `self.paused` is `True`, and `self.worker.resume()` when `False`.
+
+---
+
+### P0-5: Per-Transaction SQLite Connection Churn & Cross-Thread `:memory:` Sharing
+
+- **Location:** [`Database._create_connection`](../storage/db.py#L55-L80), [`Database.connection`](../storage/db.py#L83-L92), [`Database.transaction`](../storage/db.py#L95-L103)
+- **Root Cause:**
+  1. For file databases, `Database.connection()` opens a new `sqlite3.Connection`, executes 5 `PRAGMA` statements (including `PRAGMA cache_size = -64000`), yields it for a single query or batch flush, and calls `conn.close()`. Closing the connection after every transaction destroys the 64 MB page cache and incurs repeated file-open/WAL-header parsing overhead.
+  2. `Database._create_connection()` does not execute `PRAGMA busy_timeout = 5000;` and `Database.transaction()` uses deferred transactions (`with conn:`) instead of `BEGIN IMMEDIATE`, violating [`../.agents/rules/concurrency-and-sqlite.md`](../.agents/rules/concurrency-and-sqlite.md#L14-L27).
+  3. For `:memory:` databases, `self._shared_memory_conn` is created on the initializing thread without `check_same_thread=False` or mutex serialization, causing `sqlite3.ProgrammingError` if accessed by `TelemetryRecorderThread`.
+- **Fix:** Scope persistent connections per thread via `threading.local()` (closed cleanly on `Database.close()`), add `PRAGMA busy_timeout = 5000;`, and issue `BEGIN IMMEDIATE` in write transactions.
+
+---
+
+### P0-6: Unbounded Storage Growth & Missing Disk-Full Circuit Breaker
+
+- **Location:** [`../storage/recorder.py`](../storage/recorder.py), [`../storage/repository.py`](../storage/repository.py), [`../train_tracker.py`](../train_tracker.py#L274-L285)
+- **Root Cause:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L26-L29). No `--retention-days` option, no historical row pruning routine, and no `shutil.disk_usage()` check exist before batch commits.
+- **Fix:**
+  1. Check `shutil.disk_usage(parent_dir).free < 100 * 1024 * 1024` inside `TelemetryRecorder._flush_buffer()`; if below 100 MB, log `CRITICAL` and halt recording.
+  2. Add `HistoricalRepository.purge_before(cutoff_iso: str) -> int` and expose `--retention-days` on `railmon record`.
+
+---
+
+## 4. High-Priority Architecture & Security Deficiencies (P1)
+
+### P1-1: Unparameterized f-String in `PRAGMA wal_checkpoint`
+- **Location:** [`Database.checkpoint_wal`](../storage/db.py#L105-L114)
+- **Issue:** `cursor.execute(f"PRAGMA wal_checkpoint({mode});")` interpolates `mode` without allowlist validation, failing the security audit scan ([`../.agents/skills/security-audit/SKILL.md`](../.agents/skills/security-audit/SKILL.md#L38)) and [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L10-L12).
+- **Fix:** Validate `mode.upper() in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}` before executing.
+
+### P1-2: Missing `PRAGMA user_version` & Startup Integrity Check
+- **Location:** [`SchemaManager`](../storage/schema.py#L109-L175)
+- **Issue:** Schema versioning uses only `schema_migrations` without updating `PRAGMA user_version`, and `SchemaManager.verify_integrity()` is never called on startup, violating [`../.agents/rules/concurrency-and-sqlite.md`](../.agents/rules/concurrency-and-sqlite.md#L29-L32) and [`../.agents/rules/release-and-versioning.md`](../.agents/rules/release-and-versioning.md#L20-L25).
+- **Fix:** Set `PRAGMA user_version = 1` inside the migration transaction and run `PRAGMA integrity_check` on initialization.
+
+### P1-3: Missing POSIX `0600` Database Permissions & Export Path Sanitization
+- **Location:** [`Database._create_connection`](../storage/db.py#L55-L66), [`HistoricalRepository.export_csv`](../storage/repository.py#L455-L483), [`run_history_mode`](../train_tracker.py#L714-L753)
+- **Issue:** Violates [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L14-L28):
+  1. SQLite database files are created with default umask (`0644`) instead of owner-only `0600` (`os.umask(0o077)` or `os.chmod(db_path, 0o600)`).
+  2. `--out` export paths are not checked for directory traversal (`..`) or existing writable parent directories (`os.makedirs` is called arbitrarily on any target path).
+
+### P1-4: Missing Coordinate Bounds Validation & Defensive Payload Parsing
+- **Location:** [`TrainPosition.from_dict`](../train_tracker.py#L56-L85), [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L169-L174)
+- **Issue:** Violates [`../.agents/rules/compliance.md`](../.agents/rules/compliance.md#L10-L12) and [`../.agents/rules/verification-checklist.md`](../.agents/rules/verification-checklist.md#L34-L38):
+  1. `if p.get("lat") and p.get("lng")` rejects `0.0` via truthiness and fails to enforce `-90.0 <= lat <= 90.0` and `-180.0 <= lng <= 180.0`.
+  2. `float(data.get("speed") or 0.0)` and `int(data.get("delay") or 0)` are not guarded against `(ValueError, TypeError)` if upstream emits malformed non-numeric values.
+  3. `RailwayGovClient.__init__` ([`../train_tracker.py`](../train_tracker.py#L91-L93)) does not restrict `base_url` to `https://railway.gov.gr` (SSRF protection rule in [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L8)).
+
+### P1-5: Unhandled HTTP 429 (`Retry-After`) & 5xx Errors in REST / SSE Client
+- **Location:** [`RailwayGovClient._get`](../train_tracker.py#L95-L105), [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L152)
+- **Issue:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L23). `urllib.error.HTTPError` on status 429 is not caught to inspect `err.headers.get("Retry-After")` (with a 30s minimum backoff), and REST subcommands (`railmon schedules`) crash with raw tracebacks on network failure.
+
+### P1-6: Missing TTY Detection & Headless Curses Fallback
+- **Location:** [`run_tui_mode`](../train_tracker.py#L342-L430), [`run_tui`](../tui/app.py#L492-L521)
+- **Issue:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L5-L17). `sys.stdout.isatty()` is never checked before initializing curses, and `curses.error` (e.g., `TERM=dumb` or missing terminfo in containers) is not caught to fall back to `run_plain_stream_mode()`.
+
+### P1-7: Missing ASCII Fallback for Non-UTF-8 Terminals & Unsafe `init_pair`
+- **Location:** [`BrailleCanvas.render_rows`](../tui/geo.py#L401-L415), [`TUIRenderer.init_colors`](../tui/renderer.py#L434-L463), [`TUIRenderer.render_map`](../tui/renderer.py#L590-L684)
+- **Issue:** Violates [`../.agents/rules/terminal-and-rendering-compatibility.md`](../.agents/rules/terminal-and-rendering-compatibility.md#L14-L33):
+  1. No encoding detection (`sys.stdout.encoding` / `locale.getpreferredencoding()`) or ASCII fallback table (`.`, `-`, `*`, `#`, `+`, `|`) when UTF-8 is unavailable.
+  2. `curses.init_pair(...)` calls in `init_colors()` are not wrapped in `try...except curses.error:`.
+
+### P1-8: Non-Compliant Logging Hierarchy & Missing `RotatingFileHandler`
+- **Location:** [`../train_tracker.py`](../train_tracker.py), [`../storage/recorder.py`](../storage/recorder.py#L18), [`../tui/stream_worker.py`](../tui/stream_worker.py#L16)
+- **Issue:** Violates [`../.agents/rules/logging-and-observability.md`](../.agents/rules/logging-and-observability.md#L10-L36):
+  1. Loggers use `logging.getLogger(__name__)` instead of `logging.getLogger("railmon." + __name__)`.
+  2. Daemon/recording mode does not configure `RotatingFileHandler(maxBytes=10_485_760, backupCount=3)` targeting `~/.local/state/railmon/railmon.log` (POSIX) or `%LOCALAPPDATA%\railmon\logs\railmon.log` (Windows).
+
+### P1-9: Missing `pyproject.toml` & Single-Source `__version__`
+- **Location:** Repository root, [`../train_tracker.py`](../train_tracker.py#L248-L253), [`../storage/recorder.py`](../storage/recorder.py#L30)
+- **Issue:** Violates [`../.agents/rules/release-and-versioning.md`](../.agents/rules/release-and-versioning.md#L11-L15):
+  1. `__version__ = "1.0.0"` is not defined in [`../train_tracker.py`](../train_tracker.py); version strings are duplicated in `build_parser()` and `RecorderConfig`.
+  2. No `pyproject.toml` exists for standard `pip` / `pipx` installation.
+
+---
+
+## 5. Performance, Memory & Code Hygiene Gaps (P2)
+
+### P2-1: Dead Stale-Train Pruning & Unbounded Deadband State Cache
+- **Location:** [`TrainStateStore.prune_stale_trains`](../tui/state.py#L261-L281), [`DeadbandFilter._states`](../storage/filter.py#L48)
+- **Issue:** Violates [`../.agents/rules/performance-and-resource-bounds.md`](../.agents/rules/performance-and-resource-bounds.md#L25-L29).
+  1. `TrainStateStore.prune_stale_trains()` is never invoked by `StreamWorker` or `TUIApp`, and its default `stale_timeout_sec=120.0` does not match the 30-minute (`1800.0s`) rule specification.
+  2. `DeadbandFilter._states` never evicts stale train keys over multi-month daemon uptime.
+
+### P2-2: TUI Frame Rate Default Exceeds Cap & Redraws Unchanged Frames
+- **Location:** [`build_parser`](../train_tracker.py#L220-L225), [`TUIApp.__init__`](../tui/app.py#L59,L74), [`TUIApp.run_loop`](../tui/app.py#L419-L483)
+- **Issue:** Violates [`../.agents/rules/performance-and-resource-bounds.md`](../.agents/rules/performance-and-resource-bounds.md#L18-L23):
+  1. Default FPS is `20.0` (clamped up to `60.0`) instead of the mandated 10–15 FPS cap.
+  2. `TUIApp.run_loop()` rasterizes the full Braille canvas and redraws all subwindows every frame even when `snapshot.version` and viewport state are unchanged.
+
+### P2-3: Python 3.12+ `datetime.utcnow()` Deprecation Warnings
+- **Location:** [`TelemetryHistoryRow.from_train_position`](../storage/models.py#L157), [`TelemetryRecorder`](../storage/recorder.py#L84,L129,L253)
+- **Issue:** Uses deprecated `datetime.utcnow().isoformat() + "Z"` instead of `datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")`.
+
+### P2-4: Boolean Parameters in Function Signatures Instead of Enums
+- **Location:** [`run_tui_mode`](../train_tracker.py#L342-L349), [`run_plain_stream_mode`](../train_tracker.py#L432-L438), [`run_record_mode`](../train_tracker.py#L516-L524), [`TUIApp.cycle_selection`](../tui/app.py#L235), [`TUIRenderer.render_all`](../tui/renderer.py#L1001-L1012)
+- **Issue:** Violates [`../.agents/rules/communication.md`](../.agents/rules/communication.md#L17) ("Use strongly typed `Enum` instead of boolean parameters in function signatures").
+
+### P2-5: Function Name Length Violations ($> 30$ Characters)
+- **Location:** [`run_deadband_efficiency_benchmark`](../scripts/benchmark_storage.py#L133) (33 chars), [`run_write_throughput_benchmark`](../scripts/benchmark_storage.py#L68) (30 chars)
+- **Issue:** Violates [`../.agents/rules/communication.md`](../.agents/rules/communication.md#L16) ("Keep function names short, clear, and descriptive: fewer than 30 characters").
+
+### P2-6: Skill Documentation CLI Flag Drift
+- **Location:** [`../.agents/skills/package-distribution-validator/SKILL.md`](../.agents/skills/package-distribution-validator/SKILL.md#L38), [`../.agents/skills/storage-benchmark-gate/SKILL.md`](../.agents/skills/storage-benchmark-gate/SKILL.md#L38-L40)
+- **Issue:** Skills reference non-existent CLI flags (`--live`, `--mock`, `--headless`) and repository method names (`get_active_positions`, `get_train_trajectory`, `get_corridor_statistics`) that differ from [`../train_tracker.py`](../train_tracker.py) and [`../storage/repository.py`](../storage/repository.py).
+
+---
+
+## 6. Remediation Roadmap
+
+### A. Execution Sequence (ASCII)
+
+```text
++-------------------------------------------------------------------------+
+| PHASE 1: P0 PRODUCTION BLOCKERS (DATA INTEGRITY & DAEMON LIFECYCLE)     |
+|  1. Fix islands-and-gaps SQL window query in ../storage/repository.py   |
+|  2. Remove print/catch loop from ../train_tracker.py SSE generator      |
+|  3. Trap SIGTERM/SIGINT/SIGHUP & checkpoint WAL on recorder shutdown    |
+|  4. Wire TUIApp.toggle_pause() to StreamWorker.pause()/resume()         |
+|  5. Persist thread-local SQLite connections + BEGIN IMMEDIATE + timeout |
+|  6. Add shutil.disk_usage circuit breaker & --retention-days purge      |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+| PHASE 2: P1 SECURITY, RESILIENCE & PACKAGING COMPLIANCE                 |
+|  7. Validate PRAGMA wal_checkpoint mode & set PRAGMA user_version = 1   |
+|  8. Enforce 0600 DB permissions, URL whitelist & export path checks     |
+|  9. Validate WGS84 coordinate bounds & handle HTTP 429 Retry-After      |
+| 10. Add TTY/curses fallback, ASCII glyph fallback & safe init_pair()    |
+| 11. Configure railmon.* logger hierarchy & RotatingFileHandler          |
+| 12. Add pyproject.toml and canonical __version__ in ../train_tracker.py |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+| PHASE 3: P2 RESOURCE BOUNDS & CODE HYGIENE                              |
+| 13. Invoke prune_stale_trains(1800s) & evict stale DeadbandFilter keys  |
+| 14. Cap default TUI FPS to 15.0 & skip redraw on idle snapshot.version  |
+| 15. Replace datetime.utcnow(), boolean parameters & >30-char fn names   |
++-------------------------------------------------------------------------+
+```
+
+### B. Execution Sequence (Mermaid)
+
+```mermaid
+flowchart LR
+    subgraph Phase1 ["Phase 1: P0 Blockers"]
+        P0_1["Islands-and-Gaps Dwell SQL (../storage/repository.py)"]
+        P0_2["Decouple SSE Exceptions (../train_tracker.py)"]
+        P0_3["Trap SIGTERM & WAL Checkpoint (../train_tracker.py)"]
+        P0_4["Fix Worker Pause Wiring (../tui/app.py)"]
+        P0_5["Thread-Local DB & BEGIN IMMEDIATE (../storage/db.py)"]
+        P0_6["Disk Circuit Breaker & Retention (../storage/recorder.py)"]
+    end
+
+    subgraph Phase2 ["Phase 2: P1 Hardening"]
+        P1_1["Allowlist PRAGMA & user_version (../storage/db.py)"]
+        P1_2["0600 Umask & Export Path Guards (../storage/repository.py)"]
+        P1_3["Coordinate Bounds & HTTP 429 (../train_tracker.py)"]
+        P1_4["Headless & ASCII Fallbacks (../tui/renderer.py)"]
+        P1_5["RotatingFileHandler & Log Prefix (../train_tracker.py)"]
+        P1_6["pyproject.toml & __version__ (../train_tracker.py)"]
+    end
+
+    subgraph Phase3 ["Phase 3: P2 Optimization"]
+        P2_1["Stale Cache Eviction (../tui/state.py)"]
+        P2_2["15 FPS Cap & Idle Dirty-Check (../tui/app.py)"]
+        P2_3["timezone.utc & Enum Signatures (../storage/models.py)"]
+    end
+
+    Phase1 --> Phase2 --> Phase3
+```

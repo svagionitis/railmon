@@ -450,26 +450,72 @@ ORDER BY punctuality_rate_pct DESC, avg_delay_min ASC;
 
 ### 4.4 Station Dwell Detection Algorithm
 
-Station dwells are calculated by identifying stationary windows ($\text{speed} \le 2.0\text{ km/h}$) grouped by reported `next_station`.
+Station dwells are calculated by partitioning contiguous stationary windows ($\text{speed} \le 2.0\text{ km/h}$) into discrete islands using `LAG()`, cumulative `SUM()`, and `FIRST_VALUE()` window functions:
 
 ```sql
-SELECT 
+WITH annotated AS (
+    SELECT
+        id,
+        train_number,
+        schedule_id,
+        next_station AS station_name,
+        recorded_at,
+        COALESCE(delay_min, 0) AS delay_min,
+        CASE WHEN speed <= ? AND next_station IS NOT NULL THEN 1 ELSE 0 END AS is_stopped,
+        LAG(CASE WHEN speed <= ? AND next_station IS NOT NULL THEN 1 ELSE 0 END, 1, 0)
+            OVER (ORDER BY recorded_at ASC, id ASC) AS prev_stopped,
+        LAG(next_station) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_station,
+        LAG(schedule_id) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_schedule,
+        LAG(recorded_at) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_recorded_at
+    FROM telemetry_history
+    WHERE train_number = ?
+      AND (? IS NULL OR recorded_at >= ?)
+      AND (? IS NULL OR recorded_at <= ?)
+),
+islands AS (
+    SELECT
+        id,
+        train_number,
+        station_name,
+        recorded_at,
+        delay_min,
+        SUM(
+            CASE
+                WHEN prev_stopped = 0
+                  OR prev_station IS NOT station_name
+                  OR COALESCE(prev_schedule, '') != COALESCE(schedule_id, '')
+                  OR (JULIANDAY(recorded_at) - JULIANDAY(prev_recorded_at)) * 86400.0 > 1800.0
+                THEN 1
+                ELSE 0
+            END
+        ) OVER (ORDER BY recorded_at ASC, id ASC) AS island_id
+    FROM annotated
+    WHERE is_stopped = 1
+),
+island_delays AS (
+    SELECT
+        train_number,
+        station_name,
+        recorded_at,
+        island_id,
+        FIRST_VALUE(delay_min) OVER (
+            PARTITION BY island_id ORDER BY recorded_at ASC, id ASC
+        ) AS arrival_delay_min,
+        FIRST_VALUE(delay_min) OVER (
+            PARTITION BY island_id ORDER BY recorded_at DESC, id DESC
+        ) AS departure_delay_min
+    FROM islands
+)
+SELECT
     train_number,
-    next_station AS station_name,
+    station_name,
     MIN(recorded_at) AS arrival_time,
     MAX(recorded_at) AS departure_time,
-    ROUND((JULIANDAY(MAX(recorded_at)) - JULIANDAY(MIN(recorded_at))) * 86400) AS dwell_seconds,
-    (SELECT delay_min FROM telemetry_history 
-     WHERE train_number = t.train_number AND recorded_at = MIN(t.recorded_at) LIMIT 1) AS arrival_delay_min,
-    (SELECT delay_min FROM telemetry_history 
-     WHERE train_number = t.train_number AND recorded_at = MAX(t.recorded_at) LIMIT 1) AS departure_delay_min
-FROM telemetry_history t
-WHERE train_number = ?
-  AND (? IS NULL OR recorded_at >= ?)
-  AND (? IS NULL OR recorded_at <= ?)
-  AND next_station IS NOT NULL
-  AND speed <= ?
-GROUP BY next_station
+    CAST(ROUND((JULIANDAY(MAX(recorded_at)) - JULIANDAY(MIN(recorded_at))) * 86400.0) AS INTEGER) AS dwell_seconds,
+    MIN(arrival_delay_min) AS arrival_delay_min,
+    MIN(departure_delay_min) AS departure_delay_min
+FROM island_delays
+GROUP BY train_number, station_name, island_id
 HAVING dwell_seconds >= ?
 ORDER BY arrival_time ASC;
 ```
