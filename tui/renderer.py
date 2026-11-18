@@ -503,7 +503,7 @@ class TUIRenderer:
 
         # Title & Corridor
         corridor_name = snapshot.corridor_filter or "National Network"
-        left_text = f" HELLENIC RAILWAYS (railway.gov.gr) LIVE MAP | View: {corridor_name}"
+        left_text = f" RAILMON | HELLENIC RAILWAYS (railway.gov.gr) | View: {corridor_name}"
 
         # Train counts
         total_active = len(snapshot.filtered_trains)
@@ -940,7 +940,7 @@ class TUIRenderer:
             safe_addstr(win, start_y + r, start_x + box_w - 1, "|", border_attr)
 
         # Title
-        title = " KEYBOARD CONTROLS & SYSTEM REFERENCE "
+        title = " RAILMON - KEYBOARD CONTROLS & SYSTEM REFERENCE "
         t_x = max(start_x + 2, start_x + (box_w - len(title)) // 2)
         safe_addstr(win, start_y, t_x, title, header_attr)
 

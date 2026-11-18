@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""
+railmon - Hellenic Railways (railway.gov.gr) Live Train Tracker & Terminal Map.
+Main executable entry point.
+"""
+
+import sys
+from train_tracker import main
+
+if __name__ == "__main__":
+    sys.exit(main())

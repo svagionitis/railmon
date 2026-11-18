@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 """
-Railway.gov.gr Live Train Tracker - Python Client and CLI
-Connects to the official Hellenic Railways (OSE) train tracker platform.
+railmon - Hellenic Railways (railway.gov.gr) Live Train Tracker & Terminal Map.
+Python Client, Real-time SSE Monitor, and Curses TUI.
 """
 
 import argparse
@@ -185,18 +186,18 @@ class RailwayGovClient:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct command-line argument parser for train_tracker."""
+    """Construct command-line argument parser for railmon."""
     parser = argparse.ArgumentParser(
-        prog="train_tracker",
-        description="Hellenic Railways (railway.gov.gr) Live Train Tracker & Terminal Map.",
+        prog="railmon",
+        description="railmon - Hellenic Railways (railway.gov.gr) Live Train Tracker & Terminal Map.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 train_tracker.py --tui          # Launch live interactive terminal map
-  python3 train_tracker.py --tui --demo   # Launch offline interactive demo simulator
-  python3 train_tracker.py                # Plain console live stream monitor
-  python3 train_tracker.py --demo         # Plain console offline mock stream
-  python3 train_tracker.py schedules      # List today's upcoming scheduled train trips
+  railmon --tui          # Launch live interactive terminal map
+  railmon --tui --demo   # Launch offline interactive demo simulator
+  railmon                # Plain console live stream monitor
+  railmon --demo         # Plain console offline mock stream
+  railmon schedules      # List today's upcoming scheduled train trips
         """,
     )
     parser.add_argument(

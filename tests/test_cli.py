@@ -81,7 +81,7 @@ class TestCLIArgumentParser(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 self.parser.parse_args(["--version"])
             self.assertEqual(cm.exception.code, 0)
-            self.assertIn("train_tracker 1.0.0", mock_stdout.getvalue())
+            self.assertIn("railmon 1.0.0", mock_stdout.getvalue())
 
 
 class TestCLIDispatchAndLifecycle(unittest.TestCase):
