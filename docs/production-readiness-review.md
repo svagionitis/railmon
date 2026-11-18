@@ -19,7 +19,7 @@
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  |  5/10  | Per-batch connection churn; no user_version  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
-| Resilience & Stream Handling      |  4/10  | Client swallows URLError; raw print in TUI   |
+| Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
 | Daemon Lifecycle & Signals        |  4/10  | No SIGTERM/SIGHUP handler; pause broken      |
 | Security & Data Protection        |  5/10  | Unvalidated PRAGMA f-string; no 0600 umask   |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
@@ -254,9 +254,9 @@ ORDER BY arrival_time ASC;
 
 ---
 
-### P0-2: SSE Exception Swallowing, Curses Buffer Corruption & Blocking Shutdown
+### P0-2: SSE Exception Swallowing, Curses Buffer Corruption & Blocking Shutdown [RESOLVED]
 
-- **Location:** [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L137-L188) and [`StreamWorker._run_loop`](../tui/stream_worker.py#L85-L138)
+- **Location:** [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L141-L220) and [`StreamWorker._run_loop`](../tui/stream_worker.py#L85-L154) | **Plan:** [`./p0-2-sse-exception-curses-shutdown-fix-plan.md`](./p0-2-sse-exception-curses-shutdown-fix-plan.md)
 - **Root Cause:** `stream_train_positions()` wraps its infinite loop in `except (urllib.error.URLError, TimeoutError)` ([`../train_tracker.py`](../train_tracker.py#L185-L187)), prints directly to `sys.stdout`, and sleeps for `reconnect_delay`.
 
 ```text

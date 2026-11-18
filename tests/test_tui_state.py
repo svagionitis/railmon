@@ -2,12 +2,15 @@
 Unit and integration tests for thread-safe state store and background stream worker.
 """
 
+import io
 import time
 import threading
 import unittest
+import urllib.error
 from typing import Generator, List
+from unittest.mock import patch
 
-from train_tracker import TrainPosition
+from train_tracker import RailwayGovClient, TrainPosition
 from tui.mock_engine import MockTelemetryEngine
 from tui.state import (
     ConnectionStatus,
@@ -464,6 +467,41 @@ class TestStreamWorker(unittest.TestCase):
         self.assertGreater(len(snap.trains), 0)
         # Verify known mock trains exist in state store
         self.assertIn("mock-ic-50", snap.trains)
+
+    @patch("urllib.request.urlopen")
+    def test_stream_worker_client_error_transitions_to_reconnecting_without_stdout(self, mock_urlopen):
+        """Verify StreamWorker with RailwayGovClient catches URLError, sets RECONNECTING, and emits zero stdout."""
+        mock_urlopen.side_effect = urllib.error.URLError("Network unreachable")
+        client = RailwayGovClient("https://railway.gov.gr")
+
+        worker = StreamWorker(
+            store=self.store,
+            client=client,
+            base_backoff_sec=0.5,
+            max_backoff_sec=2.0,
+        )
+
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            worker.start()
+            # Give worker time to hit urlopen failure and enter RECONNECTING backoff wait
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                if self.store.get_snapshot().connection_status == ConnectionStatus.RECONNECTING:
+                    break
+                time.sleep(0.01)
+
+            snap = self.store.get_snapshot()
+            self.assertEqual(snap.connection_status, ConnectionStatus.RECONNECTING)
+            self.assertIn("Network unreachable", snap.status_message)
+
+            # Stop should interrupt backoff wait immediately
+            stop_start = time.time()
+            worker.stop(timeout_sec=1.0)
+            stop_elapsed = time.time() - stop_start
+
+            self.assertFalse(worker.is_running)
+            self.assertLess(stop_elapsed, 0.4)
+            self.assertEqual(mock_stdout.getvalue(), "")
 
 
 if __name__ == "__main__":

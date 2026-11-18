@@ -6,16 +6,20 @@ Python Client, Real-time SSE Monitor, and Curses TUI.
 
 import argparse
 import json
+import logging
 import os
 import signal
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
+
+logger = logging.getLogger("railmon." + __name__)
 
 
 BASE_URL = "https://railway.gov.gr"
@@ -137,23 +141,35 @@ class RailwayGovClient:
     def stream_train_positions(
         self,
         event_filter: str = "trainPositionsUx",
-        reconnect_delay: float = 3.0
+        reconnect_delay: float = 3.0,
+        stop_event: Optional[threading.Event] = None,
+        timeout: float = 10.0,
     ) -> Generator[List[TrainPosition], None, None]:
         """
         Stream live train positions via Server-Sent Events (SSE).
         Yields a list of TrainPosition objects whenever an update arrives.
+
+        Args:
+            event_filter: SSE event name to parse (default: 'trainPositionsUx').
+            reconnect_delay: Seconds to wait before reconnecting on error. If <= 0,
+                connection exceptions are raised directly to the caller (e.g. StreamWorker).
+            stop_event: Optional threading.Event to signal immediate stream termination.
+            timeout: Socket read timeout in seconds (default: 10.0).
         """
         stream_url = f"{self.base_url}/api/train-stream"
         headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
 
-        while True:
+        while stop_event is None or not stop_event.is_set():
             try:
                 req = urllib.request.Request(stream_url, headers=headers)
-                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=30) as resp:
+                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=timeout) as resp:
                     current_event = "message"
-                    data_buffer = []
+                    data_buffer: List[str] = []
 
                     for raw_line in resp:
+                        if stop_event is not None and stop_event.is_set():
+                            return
+
                         line = raw_line.decode("utf-8", errors="ignore").strip()
 
                         if not line:
@@ -169,11 +185,11 @@ class RailwayGovClient:
                                         trains = [
                                             TrainPosition.from_dict(p)
                                             for p in raw_positions
-                                            if p.get("lat") and p.get("lng")
+                                            if p.get("lat") is not None and p.get("lng") is not None
                                         ]
                                         yield trains
-                                    except json.JSONDecodeError:
-                                        pass
+                                    except json.JSONDecodeError as exc:
+                                        logger.debug("Skipping malformed SSE JSON payload: %s", exc)
                             current_event = "message"
                             continue
 
@@ -182,9 +198,25 @@ class RailwayGovClient:
                         elif line.startswith("data:"):
                             data_buffer.append(line.split(":", 1)[1].strip())
 
-            except (urllib.error.URLError, TimeoutError) as e:
-                print(f"[Stream Warning] Connection interrupted: {e}. Reconnecting in {reconnect_delay}s...")
-                time.sleep(reconnect_delay)
+                    # If upstream closed the response stream cleanly without stop_event
+                    if reconnect_delay <= 0:
+                        return
+
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                if reconnect_delay <= 0:
+                    raise
+                logger.warning(
+                    "SSE connection interrupted: %s. Reconnecting in %.1fs...",
+                    e,
+                    reconnect_delay,
+                )
+                if stop_event is not None:
+                    if stop_event.wait(timeout=reconnect_delay):
+                        return
+                else:
+                    time.sleep(reconnect_delay)
 
 
 def build_parser() -> argparse.ArgumentParser:

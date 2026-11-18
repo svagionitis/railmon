@@ -543,8 +543,6 @@ class StreamWorker:
 
             try:
                 stream = self._get_stream_generator()
-                self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
-                backoff = self.base_backoff_sec  # Reset backoff upon successful connection
 
                 for batch in stream:
                     if self._stop_event.is_set():
@@ -554,6 +552,10 @@ class StreamWorker:
                     self._pause_event.wait()
                     if self._stop_event.is_set():
                         break
+
+                    if self.store.get_snapshot().connection_status != ConnectionStatus.CONNECTED:
+                        self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
+                    backoff = self.base_backoff_sec  # Reset backoff upon successful data frame
 
                     if batch:
                         self.store.update_positions(batch)
@@ -588,7 +590,10 @@ class StreamWorker:
         elif self.mock_engine is not None:
             return self.mock_engine.stream_positions(interval_sec=1.0)
         elif self.client is not None:
-            return self.client.stream_train_positions()
+            return self.client.stream_train_positions(
+                reconnect_delay=0.0,
+                stop_event=self._stop_event,
+            )
         else:
             raise ValueError("No valid telemetry source provided to StreamWorker")
 ```
