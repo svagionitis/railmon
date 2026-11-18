@@ -237,6 +237,7 @@ flowchart TD
 - **Acceptance Criteria:** Unit tests verifying coordinate mapping accuracy, aspect-ratio scaling, and Braille dot bitmask combinations.
 
 ### Phase 2: Rail Network Topology & Offline Mock Simulator
+*(Detailed specification: [Phase 2 Implementation Plan](./phase-2-rail-network-topology-mock-simulator.md))*
 - **Files:** `tui/data/stations.json`, `tui/data/tracks.json`, `tui/mock_engine.py`, `tests/test_mock_engine.py`
 - **Deliverables:**
   - Bundled coordinate points for all major Greek railway stations (Athens, SKA, Airport, Kiato, Chalkida, Larissa, Thessaloniki, etc.).
