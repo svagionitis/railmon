@@ -7,9 +7,16 @@ from datetime import datetime
 import os
 import sqlite3
 import threading
-from typing import Any, Generator, Optional, Set
+from typing import Any, Dict, Generator, Optional, Set
 
 from storage.schema import SchemaManager
+
+_WAL_CHECKPOINT_SQL: Dict[str, str] = {
+    "PASSIVE": "PRAGMA wal_checkpoint(PASSIVE);",
+    "FULL": "PRAGMA wal_checkpoint(FULL);",
+    "RESTART": "PRAGMA wal_checkpoint(RESTART);",
+    "TRUNCATE": "PRAGMA wal_checkpoint(TRUNCATE);",
+}
 
 
 def _convert_timestamp(val: bytes) -> Any:
@@ -135,12 +142,23 @@ class Database:
 
     def checkpoint_wal(self, mode: str = "PASSIVE") -> None:
         """Trigger WAL checkpoint to write changes to base file (PASSIVE, FULL, RESTART, TRUNCATE)."""
+        if not isinstance(mode, str):
+            raise ValueError(f"Invalid WAL checkpoint mode: {mode!r}")
+
+        normalized_mode = mode.strip().upper()
+        sql = _WAL_CHECKPOINT_SQL.get(normalized_mode)
+        if sql is None:
+            allowed = ", ".join(sorted(_WAL_CHECKPOINT_SQL.keys()))
+            raise ValueError(
+                f"Invalid WAL checkpoint mode {mode!r}. Allowed modes: {allowed}"
+            )
+
         if self._is_memory:
             return
         with self.connection() as conn:
             cursor = conn.cursor()
             try:
-                cursor.execute(f"PRAGMA wal_checkpoint({mode});")
+                cursor.execute(sql)
             finally:
                 cursor.close()
 

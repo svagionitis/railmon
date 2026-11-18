@@ -235,6 +235,49 @@ class TestStorageDatabase(unittest.TestCase):
                 recorder.stop(timeout_sec=2.0)
             db.close()
 
+    def test_checkpoint_wal_accepts_all_valid_modes_case_insensitively(self):
+        """checkpoint_wal must accept PASSIVE, FULL, RESTART, and TRUNCATE (case-insensitive)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "checkpoint_modes.db")
+            db = Database(db_path)
+            try:
+                for mode in ("PASSIVE", "FULL", "RESTART", "TRUNCATE", "passive", " truncate "):
+                    db.checkpoint_wal(mode)
+            finally:
+                db.close()
+
+    def test_checkpoint_wal_rejects_invalid_or_injected_modes(self):
+        """checkpoint_wal must reject invalid modes and SQL injection payloads with ValueError."""
+        mem_db = Database(":memory:")
+        try:
+            for bad_mode in ("INVALID", "", "   ", "PASSIVE); DROP TABLE trains; --", None, 123):
+                with self.assertRaises(ValueError):
+                    mem_db.checkpoint_wal(bad_mode)  # type: ignore[arg-type]
+        finally:
+            mem_db.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "checkpoint_inject.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO trains (train_number, first_observed_at, last_observed_at)
+                        VALUES ('IC50', '2026-11-18T10:00:00Z', '2026-11-18T10:00:00Z');
+                        """
+                    )
+
+                for bad_mode in ("INVALID", "", "   ", "PASSIVE); DROP TABLE trains; --", None):
+                    with self.assertRaises(ValueError):
+                        db.checkpoint_wal(bad_mode)  # type: ignore[arg-type]
+
+                with db.connection() as conn:
+                    count = conn.execute("SELECT COUNT(*) FROM trains;").fetchone()[0]
+                    self.assertEqual(count, 1)
+            finally:
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

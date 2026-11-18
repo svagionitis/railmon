@@ -2,26 +2,26 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 9 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 8 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
 ## 1. Executive Summary & Scorecard
 
-`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (219/219 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
+`railmon` comprises an HTTP/SSE client ([`../train_tracker.py`](../train_tracker.py)), a curses Braille geospatial TUI ([`../tui/`](../tui/)), and a SQLite WAL time-series recorder ([`../storage/`](../storage/)). Interactive simulation (`--demo`) and unit tests (230/230 passing) function as designed, but the background daemon, SQLite connection lifecycle, analytical SQL engine, and terminal fallback layers violate critical repository rules in [`../.agents/rules/`](../.agents/rules/).
 
 ```text
 +-----------------------------------+--------+----------------------------------------------+
 | Dimension                         | Score  | Status & Primary Finding                     |
 +-----------------------------------+--------+----------------------------------------------+
 | Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
-| Test Suite & Empirical Benchmarks |  8/10  | 219 tests pass; 31.6k rows/s @ batch=100     |
+| Test Suite & Empirical Benchmarks |  8/10  | 230 tests pass; 31.6k rows/s @ batch=100     |
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  |  9/10  | P0-5 fixed; thread-local & BEGIN IMMEDIATE   |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
-| Security & Data Protection        |  5/10  | Unvalidated PRAGMA f-string; no 0600 umask   |
+| Security & Data Protection        |  6/10  | P1-1 fixed; missing 0600 umask & path guards |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
 | Storage Retention & Disk Bounds   |  9/10  | P0-6 fixed; archival & disk_usage check      |
 | Packaging & Versioning            |  3/10  | Missing pyproject.toml and __version__       |
@@ -32,12 +32,12 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `219 passed in 15.0s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `230 passed in 14.9s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
 | Read Latency (`get_corridor_punctuality`) | `mean 3.03 ms`, `p95 4.61 ms` | `mean <= 15 ms`, `p95 <= 30 ms` | PASS |
-| Security SQL Injection Scan | 1 match ([`../storage/db.py`](../storage/db.py#L140)) | 0 matches | **FAIL** |
+| Security SQL Injection Scan | 0 matches ([`../storage/db.py`](../storage/db.py#L143-L162)) | 0 matches | PASS |
 
 ---
 
@@ -331,10 +331,10 @@ sequenceDiagram
 
 ## 4. High-Priority Architecture & Security Deficiencies (P1)
 
-### P1-1: Unparameterized f-String in `PRAGMA wal_checkpoint`
-- **Location:** [`Database.checkpoint_wal`](../storage/db.py#L105-L114)
-- **Issue:** `cursor.execute(f"PRAGMA wal_checkpoint({mode});")` interpolates `mode` without allowlist validation, failing the security audit scan ([`../.agents/skills/security-audit/SKILL.md`](../.agents/skills/security-audit/SKILL.md#L38)) and [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L10-L12).
-- **Fix:** Validate `mode.upper() in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}` before executing.
+### P1-1: Unparameterized f-String in `PRAGMA wal_checkpoint` [RESOLVED]
+- **Location:** [`Database.checkpoint_wal`](../storage/db.py#L143-L162) | **Plan:** [`./p1-1-pragma-wal-checkpoint-allowlist-fix-plan.md`](./p1-1-pragma-wal-checkpoint-allowlist-fix-plan.md)
+- **Issue:** `cursor.execute(f"PRAGMA wal_checkpoint({mode});")` interpolated `mode` without allowlist validation, failing the security audit scan ([`../.agents/skills/security-audit/SKILL.md`](../.agents/skills/security-audit/SKILL.md#L38)) and [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L10-L12).
+- **Fix:** Validate `mode.strip().upper() in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}` (raising `ValueError` on invalid modes) and dispatch via static SQL literals in `_WAL_CHECKPOINT_SQL`.
 
 ### P1-2: Missing `PRAGMA user_version` & Startup Integrity Check
 - **Location:** [`SchemaManager`](../storage/schema.py#L109-L175)
