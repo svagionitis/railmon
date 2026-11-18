@@ -246,6 +246,7 @@ flowchart TD
 - **Acceptance Criteria:** The mock engine runs independently and generates valid `TrainPosition` batches when offline or during off-peak hours.
 
 ### Phase 3: Thread-Safe State Store & SSE Worker
+*(Detailed specification: [Phase 3 Implementation Plan](./phase-3-thread-safe-state-store-sse-worker.md))*
 - **Files:** `tui/state.py`, `tui/stream_worker.py`, `tests/test_tui_state.py`
 - **Deliverables:**
   - `TrainStateStore` holding active trains, decaying historical trails (last 10 coordinates), selection cursor, viewport focus, and filter predicates.

@@ -11,6 +11,14 @@ from tui.mock_engine import (
     load_stations,
     load_tracks,
 )
+from tui.state import (
+    ConnectionStatus,
+    HistoricalBreadcrumb,
+    StateSnapshot,
+    TrainRecord,
+    TrainStateStore,
+)
+from tui.stream_worker import StreamWorker
 
 __all__ = [
     "GeoPoint",
@@ -26,4 +34,10 @@ __all__ = [
     "load_tracks",
     "haversine_distance",
     "calculate_bearing",
+    "ConnectionStatus",
+    "HistoricalBreadcrumb",
+    "TrainRecord",
+    "StateSnapshot",
+    "TrainStateStore",
+    "StreamWorker",
 ]
