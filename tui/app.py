@@ -10,6 +10,7 @@ import curses
 from enum import Enum, auto
 import os
 import signal
+import threading
 import time
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -57,6 +58,7 @@ class TUIApp:
         stations: Optional[Sequence[StationNode]] = None,
         tracks: Optional[Sequence[TrackPolyline]] = None,
         target_fps: float = 20.0,
+        stop_event: Optional[threading.Event] = None,
     ):
         """Initialize the TUI application controller.
 
@@ -67,6 +69,7 @@ class TUIApp:
             stations: List or sequence of StationNode entities.
             tracks: List or sequence of TrackPolyline entities.
             target_fps: Target frames per second (default: 20.0).
+            stop_event: Optional external shutdown event triggered by OS signals.
         """
         self.stdscr = stdscr
         self.store = store
@@ -74,6 +77,7 @@ class TUIApp:
         self.target_fps = max(5.0, min(60.0, target_fps))
         self.frame_interval = 1.0 / self.target_fps
         self.running = False
+        self.stop_event = stop_event
 
         # Interactive state & modal input
         self.input_mode: InputMode = InputMode.NORMAL
@@ -416,7 +420,7 @@ class TUIApp:
         self.running = True
 
         try:
-            while self.running:
+            while self.running and (self.stop_event is None or not self.stop_event.is_set()):
                 frame_start = time.monotonic()
 
                 # 1. Sample user keyboard input (non-blocking)
@@ -495,6 +499,7 @@ def run_tui(
     stations: Optional[Sequence[StationNode]] = None,
     tracks: Optional[Sequence[TrackPolyline]] = None,
     target_fps: float = 20.0,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Safely start the Curses TUI application with automatic terminal restoration.
 
@@ -504,6 +509,7 @@ def run_tui(
         stations: Optional list of StationNode objects.
         tracks: Optional list of TrackPolyline objects.
         target_fps: Rendering target frames per second.
+        stop_event: Optional external shutdown event triggered by OS signals.
     """
     def _curses_main(stdscr: Any) -> None:
         app = TUIApp(
@@ -513,6 +519,7 @@ def run_tui(
             stations=stations,
             tracks=tracks,
             target_fps=target_fps,
+            stop_event=stop_event,
         )
         app.run_loop()
 

@@ -143,7 +143,10 @@ class StreamWorker:
         if self.custom_stream is not None:
             return self.custom_stream
         elif self.mock_engine is not None:
-            return self.mock_engine.stream_positions(interval_sec=1.0)
+            return self.mock_engine.stream_positions(
+                interval_sec=1.0,
+                stop_event=self._stop_event,
+            )
         elif self.client is not None:
             return self.client.stream_train_positions(
                 reconnect_delay=0.0,

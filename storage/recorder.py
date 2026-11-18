@@ -15,7 +15,7 @@ from storage.filter import DeadbandConfig, DeadbandFilter
 from storage.models import TelemetryHistoryRow
 from train_tracker import TrainPosition
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("railmon." + __name__)
 
 
 @dataclass(frozen=True)
@@ -124,19 +124,32 @@ class TelemetryRecorder:
         if self._thread:
             self._thread.join(timeout=timeout_sec)
 
-        # Finalize session audit
+        # Finalize session audit and checkpoint WAL
         with self._lock:
             ended_at = datetime.utcnow().isoformat() + "Z"
             if self._session_id is not None:
-                with self.db.transaction() as cur:
-                    cur.execute(
-                        """
-                        UPDATE recording_sessions
-                        SET ended_at = ?, total_records_written = ?
-                        WHERE session_id = ?
-                        """,
-                        (ended_at, self._total_records_written, self._session_id),
+                try:
+                    with self.db.transaction() as cur:
+                        cur.execute(
+                            """
+                            UPDATE recording_sessions
+                            SET ended_at = ?, total_records_written = ?
+                            WHERE session_id = ?
+                            """,
+                            (ended_at, self._total_records_written, self._session_id),
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to finalize recording session %s: %s",
+                        self._session_id,
+                        exc,
                     )
+
+            try:
+                self.db.checkpoint_wal("TRUNCATE")
+            except Exception as exc:
+                logger.warning("WAL checkpoint on recorder stop encountered an error: %s", exc)
+
             logger.info(
                 "TelemetryRecorder stopped. Session %s ended. Total rows written: %d",
                 self._session_id,

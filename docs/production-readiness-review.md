@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (6 P0 blockers, 9 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (5 P0 blockers, 9 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
@@ -15,12 +15,12 @@
 | Dimension                         | Score  | Status & Primary Finding                     |
 +-----------------------------------+--------+----------------------------------------------+
 | Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
-| Test Suite & Empirical Benchmarks |  8/10  | 201 tests pass; 20.4k rows/s @ batch=100     |
+| Test Suite & Empirical Benchmarks |  8/10  | 212 tests pass; 20.4k rows/s @ batch=100     |
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  |  5/10  | Per-batch connection churn; no user_version  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
-| Daemon Lifecycle & Signals        |  4/10  | No SIGTERM/SIGHUP handler; pause broken      |
+| Daemon Lifecycle & Signals        |  8/10  | P0-3 fixed; TUI pause wiring pending         |
 | Security & Data Protection        |  5/10  | Unvalidated PRAGMA f-string; no 0600 umask   |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
 | Storage Retention & Disk Bounds   |  3/10  | No retention purge; no disk_usage check      |
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `201 passed in 16.3s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `212 passed in 14.9s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `20,409.0 rows/sec` (`389.1 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 8.58 ms`, `p95 11.91 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -290,9 +290,9 @@ sequenceDiagram
 
 ---
 
-### P0-3: Missing `SIGTERM` / `SIGHUP` Handlers & Uncheckpointed WAL Teardown
+### P0-3: Missing `SIGTERM` / `SIGHUP` Handlers & Uncheckpointed WAL Teardown [RESOLVED]
 
-- **Location:** [`run_record_mode`](../train_tracker.py#L516-L626), [`run_plain_stream_mode`](../train_tracker.py#L432-L514), [`TelemetryRecorder.stop`](../storage/recorder.py#L108-L145)
+- **Location:** [`run_record_mode`](../train_tracker.py#L516-L626), [`run_plain_stream_mode`](../train_tracker.py#L432-L514), [`TelemetryRecorder.stop`](../storage/recorder.py#L108-L145) | **Plan:** [`./p0-3-sigterm-sighup-wal-teardown-fix-plan.md`](./p0-3-sigterm-sighup-wal-teardown-fix-plan.md)
 - **Root Cause:** `signal` is imported at [`../train_tracker.py`](../train_tracker.py#L10) and [`../tui/app.py`](../tui/app.py#L12) but never bound. Process termination via `SIGTERM` (Docker, `systemd`, Kubernetes) kills the interpreter immediately without running `finally:` blocks. Furthermore, `TelemetryRecorder.stop()` never invokes `self.db.checkpoint_wal("TRUNCATE")`.
 - **Impact:** Queued frames in `TelemetryRecorder._queue` are lost, `recording_sessions.ended_at` stays `NULL`, and `-wal` files remain unmerged on shutdown.
 - **Fix:** Bind `SIGINT`, `SIGTERM`, and `SIGHUP` (on POSIX) to set a shared `stop_event: threading.Event` per [`../.agents/rules/lifecycle-and-signal-handling.md`](../.agents/rules/lifecycle-and-signal-handling.md#L10-L18), and invoke `self.db.checkpoint_wal("TRUNCATE")` at the end of `TelemetryRecorder.stop()`.

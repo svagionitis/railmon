@@ -5,6 +5,7 @@ Python Client, Real-time SSE Monitor, and Curses TUI.
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -20,6 +21,48 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
 
 logger = logging.getLogger("railmon." + __name__)
+
+
+@contextlib.contextmanager
+def install_signal_handlers(
+    stop_event: Optional[threading.Event] = None,
+) -> Generator[threading.Event, None, None]:
+    """Register SIGINT, SIGTERM, and POSIX SIGHUP handlers to set a shared stop_event."""
+    event = stop_event or threading.Event()
+
+    if threading.current_thread() is not threading.main_thread():
+        yield event
+        return
+
+    signals_to_trap: List[int] = [signal.SIGINT, signal.SIGTERM]
+    if sys.platform != "win32" and hasattr(signal, "SIGHUP"):
+        signals_to_trap.append(getattr(signal, "SIGHUP"))
+
+    previous_handlers: Dict[int, Any] = {}
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = str(signum)
+        logger.info("Received signal %s (%d); initiating graceful shutdown...", sig_name, signum)
+        event.set()
+
+    for sig in signals_to_trap:
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handle_signal)
+        except (OSError, ValueError):
+            pass
+
+    try:
+        yield event
+    finally:
+        for sig, prev in previous_handlers.items():
+            try:
+                signal.signal(sig, prev)
+            except (OSError, ValueError):
+                pass
 
 
 BASE_URL = "https://railway.gov.gr"
@@ -405,6 +448,7 @@ def run_tui_mode(
             return
         raise
 
+    db = None
     recorder = None
     if record:
         from storage.db import Database
@@ -447,18 +491,23 @@ def run_tui_mode(
     worker.start()
 
     # 5. Execute curses event loop with terminal protection
-    try:
-        run_tui(
-            store=store,
-            worker=worker,
-            stations=stations,
-            tracks=tracks,
-            target_fps=fps,
-        )
-    finally:
-        worker.stop()
-        if recorder:
-            recorder.stop()
+    with install_signal_handlers() as stop_event:
+        try:
+            run_tui(
+                store=store,
+                worker=worker,
+                stations=stations,
+                tracks=tracks,
+                target_fps=fps,
+                stop_event=stop_event,
+            )
+        finally:
+            stop_event.set()
+            worker.stop()
+            if recorder:
+                recorder.stop()
+            if db:
+                db.close()
 
 
 def run_plain_stream_mode(
@@ -477,6 +526,7 @@ def run_plain_stream_mode(
         db_path: Destination SQLite database file path when recording is active.
         enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
     """
+    db = None
     recorder = None
     if record:
         from storage.db import Database
@@ -493,56 +543,66 @@ def run_plain_stream_mode(
         )
         recorder.start()
 
-    if demo:
-        from tui.mock_engine import MockTelemetryEngine
+    with install_signal_handlers() as stop_event:
+        if demo:
+            from tui.mock_engine import MockTelemetryEngine
 
-        engine = MockTelemetryEngine()
-        stream = engine.stream_positions(interval_sec=1.0)
-        source_label = "Offline Mock Simulation"
-    else:
-        client = RailwayGovClient()
-        stream = client.stream_train_positions(reconnect_delay=reconnect_delay)
-        source_label = "Live SSE Stream (/api/train-stream)"
-
-    rec_label = f" | SQLite Recording: {db_path}" if record else ""
-    print("=" * 70)
-    print("  railway.gov.gr Live Train Tracker - CLI Monitor")
-    print(f"  Source: {source_label}{rec_label}")
-    print("=" * 70)
-    print("Press Ctrl+C to stop.\n", flush=True)
-
-    try:
-        for batch in stream:
-            if recorder:
-                recorder.enqueue_batch(batch)
-
-            print(f"\n[{time.strftime('%H:%M:%S')}] Live Trains on Network: {len(batch)}")
-            print(
-                f"{'Train':<8} {'Type':<12} {'Route':<32} {'Speed':<10} {'Delay':<8} {'Position (Lat, Lng)':<22}"
+            engine = MockTelemetryEngine()
+            stream = engine.stream_positions(interval_sec=1.0, stop_event=stop_event)
+            source_label = "Offline Mock Simulation"
+        else:
+            client = RailwayGovClient()
+            stream = client.stream_train_positions(
+                reconnect_delay=reconnect_delay,
+                stop_event=stop_event,
             )
-            print("-" * 95)
+            source_label = "Live SSE Stream (/api/train-stream)"
 
-            for t in batch:
-                route = (
-                    f"{t.origin or '—'} -> {t.destination or '—'}"
-                    if (t.origin or t.destination)
-                    else (t.corridor or "Shunting/Yard")
-                )
+        rec_label = f" | SQLite Recording: {db_path}" if record else ""
+        print("=" * 70)
+        print("  railway.gov.gr Live Train Tracker - CLI Monitor")
+        print(f"  Source: {source_label}{rec_label}")
+        print("=" * 70)
+        print("Press Ctrl+C to stop.\n", flush=True)
+
+        try:
+            for batch in stream:
+                if stop_event.is_set():
+                    break
+                if recorder:
+                    recorder.enqueue_batch(batch)
+
+                print(f"\n[{time.strftime('%H:%M:%S')}] Live Trains on Network: {len(batch)}")
                 print(
-                    f"{t.train_number:<8} "
-                    f"{(t.service_type or t.train_type or 'N/A')[:11]:<12} "
-                    f"{route[:30]:<32} "
-                    f"{t.speed:>5.1f} km/h "
-                    f"{f'+{t.delay}m' if t.delay else 'On-time':<8} "
-                    f"({t.lat:.4f}, {t.lng:.4f})"
+                    f"{'Train':<8} {'Type':<12} {'Route':<32} {'Speed':<10} {'Delay':<8} {'Position (Lat, Lng)':<22}"
                 )
-            sys.stdout.flush()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nMonitoring stopped.")
-    finally:
-        if recorder:
-            recorder.stop()
+                print("-" * 95)
+
+                for t in batch:
+                    route = (
+                        f"{t.origin or '—'} -> {t.destination or '—'}"
+                        if (t.origin or t.destination)
+                        else (t.corridor or "Shunting/Yard")
+                    )
+                    print(
+                        f"{t.train_number:<8} "
+                        f"{(t.service_type or t.train_type or 'N/A')[:11]:<12} "
+                        f"{route[:30]:<32} "
+                        f"{t.speed:>5.1f} km/h "
+                        f"{f'+{t.delay}m' if t.delay else 'On-time':<8} "
+                        f"({t.lat:.4f}, {t.lng:.4f})"
+                    )
+                sys.stdout.flush()
+                if stop_event.wait(timeout=1.0):
+                    break
+            print("\nMonitoring stopped.")
+        except KeyboardInterrupt:
+            print("\nMonitoring stopped.")
+        finally:
+            if recorder:
+                recorder.stop()
+            if db:
+                db.close()
 
 
 def run_record_mode(
@@ -603,57 +663,64 @@ def run_record_mode(
     start_time = time.time()
     last_stat_time = time.time()
 
-    try:
-        if demo:
-            from tui.mock_engine import MockTelemetryEngine
-
-            engine = MockTelemetryEngine()
-            stream = engine.stream_positions(interval_sec=1.0)
-        else:
-            client = RailwayGovClient()
-            stream = client.stream_train_positions(reconnect_delay=reconnect_delay)
-
-        for batch in stream:
-            recorder.enqueue_batch(batch)
-
-            now = time.time()
-            if not quiet and (now - last_stat_time) >= 5.0:
-                stats = recorder.get_stats()
-                filter_stats = stats.get("filter") or {}
-                ratio = filter_stats.get("suppression_ratio_pct", 0.0)
-                try:
-                    db_size = os.path.getsize(db_path)
-                except OSError:
-                    db_size = 0
-                ts_str = time.strftime("%H:%M:%S")
-                print(
-                    f" {ts_str:<11} | {len(batch):>6} | {len(batch):>10} | "
-                    f"{stats.get('total_records_written', 0):>12} | {ratio:>9.1f}% | {format_file_size(db_size):>9}"
-                )
-                sys.stdout.flush()
-                last_stat_time = now
-
-    except KeyboardInterrupt:
-        pass
-    finally:
-        print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Shutting down recorder... draining queue and flushing buffer...")
-        recorder.stop(timeout_sec=5.0)
-        duration = time.time() - start_time
-        stats = recorder.get_stats()
-        filter_stats = stats.get("filter") or {}
-        suppressed = filter_stats.get("suppressed_count", 0)
-        ratio = filter_stats.get("suppression_ratio_pct", 0.0)
+    with install_signal_handlers() as stop_event:
         try:
-            db_size = os.path.getsize(db_path)
-        except OSError:
-            db_size = 0
+            if demo:
+                from tui.mock_engine import MockTelemetryEngine
 
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Session #{recorder.session_id} finalized.")
-        print(f"  - Duration: {duration:.1f}s")
-        print(f"  - Total Telemetry Rows Stored: {stats.get('total_records_written', 0):,d}")
-        if enable_deadband:
-            print(f"  - Positions Filtered (Deadband): {suppressed:,d} ({ratio:.1f}% compression ratio)")
-        print(f"  - Final Database File Size: {format_file_size(db_size)}")
+                engine = MockTelemetryEngine()
+                stream = engine.stream_positions(interval_sec=1.0, stop_event=stop_event)
+            else:
+                client = RailwayGovClient()
+                stream = client.stream_train_positions(
+                    reconnect_delay=reconnect_delay,
+                    stop_event=stop_event,
+                )
+
+            for batch in stream:
+                if stop_event.is_set():
+                    break
+                recorder.enqueue_batch(batch)
+
+                now = time.time()
+                if not quiet and (now - last_stat_time) >= 5.0:
+                    stats = recorder.get_stats()
+                    filter_stats = stats.get("filter") or {}
+                    ratio = filter_stats.get("suppression_ratio_pct", 0.0)
+                    try:
+                        db_size = os.path.getsize(db_path)
+                    except OSError:
+                        db_size = 0
+                    ts_str = time.strftime("%H:%M:%S")
+                    print(
+                        f" {ts_str:<11} | {len(batch):>6} | {len(batch):>10} | "
+                        f"{stats.get('total_records_written', 0):>12} | {ratio:>9.1f}% | {format_file_size(db_size):>9}"
+                    )
+                    sys.stdout.flush()
+                    last_stat_time = now
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Shutting down recorder... draining queue and flushing buffer...")
+            recorder.stop(timeout_sec=5.0)
+            db.close()
+            duration = time.time() - start_time
+            stats = recorder.get_stats()
+            filter_stats = stats.get("filter") or {}
+            suppressed = filter_stats.get("suppressed_count", 0)
+            ratio = filter_stats.get("suppression_ratio_pct", 0.0)
+            try:
+                db_size = os.path.getsize(db_path)
+            except OSError:
+                db_size = 0
+
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Session #{recorder.session_id} finalized.")
+            print(f"  - Duration: {duration:.1f}s")
+            print(f"  - Total Telemetry Rows Stored: {stats.get('total_records_written', 0):,d}")
+            if enable_deadband:
+                print(f"  - Positions Filtered (Deadband): {suppressed:,d} ({ratio:.1f}% compression ratio)")
+            print(f"  - Final Database File Size: {format_file_size(db_size)}")
 
     return 0
 

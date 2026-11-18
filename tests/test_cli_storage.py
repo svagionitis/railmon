@@ -211,6 +211,131 @@ class TestCLIRouting(unittest.TestCase):
         )
 
 
+class TestSignalHandlingAndDaemonShutdown(unittest.TestCase):
+    """Test suite for P0-3 signal handling (SIGINT, SIGTERM, SIGHUP) and WAL teardown."""
+
+    def test_install_signal_handlers_traps_sigterm_and_restores(self):
+        """install_signal_handlers must trap SIGINT and SIGTERM, set stop_event, and restore handlers."""
+        import signal
+        import train_tracker
+
+        self.assertTrue(hasattr(train_tracker, "install_signal_handlers"))
+        orig_sigint = signal.getsignal(signal.SIGINT)
+        orig_sigterm = signal.getsignal(signal.SIGTERM)
+
+        with train_tracker.install_signal_handlers() as stop_event:
+            self.assertFalse(stop_event.is_set())
+            active_handler = signal.getsignal(signal.SIGTERM)
+            self.assertNotEqual(active_handler, orig_sigterm)
+            # Trigger the registered SIGTERM handler directly
+            active_handler(signal.SIGTERM, None)
+            self.assertTrue(stop_event.is_set())
+
+        self.assertEqual(signal.getsignal(signal.SIGINT), orig_sigint)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), orig_sigterm)
+
+    def test_run_record_mode_graceful_shutdown_on_sigterm(self):
+        """run_record_mode must exit cleanly on SIGTERM, drain pending queue, finalize session, and truncate WAL."""
+        import shutil
+        import signal
+        import threading
+        from storage.db import Database
+        from train_tracker import run_record_mode
+
+        temp_dir = tempfile.mkdtemp()
+        db_path = os.path.join(temp_dir, "sigterm_rec.db")
+        try:
+            def trigger_sigterm():
+                handler = signal.getsignal(signal.SIGTERM)
+                if callable(handler):
+                    handler(signal.SIGTERM, None)
+
+            timer = threading.Timer(0.15, trigger_sigterm)
+            timer.start()
+            try:
+                with patch("sys.stdout", new_callable=io.StringIO):
+                    rc = run_record_mode(
+                        db_path=db_path,
+                        demo=True,
+                        enable_deadband=False,
+                        batch_size=500,  # Large batch size so only shutdown drain flushes
+                        flush_interval_sec=30.0,
+                        quiet=True,
+                    )
+            finally:
+                timer.cancel()
+
+            self.assertEqual(rc, 0)
+
+            db = Database(db_path)
+            try:
+                with db.connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) AS cnt FROM telemetry_history")
+                    total_rows = cur.fetchone()["cnt"]
+                    self.assertGreater(total_rows, 0)
+
+                    cur.execute("SELECT ended_at, total_records_written FROM recording_sessions ORDER BY session_id DESC LIMIT 1")
+                    sess = cur.fetchone()
+                    self.assertIsNotNone(sess)
+                    self.assertIsNotNone(sess["ended_at"])
+                    self.assertEqual(sess["total_records_written"], total_rows)
+            finally:
+                db.close()
+
+            wal_path = f"{db_path}-wal"
+            if os.path.exists(wal_path):
+                self.assertEqual(os.path.getsize(wal_path), 0)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_run_plain_stream_mode_graceful_shutdown_on_sigterm(self):
+        """run_plain_stream_mode must exit cleanly on SIGTERM and finalize background recorder."""
+        import shutil
+        import signal
+        import threading
+        from storage.db import Database
+        from train_tracker import run_plain_stream_mode
+
+        temp_dir = tempfile.mkdtemp()
+        db_path = os.path.join(temp_dir, "sigterm_stream.db")
+        try:
+            def trigger_sigterm():
+                handler = signal.getsignal(signal.SIGTERM)
+                if callable(handler):
+                    handler(signal.SIGTERM, None)
+
+            timer = threading.Timer(0.15, trigger_sigterm)
+            timer.start()
+            try:
+                with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+                    run_plain_stream_mode(
+                        demo=True,
+                        record=True,
+                        db_path=db_path,
+                        enable_deadband=False,
+                    )
+                    output = mock_stdout.getvalue()
+            finally:
+                timer.cancel()
+
+            self.assertIn("Monitoring stopped.", output)
+
+            db = Database(db_path)
+            try:
+                with db.connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT ended_at, total_records_written FROM recording_sessions ORDER BY session_id DESC LIMIT 1")
+                    sess = cur.fetchone()
+                    self.assertIsNotNone(sess)
+                    self.assertIsNotNone(sess["ended_at"])
+                    self.assertGreater(sess["total_records_written"], 0)
+            finally:
+                db.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 class TestCLIFormatters(unittest.TestCase):
     """Test suite for CLI terminal output formatting."""
 

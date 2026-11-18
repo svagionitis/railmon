@@ -334,6 +334,39 @@ class TestTelemetryRecorder(unittest.TestCase):
 
         self.assertFalse(rec.is_running)
 
+    def test_stop_invokes_wal_checkpoint_truncate(self):
+        """stop() must execute PRAGMA wal_checkpoint(TRUNCATE) after finalizing session."""
+        from unittest.mock import patch
+
+        config = RecorderConfig(batch_size=50, flush_interval_sec=10.0, enable_deadband=False)
+        self.recorder = TelemetryRecorder(self.db, config=config)
+
+        with patch.object(self.db, "checkpoint_wal", wraps=self.db.checkpoint_wal) as mock_ckpt:
+            self.recorder.start()
+            self.recorder.enqueue_batch([
+                _create_sample_position(f"WAL-{i}", lat=38.0 + i * 0.01)
+                for i in range(5)
+            ])
+            self.recorder.stop()
+            mock_ckpt.assert_called_once_with("TRUNCATE")
+
+        wal_file = f"{self.db_path}-wal"
+        if os.path.exists(wal_file):
+            self.assertEqual(os.path.getsize(wal_file), 0)
+
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS total FROM telemetry_history")
+            self.assertEqual(cur.fetchone()["total"], 5)
+
+            cur.execute(
+                "SELECT ended_at, total_records_written FROM recording_sessions WHERE session_id = ?",
+                (self.recorder.session_id,),
+            )
+            sess = cur.fetchone()
+            self.assertIsNotNone(sess["ended_at"])
+            self.assertEqual(sess["total_records_written"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

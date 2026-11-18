@@ -9,6 +9,7 @@ import bisect
 import json
 import math
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -719,15 +720,21 @@ class MockTelemetryEngine:
         return positions
 
     def stream_positions(
-        self, interval_sec: float = 1.0
+        self,
+        interval_sec: float = 1.0,
+        stop_event: Optional[threading.Event] = None,
     ) -> Generator[List[TrainPosition], None, None]:
         """Streaming generator yielding updated TrainPosition batches.
 
         Drop-in replacement for RailwayGovClient.stream_train_positions().
         """
-        while True:
+        while stop_event is None or not stop_event.is_set():
             yield self.step(interval_sec)
-            time.sleep(interval_sec)
+            if stop_event is not None:
+                if stop_event.wait(timeout=interval_sec):
+                    return
+            else:
+                time.sleep(interval_sec)
 
     def reset(self) -> None:
         """Reset all simulated trains to their initial schedule origins."""
