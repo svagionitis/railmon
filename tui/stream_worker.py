@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import logging
 import random
 import threading
+import time
 from typing import Any, Generator, Iterable, List, Optional, Union
 import urllib.error
 
@@ -48,6 +49,8 @@ class StreamWorker:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Unpaused by default
+        self._disconnect_time: Optional[float] = None
+        self._consecutive_failures: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -118,6 +121,12 @@ class StreamWorker:
                         self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
                     backoff = self.base_backoff_sec  # Reset backoff upon successful data frame
 
+                    if self._consecutive_failures > 0 and self._disconnect_time is not None:
+                        outage_dur = time.monotonic() - self._disconnect_time
+                        logger.info("StreamWorker connection re-established after %.1fs outage.", outage_dur)
+                        self._consecutive_failures = 0
+                        self._disconnect_time = None
+
                     if batch:
                         self.store.update_positions(batch)
                         if self.recorder is not None and getattr(self.recorder, "is_running", False):
@@ -142,22 +151,25 @@ class StreamWorker:
                     retry_header = exc.headers.get("Retry-After") if exc.headers else None
                     sleep_time = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
                     msg = f"HTTP 429 Rate Limited. Backing off for {sleep_time:.1f}s (Retry-After)..."
-                    logger.warning(msg)
-                    self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
                 elif isinstance(exc, urllib.error.HTTPError) and 500 <= exc.code < 600:
                     jitter = random.uniform(0.8, 1.2)
                     sleep_time = min(backoff * jitter, self.max_backoff_sec)
                     msg = f"HTTP {exc.code} Server Error ({exc.reason}). Reconnecting in {sleep_time:.1f}s..."
-                    logger.warning(msg)
-                    self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
                     backoff = min(backoff * 2.0, self.max_backoff_sec)
                 else:
                     jitter = random.uniform(0.8, 1.2)
                     sleep_time = min(backoff * jitter, self.max_backoff_sec)
                     msg = f"Connection error: {exc}. Reconnecting in {sleep_time:.1f}s..."
-                    logger.warning(msg)
-                    self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
                     backoff = min(backoff * 2.0, self.max_backoff_sec)
+
+                if self._consecutive_failures == 0:
+                    self._disconnect_time = time.monotonic()
+                    logger.warning(msg)
+                else:
+                    logger.debug("StreamWorker reconnect attempt %d: %s", self._consecutive_failures + 1, msg)
+                self._consecutive_failures += 1
+
+                self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
 
                 # Interruptible sleep
                 if self._stop_event.wait(timeout=sleep_time):
@@ -167,7 +179,9 @@ class StreamWorker:
 
     def _get_stream_generator(self) -> Iterable[List[TrainPosition]]:
         """Instantiate appropriate telemetry stream source."""
-        if self.custom_stream is not None:
+        if callable(self.custom_stream):
+            return self.custom_stream()
+        elif self.custom_stream is not None:
             return self.custom_stream
         elif self.mock_engine is not None:
             return self.mock_engine.stream_positions(

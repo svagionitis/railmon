@@ -89,6 +89,17 @@ class TestCLIArgumentParser(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
             self.assertIn("railmon 1.0.0", mock_stdout.getvalue())
 
+    def test_log_file_and_level_flags(self):
+        """TC-CLI-11: --log-file and --log-level parsed correctly."""
+        args = self.parser.parse_args(["--log-file", "audit.log", "--log-level", "DEBUG"])
+        self.assertEqual(args.log_file, "audit.log")
+        self.assertEqual(args.log_level, "DEBUG")
+
+    def test_debug_flag(self):
+        """TC-CLI-12: --debug flag enables debug shortcut."""
+        args = self.parser.parse_args(["--debug"])
+        self.assertTrue(args.debug)
+
 
 class TestCLIDispatchAndLifecycle(unittest.TestCase):
     """Test suite for CLI dispatch routing and process lifecycle safety."""

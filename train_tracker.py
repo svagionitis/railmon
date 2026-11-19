@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import email.utils
 import json
 import logging
+import logging.handlers
 import math
 import os
 import random
@@ -24,7 +25,122 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Generator, List, Optional
 
-logger = logging.getLogger("railmon." + __name__)
+logging.getLogger("railmon").addHandler(logging.NullHandler())
+logger = logging.getLogger("railmon.train_tracker")
+
+LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s"
+MAX_LOG_BYTES = 10_485_760  # 10 MB
+BACKUP_COUNT = 3
+
+
+def resolve_default_log_path() -> str:
+    """Determine platform-standard persistent log file destination.
+
+    Returns:
+        str: Absolute canonical file path to railmon.log.
+    """
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if not local_app_data or not local_app_data.strip():
+            local_app_data = os.path.expanduser(r"~\AppData\Local")
+        return os.path.join(local_app_data.strip(), "railmon", "logs", "railmon.log")
+
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state and xdg_state.strip():
+        base_dir = os.path.abspath(xdg_state.strip())
+    else:
+        base_dir = os.path.expanduser("~/.local/state")
+    return os.path.join(base_dir, "railmon", "railmon.log")
+
+
+def _ensure_secure_log_path(log_path: str) -> bool:
+    """Create parent directories and enforce 0700/0600 POSIX permissions.
+
+    Returns:
+        bool: True if target directory exists or was created safely; False on OSError.
+    """
+    try:
+        log_dir = os.path.dirname(os.path.abspath(log_path))
+        if not os.path.exists(log_dir):
+            old_umask = os.umask(0o077)
+            try:
+                os.makedirs(log_dir, mode=0o700, exist_ok=True)
+            finally:
+                os.umask(old_umask)
+
+        if sys.platform != "win32" and os.path.exists(log_path):
+            try:
+                os.chmod(log_path, 0o600)
+            except OSError:
+                pass
+        return True
+    except OSError:
+        return False
+
+
+def setup_logging(
+    log_file: Optional[str] = None,
+    log_level: str = "INFO",
+    is_tui: bool = False,
+    enable_console: bool = False,
+) -> logging.Logger:
+    """Configure structured logging hierarchy for railmon.
+
+    Args:
+        log_file: Optional path override. If None, resolves to platform default.
+        log_level: Desired log level string (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        is_tui: True if interactive curses mode is active (suppresses console output).
+        enable_console: True if diagnostic console stream should be enabled.
+
+    Returns:
+        logging.Logger: The configured 'railmon' root logger.
+    """
+    railmon_logger = logging.getLogger("railmon")
+    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+    railmon_logger.setLevel(numeric_level)
+    railmon_logger.propagate = False
+
+    # Remove existing railmon handlers to ensure idempotency
+    for h in list(railmon_logger.handlers):
+        railmon_logger.removeHandler(h)
+        h.close()
+
+    target_path = os.path.abspath(log_file) if log_file else resolve_default_log_path()
+    try:
+        if _ensure_secure_log_path(target_path):
+            formatter = logging.Formatter(LOG_FORMAT)
+            file_handler = logging.handlers.RotatingFileHandler(
+                target_path,
+                maxBytes=MAX_LOG_BYTES,
+                backupCount=BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(numeric_level)
+            railmon_logger.addHandler(file_handler)
+
+            # POSIX permission hardening on newly opened file
+            if sys.platform != "win32" and os.path.exists(target_path):
+                try:
+                    os.chmod(target_path, 0o600)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    # Ensure at least a NullHandler is attached if file logging could not be established
+    if not railmon_logger.handlers:
+        railmon_logger.addHandler(logging.NullHandler())
+
+    # Console logging: strictly forbidden when TUI is active
+    if enable_console and not is_tui:
+        console_handler = logging.StreamHandler(sys.stderr)
+        formatter = logging.Formatter(LOG_FORMAT)
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(numeric_level)
+        railmon_logger.addHandler(console_handler)
+
+    return railmon_logger
 
 
 @contextlib.contextmanager
@@ -479,6 +595,8 @@ class RailwayGovClient:
         stream_url = f"{self.base_url}/api/train-stream"
         headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
         attempt = 0
+        disconnect_time: Optional[float] = None
+        consecutive_failures: int = 0
 
         while stop_event is None or not stop_event.is_set():
             try:
@@ -531,6 +649,15 @@ class RailwayGovClient:
                                         except (ValueError, TypeError) as exc:
                                             logger.debug("Skipping invalid train position record: %s", exc)
 
+                                    if consecutive_failures > 0 and disconnect_time is not None:
+                                        outage_dur = time.monotonic() - disconnect_time
+                                        logger.info(
+                                            "Upstream SSE connection re-established after %.1fs outage.",
+                                            outage_dur,
+                                        )
+                                        consecutive_failures = 0
+                                        disconnect_time = None
+
                                     yield trains
                                     attempt = 0
                             current_event = "message"
@@ -551,37 +678,66 @@ class RailwayGovClient:
                 if reconnect_delay <= 0:
                     raise
 
+                if consecutive_failures == 0:
+                    disconnect_time = time.monotonic()
+
                 if isinstance(e, urllib.error.HTTPError) and e.code == 429:
                     retry_header = e.headers.get("Retry-After") if e.headers else None
                     wait_time = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
-                    logger.warning(
-                        "SSE connection rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
-                        e,
-                        wait_time,
-                    )
+                    if consecutive_failures == 0:
+                        logger.warning(
+                            "SSE connection rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
+                            e,
+                            wait_time,
+                        )
+                    else:
+                        logger.debug(
+                            "SSE reconnect attempt %d rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
+                            consecutive_failures + 1,
+                            e,
+                            wait_time,
+                        )
                     attempt = 0
                 elif isinstance(e, urllib.error.HTTPError) and 500 <= e.code < 600:
                     jitter = random.uniform(0.8, 1.2)
                     wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
-                    logger.warning(
-                        "SSE connection server error (HTTP %d %s): %s. Reconnecting in %.1fs (attempt %d)...",
-                        e.code,
-                        e.reason,
-                        e,
-                        wait_time,
-                        attempt + 1,
-                    )
+                    if consecutive_failures == 0:
+                        logger.warning(
+                            "SSE connection server error (HTTP %d %s): %s. Reconnecting in %.1fs...",
+                            e.code,
+                            e.reason,
+                            e,
+                            wait_time,
+                        )
+                    else:
+                        logger.debug(
+                            "SSE reconnect attempt %d server error (HTTP %d %s): %s. Reconnecting in %.1fs...",
+                            consecutive_failures + 1,
+                            e.code,
+                            e.reason,
+                            e,
+                            wait_time,
+                        )
                     attempt += 1
                 else:
                     jitter = random.uniform(0.8, 1.2)
                     wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
-                    logger.warning(
-                        "SSE connection interrupted: %s. Reconnecting in %.1fs (attempt %d)...",
-                        e,
-                        wait_time,
-                        attempt + 1,
-                    )
+                    if consecutive_failures == 0:
+                        logger.warning(
+                            "SSE connection interrupted: %s. Reconnecting in %.1fs...",
+                            e,
+                            wait_time,
+                        )
+                    else:
+                        logger.debug(
+                            "SSE reconnect attempt %d interrupted: %s. Reconnecting in %.1fs...",
+                            consecutive_failures + 1,
+                            e,
+                            wait_time,
+                        )
                     attempt += 1
+
+                consecutive_failures += 1
 
                 if stop_event is not None:
                     if stop_event.wait(timeout=wait_time):
@@ -686,6 +842,24 @@ Examples:
         type=str,
         default=None,
         help="Path to archive SQLite database for aged telemetry (default: <db_stem>_archive.db).",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Custom path for rotating log file (default: platform state dir).",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging severity threshold (default: INFO).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging shortcut (equivalent to --log-level DEBUG).",
     )
     parser.add_argument(
         "-v",
@@ -1442,6 +1616,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    log_level = "DEBUG" if getattr(args, "debug", False) else getattr(args, "log_level", "INFO")
+    is_tui = bool(getattr(args, "tui", False) and not (getattr(args, "headless", False) or getattr(args, "daemon", False)))
+    setup_logging(
+        log_file=getattr(args, "log_file", None),
+        log_level=log_level,
+        is_tui=is_tui,
+        enable_console=False,
+    )
 
     try:
         if args.mode == "schedules":

@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 2 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 1 P1 deficiency, 6 P2 compliance gaps)
 
 ---
 
@@ -22,7 +22,7 @@
 | Resilience & Stream Handling      | 10/10  | P0-2, P1-5 & P1-6 fixed; TTY fallback sound  |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
 | Security & Data Protection        |  9/10  | P1-1 & P1-3 fixed; 0600 umask & path safe    |
-| Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
+| Observability & Logging           | 10/10  | P1-8 resolved; railmon hierarchy & rotation  |
 | Storage Retention & Disk Bounds   |  9/10  | P0-6 fixed; archival & disk_usage check      |
 | Packaging & Versioning            |  3/10  | Missing pyproject.toml and __version__       |
 +-----------------------------------+--------+----------------------------------------------+
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `307 passed in 44.2s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `319 passed in 41.8s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -373,11 +373,14 @@ sequenceDiagram
   2. `curses.init_pair(...)` calls in `init_colors()` are not wrapped in `try...except curses.error:`.
 - **Fix:** Implemented `is_utf8_supported()` in [`../tui/geo.py`](../tui/geo.py) inspecting `sys.stdout.encoding`, `locale.getpreferredencoding()`, and `RAILMON_ASCII` / `TERM=ascii` overrides, alongside precomputed 256-element `ASCII_BRAILLE_TABLE` mapping 2x4 dot subpixel masks to standard ASCII track characters (`.`, `-`, `|`, `+`, `/`, `\`). Added `ascii_mode` support to `BrailleCanvas` and `TUIRenderer`, with `GLYPHS_UTF8` and `GLYPHS_ASCII` palettes replacing Unicode compass glyphs (`▲►▼◄` $\to$ `^>v<`), station hubs (`◉` $\to$ `#`/`+`), breadcrumbs (`·` $\to$ `.`), callouts (`◄` $\to$ `<`), degree signs (`°` $\to$ `d`), and status badges (`❚❚` $\to$ `||`, `●` $\to$ `*`, `✕` $\to$ `[X]`). Hardened `TUIRenderer.init_colors()` with `curses.COLOR_PAIRS` bounds checking and individual `try...except curses.error:` blocks per pair, tracking allocated pairs in `_INITIALIZED_COLOR_PAIRS` so `safe_color_pair()` safely degrades to fallback attributes on monochrome or limited consoles. Exposed top-level `--ascii` flag in `build_parser()` and wired auto-detection into `run_tui_mode()`.
 
-### P1-8: Non-Compliant Logging Hierarchy & Missing `RotatingFileHandler`
-- **Location:** [`../train_tracker.py`](../train_tracker.py), [`../storage/recorder.py`](../storage/recorder.py#L18), [`../tui/stream_worker.py`](../tui/stream_worker.py#L16)
+### P1-8: Non-Compliant Logging Hierarchy & Missing `RotatingFileHandler` [RESOLVED]
+- **Location:** [`../train_tracker.py`](../train_tracker.py), [`../storage/recorder.py`](../storage/recorder.py#L18), [`../tui/stream_worker.py`](../tui/stream_worker.py#L16) | **Plan:** [`./p1-8-logging-hierarchy-rotating-file-handler-fix-plan.md`](./p1-8-logging-hierarchy-rotating-file-handler-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/logging-and-observability.md`](../.agents/rules/logging-and-observability.md#L10-L36):
-  1. Loggers use `logging.getLogger(__name__)` instead of `logging.getLogger("railmon." + __name__)`.
-  2. Daemon/recording mode does not configure `RotatingFileHandler(maxBytes=10_485_760, backupCount=3)` targeting `~/.local/state/railmon/railmon.log` (POSIX) or `%LOCALAPPDATA%\railmon\logs\railmon.log` (Windows).
+  1. Loggers used unconfigured hierarchies or lacked `NullHandler` on package root `railmon`.
+  2. Daemon/recording mode did not configure `RotatingFileHandler(maxBytes=10_485_760, backupCount=3)` targeting platform persistent state paths (`~/.local/state/railmon/railmon.log` or `%LOCALAPPDATA%\railmon\logs\railmon.log`).
+  3. Interactive curses TUI was vulnerable to screen corruption from unisolated stderr warnings emitted by background workers.
+  4. Upstream disconnection retry loops spammed `WARNING` messages and failed to report outage duration upon reconnect.
+- **Fix:** Attached `logging.NullHandler()` to package root `logging.getLogger("railmon")` and standardized child loggers across all modules (`railmon.<module>`). Implemented `resolve_default_log_path()` supporting Linux/macOS (`$XDG_STATE_HOME` and `~/.local/state/railmon/railmon.log`) and Windows (`%LOCALAPPDATA%\railmon\logs\railmon.log`), alongside `_ensure_secure_log_path()` enforcing POSIX `0700` directory and `0600` file permissions. Implemented `setup_logging()` configuring `RotatingFileHandler(maxBytes=10_485_760, backupCount=3, encoding="utf-8")` with layout `%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s` and setting `railmon.propagate = False` to protect curses terminal buffers. Refactored `RailwayGovClient.stream_train_positions()` and `StreamWorker._run_loop()` to enforce Rule 4 logging discipline (1st drop $\to$ `WARNING`, retries $\to$ `DEBUG`, recovery $\to$ `INFO` reporting outage duration in seconds). Added top-level `--log-file`, `--log-level`, and `--debug` CLI flags in `build_parser()` and verified with 10 dedicated automated tests in [`../tests/test_logging.py`](../tests/test_logging.py).
 
 ### P1-9: Missing `pyproject.toml` & Single-Source `__version__`
 - **Location:** Repository root, [`../train_tracker.py`](../train_tracker.py#L248-L253), [`../storage/recorder.py`](../storage/recorder.py#L30)

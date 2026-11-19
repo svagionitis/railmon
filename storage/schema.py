@@ -2,8 +2,11 @@
 Database schema DDL, index definitions, and migration engine.
 """
 
+import logging
 import sqlite3
 from typing import List, Tuple
+
+logger = logging.getLogger("railmon." + __name__)
 
 CURRENT_SCHEMA_VERSION = 1
 

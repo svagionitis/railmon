@@ -8,12 +8,15 @@ scale-aware camera kinematics, dynamic resizing, frame-rate synchronization
 
 import curses
 from enum import Enum, auto
+import logging
 import os
 import signal
 import sys
 import threading
 import time
 from typing import Any, Dict, Optional, Sequence, Tuple
+
+logger = logging.getLogger("railmon." + __name__)
 
 from tui.geo import (
     BoundingBox,

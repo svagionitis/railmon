@@ -5,11 +5,14 @@ Historical data repository and analytical query engine for Hellenic Railways tel
 import csv
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import PurePath
 from typing import Any, Dict, Generator, List, Optional, TextIO, Union
 
 from storage.db import Database
+
+logger = logging.getLogger("railmon." + __name__)
 from storage.models import (
     CorridorPunctualitySummary,
     DatabaseStats,

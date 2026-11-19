@@ -4,12 +4,15 @@ Database connection factory and transaction manager.
 
 import contextlib
 from datetime import datetime
+import logging
 import os
 import sqlite3
 import threading
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 from storage.schema import SchemaManager
+
+logger = logging.getLogger("railmon." + __name__)
 
 _WAL_CHECKPOINT_SQL: Dict[str, str] = {
     "PASSIVE": "PRAGMA wal_checkpoint(PASSIVE);",
