@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 4 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 3 P2 compliance gaps)
 
 ---
 
@@ -407,9 +407,10 @@ sequenceDiagram
   2. `TUIApp.run_loop()` rasterizes the full Braille canvas and redraws all subwindows every frame even when `snapshot.version` and viewport state are unchanged.
 - **Fix:** Standardized default frame rate to 15.0 FPS across CLI parser and application constructors, enforcing clamping to `[1.0, 15.0]` FPS in `TUIApp.__init__`. Implemented a composite dirty-state tracking engine in `TUIApp.run_loop` that evaluates snapshot version, camera viewport coordinates/zoom, 1 Hz header clock second rollover, telemetry ingestion rate, and modal flags. When the display state is static, curses rasterization (Braille canvas creation, coordinate projections) and `doupdate()` calls are completely bypassed, incrementing `skip_count` and reducing idle CPU load to negligible levels ($<1\%$ CPU core). Verified with 23 passing TUI control tests including `target_fps` clamping and idle frame skipping tests.
 
-### P2-3: Python 3.12+ `datetime.utcnow()` Deprecation Warnings
-- **Location:** [`TelemetryHistoryRow.from_train_position`](../storage/models.py#L157), [`TelemetryRecorder`](../storage/recorder.py#L84,L129,L253)
-- **Issue:** Uses deprecated `datetime.utcnow().isoformat() + "Z"` instead of `datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")`.
+### P2-3: Python 3.12+ `datetime.utcnow()` Deprecation Warnings [RESOLVED]
+- **Location:** [`TelemetryHistoryRow.from_train_position`](../storage/models.py#L157), [`TelemetryRecorder`](../storage/recorder.py#L176,L231,L392) | **Plan:** [`./p2-3-utcnow-deprecation-warnings-fix-plan.md`](./p2-3-utcnow-deprecation-warnings-fix-plan.md)
+- **Issue:** Used deprecated `datetime.utcnow().isoformat() + "Z"` instead of timezone-aware UTC timestamps.
+- **Fix:** Implemented standardized helper `iso_utc_now() -> str` in [`../storage/models.py`](../storage/models.py) using `datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")` to maintain Python 3.10 through 3.14 compatibility and exact ISO 8601 UTC schema parity. Replaced all deprecated `datetime.utcnow()` invocations across `TelemetryHistoryRow.from_train_position` and `TelemetryRecorder` (`start`, `stop`, `_flush_buffer`). Verified with dedicated unit tests in [`../tests/test_storage_models.py`](../tests/test_storage_models.py) asserting zero `DeprecationWarning` emissions under `PYTHONWARNINGS="error::DeprecationWarning"`.
 
 ### P2-4: Boolean Parameters in Function Signatures Instead of Enums
 - **Location:** [`run_tui_mode`](../train_tracker.py#L342-L349), [`run_plain_stream_mode`](../train_tracker.py#L432-L438), [`run_record_mode`](../train_tracker.py#L516-L524), [`TUIApp.cycle_selection`](../tui/app.py#L235), [`TUIRenderer.render_all`](../tui/renderer.py#L1001-L1012)

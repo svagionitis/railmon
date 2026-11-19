@@ -3,7 +3,8 @@ Unit tests for storage domain models and dataclass transformations.
 """
 
 import unittest
-from datetime import datetime
+import warnings
+from datetime import datetime, timezone
 
 from storage.models import (
     RecordingSessionDB,
@@ -11,6 +12,7 @@ from storage.models import (
     ScheduledTripDB,
     TelemetryHistoryRow,
     TrainRecordDB,
+    iso_utc_now,
 )
 from train_tracker import TrainPosition
 
@@ -157,6 +159,66 @@ class TestStorageModels(unittest.TestCase):
         self.assertEqual(row[2], "live")
         self.assertEqual(row[3], 1250)
         self.assertEqual(row[4], "1.0.0")
+
+    def test_iso_utc_now_format_and_no_warnings(self):
+        """iso_utc_now() must emit RFC3339/ISO 8601 UTC string without DeprecationWarning."""
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            ts = iso_utc_now()
+
+        # Zero deprecation warnings in Python 3.12+
+        deprecation_warnings = [
+            w for w in captured if issubclass(w.category, DeprecationWarning)
+        ]
+        self.assertEqual(len(deprecation_warnings), 0)
+
+        # Output format must end in Z and be parseable
+        self.assertTrue(ts.endswith("Z"))
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        self.assertLess(abs((now_dt - parsed).total_seconds()), 5.0)
+
+    def test_telemetry_history_row_fallback_timestamp(self):
+        """from_train_position without timestamp must generate valid UTC timestamp via iso_utc_now."""
+        pos = TrainPosition(
+            id="pos-no-ts",
+            train_number="IC52",
+            locomotive_number="120001",
+            name="Intercity 52",
+            train_type="passenger",
+            service_type="Intercity",
+            status="Κανονική",
+            origin="Αθήνα",
+            destination="Θεσσαλονίκη",
+            next_station="Οινόη",
+            speed=120.0,
+            course=350.0,
+            track_heading=349.5,
+            lat=38.3200,
+            lng=23.6500,
+            altitude=140.0,
+            delay=0,
+            progress=0.15,
+            chainage_m=62000,
+            corridor="PATHE",
+            distance_to_destination_m=438000,
+            timestamp=None,
+            schedule_id=None,
+        )
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            row = TelemetryHistoryRow.from_train_position(pos, recorded_at=None)
+
+        deprecation_warnings = [
+            w for w in captured if issubclass(w.category, DeprecationWarning)
+        ]
+        self.assertEqual(len(deprecation_warnings), 0)
+        self.assertTrue(row.recorded_at.endswith("Z"))
+        parsed = datetime.fromisoformat(row.recorded_at.replace("Z", "+00:00"))
+        now_dt = datetime.now(timezone.utc)
+        self.assertLess(abs((now_dt - parsed).total_seconds()), 5.0)
 
 
 if __name__ == "__main__":

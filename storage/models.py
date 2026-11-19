@@ -3,10 +3,15 @@ Domain models and dataclasses for SQLite persistence.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from train_tracker import TrainPosition
+
+
+def iso_utc_now() -> str:
+    """Return current UTC timestamp in ISO 8601 format with 'Z' suffix."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -154,7 +159,7 @@ class TelemetryHistoryRow:
         cls, pos: TrainPosition, recorded_at: Optional[str] = None
     ) -> "TelemetryHistoryRow":
         """Instantiate a database row from a live TrainPosition telemetry entity."""
-        timestamp = recorded_at or pos.timestamp or (datetime.utcnow().isoformat() + "Z")
+        timestamp = recorded_at or pos.timestamp or iso_utc_now()
         return cls(
             train_number=pos.train_number,
             schedule_id=pos.schedule_id,

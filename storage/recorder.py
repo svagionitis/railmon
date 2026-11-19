@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from storage.db import Database
 from storage.filter import DeadbandConfig, DeadbandFilter
-from storage.models import TelemetryHistoryRow
+from storage.models import TelemetryHistoryRow, iso_utc_now
 from train_tracker import TrainPosition, __version__
 
 logger = logging.getLogger("railmon." + __name__)
@@ -173,7 +173,7 @@ class TelemetryRecorder:
 
             self._stop_event.clear()
             self._disk_full_tripped = False
-            self._session_started_at = datetime.utcnow().isoformat() + "Z"
+            self._session_started_at = iso_utc_now()
             self._total_records_written = 0
             self._total_batches_flushed = 0
             self._total_records_archived = 0
@@ -228,7 +228,7 @@ class TelemetryRecorder:
         # Finalize session audit and checkpoint WAL (skip disk writes if disk-full circuit tripped)
         with self._lock:
             if not self._disk_full_tripped:
-                ended_at = datetime.utcnow().isoformat() + "Z"
+                ended_at = iso_utc_now()
                 if self._session_id is not None:
                     try:
                         with self.db.transaction() as cur:
@@ -389,7 +389,7 @@ class TelemetryRecorder:
             if p.schedule_id:
                 distinct_trips[p.schedule_id] = p
 
-        now_iso = datetime.utcnow().isoformat() + "Z"
+        now_iso = iso_utc_now()
         train_rows = [
             (
                 p.train_number,
