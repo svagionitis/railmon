@@ -64,6 +64,24 @@ class Database:
                 self.close()
                 raise
 
+        self._ensure_secure_permissions()
+
+    def _ensure_secure_permissions(self) -> None:
+        """Enforce owner-only permissions (0600) on POSIX database and WAL companion files."""
+        if self._is_memory or os.name == "nt":
+            return
+
+        abs_path = os.path.abspath(self.db_path)
+        for suffix in ("", "-wal", "-shm"):
+            target = f"{abs_path}{suffix}"
+            if os.path.exists(target):
+                try:
+                    cur_mode = os.stat(target).st_mode & 0o777
+                    if cur_mode != 0o600:
+                        os.chmod(target, 0o600)
+                except OSError:
+                    pass
+
     def init_schema(self) -> int:
         """Explicitly initialize all required database tables, indices, and verify integrity."""
         with self.connection() as conn:
@@ -81,18 +99,36 @@ class Database:
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new SQLite connection configured with optimal ingestion pragmas."""
-        if not self._is_memory:
-            parent = os.path.dirname(os.path.abspath(self.db_path))
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
+        if not self._is_memory and os.name != "nt":
+            old_umask = os.umask(0o077)
+            try:
+                parent = os.path.dirname(os.path.abspath(self.db_path))
+                if parent and not os.path.exists(parent):
+                    os.makedirs(parent, exist_ok=True)
 
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=5.0,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-            check_same_thread=False,
-        )
+                conn = sqlite3.connect(
+                    self.db_path,
+                    timeout=5.0,
+                    detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                    check_same_thread=False,
+                )
+            finally:
+                os.umask(old_umask)
+        else:
+            if not self._is_memory:
+                parent = os.path.dirname(os.path.abspath(self.db_path))
+                if parent and not os.path.exists(parent):
+                    os.makedirs(parent, exist_ok=True)
+
+            conn = sqlite3.connect(
+                self.db_path,
+                timeout=5.0,
+                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                check_same_thread=False,
+            )
+
         conn.row_factory = sqlite3.Row
+        self._ensure_secure_permissions()
 
         cursor = conn.cursor()
         try:
@@ -106,6 +142,7 @@ class Database:
         finally:
             cursor.close()
 
+        self._ensure_secure_permissions()
         return conn
 
     def _get_thread_connection(self) -> sqlite3.Connection:
@@ -175,6 +212,7 @@ class Database:
                 cursor.execute(sql)
             finally:
                 cursor.close()
+        self._ensure_secure_permissions()
 
     def get_size_bytes(self) -> int:
         """Return total disk size of the main database and WAL/SHM companion files."""

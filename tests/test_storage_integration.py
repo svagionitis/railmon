@@ -337,6 +337,44 @@ class TestHistoryCLIIntegration(unittest.TestCase):
         self.assertIn("train_number", content)
         self.assertIn("IC50", content)
 
+    def test_history_export_rejects_path_traversal(self):
+        """TC-INT-P4-13: history export rejects path traversal with error code 1."""
+        args_geojson = self.parser.parse_args([
+            "history", "export", "IC50",
+            "--format", "geojson",
+            "--out", "../evil_traversal.geojson",
+            "--db", self.db_path,
+        ])
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+            ret = run_history_mode(args_geojson)
+            self.assertEqual(ret, 1)
+            self.assertIn("Directory traversal ('..') prohibited", mock_err.getvalue())
+
+        args_csv = self.parser.parse_args([
+            "history", "export", "IC50",
+            "--format", "csv",
+            "--out", "../evil_traversal.csv",
+            "--db", self.db_path,
+        ])
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+            ret = run_history_mode(args_csv)
+            self.assertEqual(ret, 1)
+            self.assertIn("Directory traversal ('..') prohibited", mock_err.getvalue())
+
+    def test_history_export_rejects_missing_directory(self):
+        """TC-INT-P4-14: history export rejects nonexistent destination directories with error code 1."""
+        bad_target = os.path.join(self.temp_dir.name, "missing_sub_folder", "out.geojson")
+        args = self.parser.parse_args([
+            "history", "export", "IC50",
+            "--format", "geojson",
+            "--out", bad_target,
+            "--db", self.db_path,
+        ])
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+            ret = run_history_mode(args)
+            self.assertEqual(ret, 1)
+            self.assertIn("Export destination directory does not exist", mock_err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

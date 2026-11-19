@@ -326,6 +326,72 @@ class TestStorageDatabase(unittest.TestCase):
             with self.assertRaises(sqlite3.DatabaseError):
                 Database(db_path)
 
+    def test_posix_database_permissions_0600(self):
+        """Database and WAL companion files must have owner-only 0600 permissions on POSIX."""
+        if os.name == "nt":
+            self.skipTest("POSIX permissions test skipped on Windows NT")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "secure_perms.db")
+            db = Database(db_path)
+            try:
+                # 1. Main DB file must be 0600
+                st_mode = os.stat(db_path).st_mode & 0o777
+                self.assertEqual(oct(st_mode), "0o600")
+
+                # 2. Write a transaction to spawn WAL and SHM files
+                with db.transaction() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO trains (train_number, first_observed_at, last_observed_at)
+                        VALUES ('8888', '2026-11-18T10:00:00Z', '2026-11-18T10:00:00Z');
+                        """
+                    )
+                db.checkpoint_wal("PASSIVE")
+
+                for suffix in ("-wal", "-shm"):
+                    sidecar = f"{db_path}{suffix}"
+                    if os.path.exists(sidecar):
+                        s_mode = os.stat(sidecar).st_mode & 0o777
+                        self.assertEqual(oct(s_mode), "0o600", f"{sidecar} is not 0600")
+            finally:
+                db.close()
+
+    def test_harden_existing_permissive_database_file(self):
+        """Pre-existing database file with 0644 mode must be hardened to 0600 on POSIX."""
+        if os.name == "nt":
+            self.skipTest("POSIX permissions test skipped on Windows NT")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "legacy_0644.db")
+            # Create file with permissive 0644
+            with open(db_path, "w") as f:
+                f.write("")
+            os.chmod(db_path, 0o644)
+            self.assertEqual(oct(os.stat(db_path).st_mode & 0o777), "0o644")
+
+            db = Database(db_path)
+            try:
+                self.assertEqual(oct(os.stat(db_path).st_mode & 0o777), "0o600")
+            finally:
+                db.close()
+
+    def test_nested_parent_directory_permissions(self):
+        """Newly created parent directories under umask(0o077) must have 0700 permissions on POSIX."""
+        if os.name == "nt":
+            self.skipTest("POSIX permissions test skipped on Windows NT")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested_parent = os.path.join(tmpdir, "secure_folder", "sub_folder")
+            nested_db = os.path.join(nested_parent, "test.db")
+            db = Database(nested_db)
+            try:
+                self.assertTrue(os.path.exists(nested_db))
+                parent_mode = os.stat(nested_parent).st_mode & 0o777
+                self.assertEqual(oct(parent_mode), "0o700")
+            finally:
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

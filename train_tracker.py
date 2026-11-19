@@ -800,7 +800,7 @@ def run_history_mode(args: argparse.Namespace) -> int:
         format_trips_table,
     )
     from storage.db import Database
-    from storage.repository import HistoricalRepository
+    from storage.repository import HistoricalRepository, validate_export_path
 
     db_path = getattr(args, "db", "railway_history.db")
     if not os.path.exists(db_path):
@@ -879,24 +879,34 @@ def run_history_mode(args: argparse.Namespace) -> int:
                 )
                 out_str = json.dumps(data, indent=2, ensure_ascii=False)
                 if args.out:
-                    with open(args.out, "w", encoding="utf-8") as f:
+                    try:
+                        clean_out = validate_export_path(args.out)
+                    except (ValueError, PermissionError) as err:
+                        print(f"[Error] Invalid export path: {err}", file=sys.stderr)
+                        return 1
+                    with open(clean_out, "w", encoding="utf-8") as f:
                         f.write(out_str)
                     count = len(data.get("features", []))
-                    print(f"Exported GeoJSON ({count} features) to {args.out}")
+                    print(f"Exported GeoJSON ({count} features) to {clean_out}")
                 else:
                     print(out_str)
             elif fmt == "csv":
                 if args.out:
+                    try:
+                        clean_out = validate_export_path(args.out)
+                    except (ValueError, PermissionError) as err:
+                        print(f"[Error] Invalid export path: {err}", file=sys.stderr)
+                        return 1
                     count = repo.export_csv(
                         query_type="telemetry",
-                        target=args.out,
+                        target=clean_out,
                         params={
                             "train_number": args.train_number,
                             "start_time": args.start,
                             "end_time": args.end,
                         },
                     )
-                    print(f"Exported {count} CSV records to {args.out}")
+                    print(f"Exported {count} CSV records to {clean_out}")
                 else:
                     repo.export_csv(
                         query_type="telemetry",
@@ -923,7 +933,11 @@ def run_history_mode(args: argparse.Namespace) -> int:
                 cutoff_dt = datetime.now(timezone.utc) - timedelta(days=ret_days)
                 before_iso = cutoff_dt.isoformat().replace("+00:00", "Z")
 
-            arch_path = repo.resolve_archive_path(getattr(args, "archive_db", None))
+            try:
+                arch_path = repo.resolve_archive_path(getattr(args, "archive_db", None))
+            except (ValueError, PermissionError) as err:
+                print(f"[Error] Invalid archive database path: {err}", file=sys.stderr)
+                return 1
             archived_count = repo.archive_before(str(before_iso), archive_path=arch_path)
             print(f"Archived {archived_count:,d} telemetry records older than {before_iso} to {arch_path}")
     finally:

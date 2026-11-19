@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 7 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 6 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
@@ -21,7 +21,7 @@
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
-| Security & Data Protection        |  6/10  | P1-1 fixed; missing 0600 umask & path guards |
+| Security & Data Protection        |  9/10  | P1-1 & P1-3 fixed; 0600 umask & path safe    |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
 | Storage Retention & Disk Bounds   |  9/10  | P0-6 fixed; archival & disk_usage check      |
 | Packaging & Versioning            |  3/10  | Missing pyproject.toml and __version__       |
@@ -341,11 +341,12 @@ sequenceDiagram
 - **Issue:** Schema versioning uses only `schema_migrations` without updating `PRAGMA user_version`, and `SchemaManager.verify_integrity()` is never called on startup, violating [`../.agents/rules/concurrency-and-sqlite.md`](../.agents/rules/concurrency-and-sqlite.md#L29-L32) and [`../.agents/rules/release-and-versioning.md`](../.agents/rules/release-and-versioning.md#L20-L25).
 - **Fix:** Set `PRAGMA user_version = 1` inside the migration transaction and run `PRAGMA integrity_check` on initialization.
 
-### P1-3: Missing POSIX `0600` Database Permissions & Export Path Sanitization
-- **Location:** [`Database._create_connection`](../storage/db.py#L55-L66), [`HistoricalRepository.export_csv`](../storage/repository.py#L455-L483), [`run_history_mode`](../train_tracker.py#L714-L753)
+### P1-3: Missing POSIX `0600` Database Permissions & Export Path Sanitization [RESOLVED]
+- **Location:** [`Database._create_connection`](../storage/db.py#L55-L66), [`HistoricalRepository.export_csv`](../storage/repository.py#L455-L483), [`run_history_mode`](../train_tracker.py#L714-L753) | **Plan:** [`./p1-3-db-permissions-export-path-sanitization-fix-plan.md`](./p1-3-db-permissions-export-path-sanitization-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L14-L28):
   1. SQLite database files are created with default umask (`0644`) instead of owner-only `0600` (`os.umask(0o077)` or `os.chmod(db_path, 0o600)`).
   2. `--out` export paths are not checked for directory traversal (`..`) or existing writable parent directories (`os.makedirs` is called arbitrarily on any target path).
+- **Fix:** Wrap database connection and parent directory creation in `os.umask(0o077)` and apply `os.chmod(target, 0o600)` to the database and WAL/SHM companion files on POSIX systems via `Database._ensure_secure_permissions()`. Implement `validate_export_path()` in [`../storage/repository.py`](../storage/repository.py) to reject directory traversal (`..`), verify parent directory existence and writability (`os.access(W_OK)`), and disallow arbitrary recursive directory creation before writing export files. Wire validation into `HistoricalRepository.export_csv()`, `HistoricalRepository.resolve_archive_path()`, and `run_history_mode()`.
 
 ### P1-4: Missing Coordinate Bounds Validation & Defensive Payload Parsing
 - **Location:** [`TrainPosition.from_dict`](../train_tracker.py#L56-L85), [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L169-L174)

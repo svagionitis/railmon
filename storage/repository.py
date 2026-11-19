@@ -6,6 +6,7 @@ import csv
 from datetime import datetime
 import json
 import os
+from pathlib import PurePath
 from typing import Any, Dict, Generator, List, Optional, TextIO, Union
 
 from storage.db import Database
@@ -18,6 +19,71 @@ from storage.models import (
     TelemetryHistoryRow,
     TripSummary,
 )
+
+
+def validate_export_path(
+    path: Union[str, os.PathLike],
+    base_dir: Optional[str] = None,
+) -> str:
+    """
+    Validate and sanitize an export file destination path.
+
+    Enforces security baselines against directory traversal (e.g. '../'),
+    canonicalizes paths via os.path.abspath, and verifies that the destination
+    parent directory exists and is writable.
+
+    Args:
+        path: Destination file path string or PathLike object.
+        base_dir: Optional base directory to restrict exports within.
+
+    Returns:
+        Canonical absolute path string.
+
+    Raises:
+        ValueError: If path is empty, contains null bytes, contains directory
+                    traversal sequences, or is an existing directory.
+        PermissionError: If the parent directory or existing target file is not writable.
+    """
+    if path is None:
+        raise ValueError("Export path cannot be None")
+
+    raw_path = str(path).strip()
+    if not raw_path:
+        raise ValueError("Export path cannot be empty")
+
+    if "\0" in raw_path:
+        raise ValueError("Export path contains invalid null bytes")
+
+    # Guard against directory traversal ('..')
+    normalized_parts = PurePath(raw_path.replace("\\", "/")).parts
+    if ".." in normalized_parts:
+        raise ValueError(f"Directory traversal ('..') prohibited in export path: {raw_path}")
+
+    abs_path = os.path.abspath(raw_path)
+    parent_dir = os.path.dirname(abs_path)
+
+    if not os.path.exists(parent_dir):
+        raise ValueError(f"Export destination directory does not exist: '{parent_dir}'")
+
+    if not os.path.isdir(parent_dir):
+        raise ValueError(f"Export parent path is not a directory: '{parent_dir}'")
+
+    if not os.access(parent_dir, os.W_OK):
+        raise PermissionError(f"Export destination directory is not writable: '{parent_dir}'")
+
+    if os.path.exists(abs_path):
+        if os.path.isdir(abs_path):
+            raise ValueError(f"Export path points to an existing directory: '{abs_path}'")
+        if not os.access(abs_path, os.W_OK):
+            raise PermissionError(f"Target export file is not writable: '{abs_path}'")
+
+    if base_dir is not None:
+        canonical_base = os.path.realpath(os.path.abspath(base_dir))
+        canonical_target = os.path.realpath(abs_path)
+        if not (canonical_target == canonical_base or canonical_target.startswith(canonical_base + os.sep)):
+            raise ValueError(f"Export path escapes allowed base directory: '{raw_path}'")
+
+    return abs_path
 
 
 class HistoricalRepository:
@@ -511,10 +577,8 @@ class HistoricalRepository:
         qtype = query_type.strip().lower()
 
         if isinstance(target, str):
-            parent = os.path.dirname(os.path.abspath(target))
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
-            with open(target, "w", newline="", encoding="utf-8") as f:
+            clean_target = validate_export_path(target)
+            with open(clean_target, "w", newline="", encoding="utf-8") as f:
                 return self._write_csv_data(qtype, f, params)
         else:
             return self._write_csv_data(qtype, target, params)
@@ -774,7 +838,11 @@ class HistoricalRepository:
     def resolve_archive_path(self, archive_path: Optional[str] = None) -> str:
         """Resolve and validate target SQLite archive database path."""
         if archive_path is not None and archive_path.strip():
-            resolved = archive_path.strip()
+            candidate = archive_path.strip()
+            if candidate != ":memory:" and not candidate.startswith("file::memory:"):
+                resolved = validate_export_path(candidate)
+            else:
+                resolved = candidate
         elif self.db._is_memory:
             raise ValueError("archive_path must be explicitly provided for in-memory databases")
         else:

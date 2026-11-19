@@ -26,7 +26,7 @@ from storage.models import (
     TripSummary,
 )
 from storage.recorder import RecorderConfig, TelemetryRecorder
-from storage.repository import HistoricalRepository
+from storage.repository import HistoricalRepository, validate_export_path
 from storage.schema import SchemaManager
 
 __all__ = [
@@ -47,6 +47,7 @@ __all__ = [
     "RecorderConfig",
     "TelemetryRecorder",
     "HistoricalRepository",
+    "validate_export_path",
     "format_file_size",
     "format_trips_table",
     "format_train_history_table",

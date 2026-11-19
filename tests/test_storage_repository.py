@@ -22,7 +22,7 @@ from storage.models import (
     TripSummary,
 )
 from storage.recorder import RecorderConfig, TelemetryRecorder
-from storage.repository import HistoricalRepository
+from storage.repository import HistoricalRepository, validate_export_path
 from train_tracker import TrainPosition
 
 
@@ -594,6 +594,86 @@ class TestHistoricalRepository(unittest.TestCase):
             self.repo.archive_before("   ")
         with self.assertRaises(ValueError):
             self.repo.archive_before("2026-11-01T00:00:00Z", archive_path=self.db_path)
+
+    def test_validate_export_path_success(self):
+        """validate_export_path must return canonical absolute path for safe destinations."""
+        safe_path = os.path.join(self.temp_dir, "export.csv")
+        result = validate_export_path(safe_path)
+        self.assertEqual(result, os.path.abspath(safe_path))
+
+        rel_path = "valid_relative.geojson"
+        result_rel = validate_export_path(rel_path)
+        self.assertEqual(result_rel, os.path.abspath(rel_path))
+
+    def test_validate_export_path_rejects_traversal(self):
+        """validate_export_path must reject '..' directory traversal attempts."""
+        traversal_attempts = [
+            "../bad.csv",
+            "../../etc/passwd",
+            os.path.join("sub", "..", "..", "bad.json"),
+            r"..\escaped.csv",
+            r"sub\..\..\escaped.json",
+            "..",
+        ]
+        for bad in traversal_attempts:
+            with self.subTest(path=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    validate_export_path(bad)
+                self.assertIn("traversal", str(ctx.exception).lower())
+
+    def test_validate_export_path_rejects_missing_directory(self):
+        """validate_export_path must reject paths whose parent directory does not exist."""
+        nonexistent = os.path.join(self.temp_dir, "no_such_dir_12345", "out.csv")
+        with self.assertRaises(ValueError) as ctx:
+            validate_export_path(nonexistent)
+        self.assertIn("does not exist", str(ctx.exception))
+
+    def test_validate_export_path_rejects_existing_directory(self):
+        """validate_export_path must reject paths that point to an existing directory."""
+        with self.assertRaises(ValueError) as ctx:
+            validate_export_path(self.temp_dir)
+        self.assertIn("existing directory", str(ctx.exception))
+
+    def test_validate_export_path_rejects_empty_and_null_bytes(self):
+        """validate_export_path must reject empty inputs and null bytes."""
+        with self.assertRaises(ValueError):
+            validate_export_path("")
+        with self.assertRaises(ValueError):
+            validate_export_path("   ")
+        with self.assertRaises(ValueError):
+            validate_export_path(None)
+        with self.assertRaises(ValueError) as ctx:
+            validate_export_path("test\0out.csv")
+        self.assertIn("null bytes", str(ctx.exception).lower())
+
+    def test_validate_export_path_base_dir_boundary(self):
+        """validate_export_path with base_dir must prevent escaping the root boundary."""
+        allowed_dir = os.path.join(self.temp_dir, "allowed")
+        os.makedirs(allowed_dir, exist_ok=True)
+
+        valid = os.path.join(allowed_dir, "file.csv")
+        self.assertEqual(validate_export_path(valid, base_dir=allowed_dir), os.path.abspath(valid))
+
+        outside = os.path.join(self.temp_dir, "outside.csv")
+        with self.assertRaises(ValueError) as ctx:
+            validate_export_path(outside, base_dir=allowed_dir)
+        self.assertIn("escapes allowed base directory", str(ctx.exception))
+
+    def test_export_csv_with_path_traversal_fails(self):
+        """HistoricalRepository.export_csv must fail when target contains directory traversal."""
+        with self.assertRaises(ValueError) as ctx:
+            self.repo.export_csv(
+                query_type="telemetry",
+                target="../evil_export.csv",
+                params={"train_number": "1597"},
+            )
+        self.assertIn("traversal", str(ctx.exception).lower())
+
+    def test_resolve_archive_path_rejects_traversal(self):
+        """resolve_archive_path must reject custom archive paths with traversal tokens."""
+        with self.assertRaises(ValueError) as ctx:
+            self.repo.resolve_archive_path("../bad_archive.db")
+        self.assertIn("traversal", str(ctx.exception).lower())
 
 
 if __name__ == "__main__":
