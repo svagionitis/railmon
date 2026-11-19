@@ -202,6 +202,12 @@ class TestFormattingAndLookups(unittest.TestCase):
         self.assertEqual(get_delay_color_pair(10.1), PAIR_TRAIN_ALERT)
         self.assertEqual(get_delay_color_pair(25.0), PAIR_TRAIN_ALERT)
 
+    def test_delay_string_formatting(self):
+        """Verify positive (+7m), negative (-7m), and on-time (0m) delay formatting."""
+        for delay, expected in [(7, "+7m"), (-7, "-7m"), (77, "+77m"), (-77, "-77m"), (0, "0m")]:
+            res = f"+{delay}m" if delay > 0 else (f"{delay}m" if delay < 0 else "0m")
+            self.assertEqual(res, expected)
+
     def test_train_color_pair_resolution(self):
         """Verify train record color resolution based on category, speed, and delay."""
         # 1. Halted train

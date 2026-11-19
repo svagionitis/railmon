@@ -704,13 +704,13 @@ class TUIRenderer:
             safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
 
         # 2. Overlay historical breadcrumbs
-        trail_ch = ord(self.glyphs.trail_dot)
+        trail_glyph = self.glyphs.trail_dot
         for record in snapshot.trains.values():
             for crumb in record.trail:
                 col, row = projector.geo_to_cell(GeoPoint(lat=crumb.lat, lng=crumb.lng))
                 if 0 <= col < inner_w and 0 <= row < inner_h:
                     try:
-                        win.addch(1 + row, 1 + col, trail_ch, trail_attr)
+                        win.addstr(1 + row, 1 + col, trail_glyph, trail_attr)
                     except curses.error:
                         pass
 
@@ -785,7 +785,7 @@ class TUIRenderer:
                 tn = pos.train_number or pos.id
                 spd_str = f"{int(round(pos.speed or 0))}km/h"
                 dly_val = int(round(pos.delay or 0))
-                dly_str = f"+{dly_val}m" if dly_val >= 0 else f"{dly_val}m"
+                dly_str = f"+{dly_val}m" if dly_val > 0 else (f"{dly_val}m" if dly_val < 0 else "0m")
                 arrow = self.glyphs.callout_arrow
                 tag = f" {arrow} [{tn}] ({spd_str}, {dly_str})"
                 safe_addstr(win, 1 + row, 1 + col + 1, tag, train_attr, max_w=inner_w - (col + 1), ascii_mode=self.ascii_mode)
@@ -865,7 +865,7 @@ class TUIRenderer:
             spd_str = f"{spd:3d}"
 
             dly = int(round(pos.delay or 0))
-            dly_str = f"+{dly}m" if dly >= 0 else f"{dly}m"
+            dly_str = f"+{dly}m" if dly > 0 else (f"{dly}m" if dly < 0 else " 0m")
 
             st_code = "RUN"
             if pos.speed is not None and pos.speed < 1.0:
@@ -925,7 +925,7 @@ class TUIRenderer:
         delay_pair = get_delay_color_pair(delay_val)
         delay_attr = safe_color_pair(delay_pair, curses.A_BOLD) | curses.A_BOLD
         dly_int = int(round(delay_val))
-        dly_display = f"+{dly_int} min" if dly_int >= 0 else f"{dly_int} min"
+        dly_display = f"+{dly_int} min" if dly_int > 0 else (f"{dly_int} min" if dly_int < 0 else "0 min")
         if delay_val > 10.0:
             dly_display += " (Major Delay)"
         elif delay_val > 3.0:

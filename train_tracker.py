@@ -1244,12 +1244,17 @@ def run_plain_stream_mode(
                         if (t.origin or t.destination)
                         else (t.corridor or "Shunting/Yard")
                     )
+                    delay_str = (
+                        f"+{t.delay}m"
+                        if t.delay > 0
+                        else (f"{t.delay}m" if t.delay < 0 else "On-time")
+                    )
                     print(
                         f"{t.train_number:<8} "
                         f"{(t.service_type or t.train_type or 'N/A')[:11]:<12} "
                         f"{route[:30]:<32} "
                         f"{t.speed:>5.1f} km/h "
-                        f"{f'+{t.delay}m' if t.delay else 'On-time':<8} "
+                        f"{delay_str:<8} "
                         f"({t.lat:.4f}, {t.lng:.4f})"
                     )
                 sys.stdout.flush()
