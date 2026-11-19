@@ -6,22 +6,22 @@ Detailed architectural and technical specification for upcoming interactive, ana
 
 ## 1. Executive Summary
 
-While the current `railmon` TUI provides a real-time Braille GIS terminal map, live train roster, telemetry inspector, corridor presets (`0`–`3`), camera follow mode (`f`), and interactive filtering (`/`), several high-value features—including two controls already documented in [`README.md`](../README.md#L168-L180)—can be added to complete the operator experience while preserving zero-dependency standard-library purity.
+While the current `railmon` TUI provides a real-time Braille GIS terminal map, live train roster, telemetry inspector, corridor presets (`0`–`3`), camera follow mode (`f`), interactive filtering (`/`), dynamic train roster sorting (`s`), and historical breadcrumb trail mode toggling (`b`), several high-value analytical, interactive, and storage features can be added to further enrich the operator experience while preserving zero-dependency standard-library purity.
 
 ### Feature Summary Matrix
 
-| Tier | Feature ID | Feature Name | Keybinding | Primary Modules Affected |
-| :--- | :--- | :--- | :--- | :--- |
-| **Tier 1 (Parity)** | **F-1.1** | Dynamic Train Roster Sorting (`ID`, `Speed`, `Delay`) | `s` / `S` | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 1 (Parity)** | **F-1.2** | Historical Breadcrumb Trail Mode Toggle | `b` / `B` | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
-| **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
-| **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / Click | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
-| **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py) |
-| **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
+| Tier | Feature ID | Feature Name | Keybinding | Status | Primary Modules Affected |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Tier 1 (Parity)** | **F-1.1** | Dynamic Train Roster Sorting (`ID`, `Speed`, `Delay`) | `s` / `S` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 1 (Parity)** | **F-1.2** | Historical Breadcrumb Trail Mode Toggle (`All`, `Selected`, `Off`) | `b` / `B` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
+| **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
+| **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / Click | Proposed | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
+| **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py) |
+| **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
 
 ---
 
@@ -103,50 +103,89 @@ flowchart TD
 
 ## 3. Tier 1: Documentation Parity & Core Roster Controls
 
-These two features are listed in the Controls Reference table of [`README.md`](../README.md#L168-L180) (`s` and `b`) and should be prioritized first to ensure full parity between documentation and runtime behavior.
+These two features are listed in the Controls Reference table of [`README.md`](../README.md#L168-L180) (`s` and `b`) and have been **implemented** to establish full parity between documentation and runtime behavior.
 
 ---
 
-### F-1.1: Dynamic Train Roster Sorting (`s` / `S`)
+### F-1.1: Dynamic Train Roster Sorting (`s` / `S`) — *Implemented*
 
 #### Problem Statement
-[`README.md`](../README.md#L177) documents `s` to *"Cycle train roster sorting (Train ID, Speed, Delay)"*, whereas [`TrainStateStore._compute_filtered_list`](../tui/state.py#L465-L492) currently sorts exclusively by `_natural_sort_key` (Train ID).
+[`README.md`](../README.md#L177) documents `s` to *"Cycle train roster sorting (Train ID, Speed, Delay)"*. Previously, [`TrainStateStore._compute_filtered_list`](../tui/state.py#L543-L575) sorted exclusively by `_natural_sort_key` (Train ID).
 
-#### Technical Design
-1. **`RosterSortMode` Enum in [`tui/state.py`](../tui/state.py):**
+#### Technical Design & Implementation Plan
+1. **`RosterSortMode` Enum & Sort Keys in [`tui/state.py`](../tui/state.py#L40-L46):**
    ```python
    class RosterSortMode(Enum):
        """Ordering criteria for the active train roster table."""
-       TRAIN_ID = auto()   # Ascending natural alphanumeric sort (IC 50 before 1597)
-       SPEED = auto()      # Descending speed (fastest first), tie-broken by natural ID
-       DELAY = auto()      # Descending delay (most delayed first), tie-broken by natural ID
+
+       TRAIN_ID = auto()  # Ascending natural alphanumeric train number (e.g. 50 before 1597)
+       SPEED = auto()     # Descending speed in km/h (fastest first), tie-broken by TRAIN_ID
+       DELAY = auto()     # Descending delay in minutes (most delayed first), tie-broken by TRAIN_ID
    ```
-2. **State & Snapshot Extension in [`tui/state.py`](../tui/state.py):**
-   - Add `self._sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID` to [`TrainStateStore.__init__`](../tui/state.py#L219).
-   - Add `sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID` to [`StateSnapshot`](../tui/state.py#L95).
-   - Add `cycle_sort_mode() -> RosterSortMode` method on `TrainStateStore` that cycles `TRAIN_ID -> SPEED -> DELAY -> TRAIN_ID` under `self._lock`, preserving the currently selected train ID (`self._selected_id`) and incrementing `self._version`.
-   - Update `_compute_filtered_list`:
-     - `RosterSortMode.TRAIN_ID`: `key=_natural_sort_key`
-     - `RosterSortMode.SPEED`: `key=lambda r: (-(r.position.speed or 0.0), _natural_sort_key(r))`
-     - `RosterSortMode.DELAY`: `key=lambda r: (-(r.position.delay or 0.0), _natural_sort_key(r))`
-3. **Renderer Header Indicator in [`tui/renderer.py`](../tui/renderer.py#L850-L854):**
-   - Highlight the active sort column in the roster table header (`TRAIN▲`, `SPD▼`, or `DLY▼`; in `--ascii` mode: `TRAIN^`, `SPDv`, `DLYv`).
-4. **Keybinding in [`tui/app.py`](../tui/app.py#L384):**
-   - Bind `ord("s")` and `ord("S")` in `_handle_normal_input` to `self.store.cycle_sort_mode()`.
+   - **Deterministic Comparator Functions ([`tui/state.py`](../tui/state.py#L225-L244)):**
+     - `_natural_sort_key(rec: TrainRecord) -> Tuple[int, str]`: Extracts numeric digits to order commercial numbers naturally (`(0, f"{int(digits):010d}_{tn}")`) before non-numeric identifiers (`(1, tn or rec.position.id)`).
+     - `_speed_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]`: Returns `(-spd, _natural_sort_key(rec))` where `spd = float(rec.position.speed) if rec.position.speed is not None else 0.0`.
+     - `_delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]`: Returns `(-dly, _natural_sort_key(rec))` where `dly = float(rec.position.delay) if rec.position.delay is not None else 0.0`.
+
+2. **State Machine Transition:**
+
+```mermaid
+stateDiagram-v2
+    [*] --> TRAIN_ID
+    TRAIN_ID --> SPEED : Press 's' / 'S'
+    SPEED --> DELAY : Press 's' / 'S'
+    DELAY --> TRAIN_ID : Press 's' / 'S'
+```
+
+```text
++-------------------------+  Press 's' / 'S'  +-------------------------+  Press 's' / 'S'  +-------------------------+
+| RosterSortMode.TRAIN_ID | ----------------> |  RosterSortMode.SPEED   | ----------------> |  RosterSortMode.DELAY   |
+|   (Ascending: TRAIN▲)   |                   |   (Descending: SPD▼)    |                   |   (Descending: DLY▼)    |
++-------------------------+                   +-------------------------+                   +-------------------------+
+             ^                                                                                           |
+             +------------------------------------ Press 's' / 'S' --------------------------------------+
+```
+
+3. **Store & Snapshot Extension in [`tui/state.py`](../tui/state.py):**
+   - Initialize `self._sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID` in [`TrainStateStore.__init__`](../tui/state.py#L267).
+   - Expose `sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID` on immutable [`StateSnapshot`](../tui/state.py#L128) and populate it in [`TrainStateStore.get_snapshot`](../tui/state.py#L389).
+   - Implement [`set_sort_mode(mode: RosterSortMode) -> None`](../tui/state.py#L485-L492) with `isinstance(mode, RosterSortMode)` runtime type validation and version increment on state change.
+   - Implement [`cycle_sort_mode() -> RosterSortMode`](../tui/state.py#L494-L505) to cycle `TRAIN_ID -> SPEED -> DELAY -> TRAIN_ID` under `self._lock`, preserving `self._selected_id` (and dynamically recomputing `selected_index` in the newly ordered `filtered_trains` tuple) while incrementing `self._version`.
+   - Dispatch sorting in [`_compute_filtered_list`](../tui/state.py#L569-L575) based on `self._sort_mode`, ensuring `select_next()` and `select_prev()` cursor traversal automatically follow the active sort order.
+
+4. **Renderer Glyphs & Header Indicator in [`tui/renderer.py`](../tui/renderer.py):**
+   - Extend [`RenderGlyphs`](../tui/renderer.py#L93-L94) with `sort_asc` and `sort_desc`:
+     - [`GLYPHS_UTF8`](../tui/renderer.py#L113-L114): `sort_asc="▲"`, `sort_desc="▼"`
+     - [`GLYPHS_ASCII`](../tui/renderer.py#L133-L134): `sort_asc="^"`, `sort_desc="v"`
+   - Update [`TUIRenderer.render_roster`](../tui/renderer.py#L888-L895) to render the active sort indicator while preserving fixed column alignment (`[Cursor:2][#:3][TRAIN:6][TYPE:5][SPD:5][DLY:5][ST:4]`):
+     - `RosterSortMode.TRAIN_ID`: `" #   TRAIN▲ TYPE  SPD   DLY  ST"` (ASCII: `" #   TRAIN^ TYPE  SPD   DLY  ST"`)
+     - `RosterSortMode.SPEED`: `" #   TRAIN  TYPE  SPD▼  DLY  ST"` (ASCII: `" #   TRAIN  TYPE  SPDv  DLY  ST"`)
+     - `RosterSortMode.DELAY`: `" #   TRAIN  TYPE  SPD   DLY▼ ST"` (ASCII: `" #   TRAIN  TYPE  SPD   DLYv ST"`)
+   - Include `[s] Sort` in the bottom status bar shortcuts ([`TUIRenderer.render_status_bar`](../tui/renderer.py#L1093)) and document `s / S` in [`TUIRenderer.render_help_modal`](../tui/renderer.py#L1167).
+
+5. **Controller Keybinding in [`tui/app.py`](../tui/app.py):**
+   - Add [`TUIApp.cycle_sort() -> RosterSortMode`](../tui/app.py#L377-L379) delegating to `self.store.cycle_sort_mode()`.
+   - Bind `key in (ord("s"), ord("S"))` in [`TUIApp._handle_normal_input`](../tui/app.py#L449-L451) to `self.cycle_sort()` (leaving `InputMode.SEARCH` unaffected so typing `s` in a search query appends to `search_buffer`).
+
+6. **Verification Coverage:**
+   - [`tests/test_tui_state.py`](../tests/test_tui_state.py#L344-L400) (`test_sort_mode_cycling_and_ordering`): Verifies `TRAIN_ID -> SPEED -> DELAY -> TRAIN_ID` cycling, deterministic natural ID tie-breaking, selection preservation across sort changes, `select_next()` order adherence, and `TypeError` validation on invalid enum values.
+   - [`tests/test_tui_controls.py`](../tests/test_tui_controls.py#L697-L718) (`test_key_s_cycles_roster_sort_mode_in_normal_mode`, `test_key_s_in_search_mode_appends_character_without_sorting`): Verifies `s`/`S` key dispatch in `NORMAL` vs. `SEARCH` modes.
+   - [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L954-L994) (`test_render_roster_displays_sort_direction_indicators_utf8_and_ascii`): Verifies `TRAIN▲`/`SPD▼`/`DLY▼` and `TRAIN^`/`SPDv`/`DLYv` header rendering.
 
 ---
 
-### F-1.2: Historical Breadcrumb Trail Mode Toggle (`b` / `B`)
+### F-1.2: Historical Breadcrumb Trail Mode Toggle (`b` / `B`) — *Implemented*
 
 #### Problem Statement
-[`README.md`](../README.md#L176) documents `b` to *"Toggle historical breadcrumb trails"*, whereas [`TUIRenderer.render_map`](../tui/renderer.py#L721-L735) unconditionally renders breadcrumb trails for all trains. On crowded suburban corridors, users often want to view trails only for the selected train or hide them completely.
+[`README.md`](../README.md#L176) documents `b` to *"Toggle historical breadcrumb trails"*. Previously, [`TUIRenderer.render_map`](../tui/renderer.py#L744-L771) unconditionally rendered breadcrumb trails for all trains in `snapshot.trains.values()` (even trains excluded by an active search or corridor filter). On dense suburban corridors, operators need the ability to isolate trails to the currently selected train or hide trails completely.
 
-#### Technical Design
-1. **`BreadcrumbMode` Enum in [`tui/state.py`](../tui/state.py):**
+#### Technical Design & Implementation Plan
+1. **`BreadcrumbMode` Enum in [`tui/state.py`](../tui/state.py#L48-L53):**
    ```python
    class BreadcrumbMode(Enum):
        """Visibility policy for historical breadcrumb trails on the map canvas."""
-       ALL = auto()       # Draw breadcrumb dots for all active trains
+
+       ALL = auto()       # Draw breadcrumb dots for all active filtered trains
        SELECTED = auto()  # Draw breadcrumb dots only for snapshot.selected_train
        OFF = auto()       # Hide all historical breadcrumb trails
    ```
@@ -155,25 +194,45 @@ These two features are listed in the Controls Reference table of [`README.md`](.
 ```mermaid
 stateDiagram-v2
     [*] --> ALL
-    ALL --> SELECTED : Press 'b'
-    SELECTED --> OFF : Press 'b'
-    OFF --> ALL : Press 'b'
+    ALL --> SELECTED : Press 'b' / 'B'
+    SELECTED --> OFF : Press 'b' / 'B'
+    OFF --> ALL : Press 'b' / 'B'
 ```
 
 ```text
-+--------------------+   Press 'b'   +--------------------+   Press 'b'   +--------------------+
-| BreadcrumbMode.ALL | ------------> |   SELECTED ONLY    | ------------> | BreadcrumbMode.OFF |
-+--------------------+               +--------------------+               +--------------------+
-          ^                                                                         |
-          +------------------------------- Press 'b' -------------------------------+
++--------------------+  Press 'b' / 'B'  +-------------------------+  Press 'b' / 'B'  +--------------------+
+| BreadcrumbMode.ALL | ----------------> | BreadcrumbMode.SELECTED | ----------------> | BreadcrumbMode.OFF |
+|   (Trails: ALL)    |                   |      (Trails: SEL)      |                   |   (Trails: OFF)    |
++--------------------+                   +-------------------------+                   +--------------------+
+          ^                                                                                      |
+          +----------------------------------- Press 'b' / 'B' ----------------------------------+
 ```
 
-3. **Renderer Integration in [`tui/renderer.py`](../tui/renderer.py#L721-L735):**
-   - Check `snapshot.breadcrumb_mode`:
-     - If `OFF`: skip step 2 (`Overlay historical breadcrumbs`).
-     - If `SELECTED`: render `record.trail` only when `snapshot.selected_train` is not `None` and `record.position.id == snapshot.selected_train.position.id`.
-     - If `ALL`: render trails for all visible trains in `snapshot.filtered_trains` (fixing a subtle bug where trails of filtered-out trains were still drawn because the loop iterated over `snapshot.trains.values()` instead of `snapshot.filtered_trains`).
-   - Display `[Trails: ALL | SEL | OFF]` in the map viewport title bar when space permits.
+3. **Store & Snapshot Extension in [`tui/state.py`](../tui/state.py):**
+   - Initialize `self._breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL` in [`TrainStateStore.__init__`](../tui/state.py#L268).
+   - Expose `breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL` on [`StateSnapshot`](../tui/state.py#L129) and populate it in [`TrainStateStore.get_snapshot`](../tui/state.py#L390).
+   - Implement [`set_breadcrumb_mode(mode: BreadcrumbMode) -> None`](../tui/state.py#L507-L514) with `isinstance(mode, BreadcrumbMode)` runtime type validation and version increment on change.
+   - Implement [`cycle_breadcrumb_mode() -> BreadcrumbMode`](../tui/state.py#L516-L527) to cycle `ALL -> SELECTED -> OFF -> ALL` under `self._lock` while incrementing `self._version`.
+
+4. **Renderer Integration in [`tui/renderer.py`](../tui/renderer.py#L716-L771):**
+   - **Map Viewport Title Badge ([`tui/renderer.py`](../tui/renderer.py#L716-L728)):**
+     - Map `snapshot.breadcrumb_mode` to `trails_label` (`"ALL"`, `"SEL"`, or `"OFF"`) and display `| Trails: {trails_label}` in the map viewport header:
+       `[ Map Viewport: 39.80°N, 22.50°E | Zoom: 1.5x | Trails: ALL ]`.
+   - **Filtered Trail Resolution ([`tui/renderer.py`](../tui/renderer.py#L744-L757)):**
+     - `BreadcrumbMode.OFF`: `trail_records = ()` (skips rendering historical breadcrumb dots).
+     - `BreadcrumbMode.SELECTED`: Renders `snapshot.selected_train` trail if and only if `snapshot.selected_train` is not `None` and is currently visible in `snapshot.filtered_trains`; otherwise `trail_records = ()`.
+     - `BreadcrumbMode.ALL`: `trail_records = snapshot.filtered_trains` (ensuring trains hidden by corridor or text filters do not leak ghost trails onto the map).
+   - **Status Bar & Help Modal:**
+     - Include `[b] Trails` in the status bar cheat sheet ([`TUIRenderer.render_status_bar`](../tui/renderer.py#L1093)) and document `b / B` in [`TUIRenderer.render_help_modal`](../tui/renderer.py#L1168).
+
+5. **Controller Keybinding in [`tui/app.py`](../tui/app.py):**
+   - Add [`TUIApp.cycle_breadcrumbs() -> BreadcrumbMode`](../tui/app.py#L381-L383) delegating to `self.store.cycle_breadcrumb_mode()`.
+   - Bind `key in (ord("b"), ord("B"))` in [`TUIApp._handle_normal_input`](../tui/app.py#L453-L455) to `self.cycle_breadcrumbs()`.
+
+6. **Verification Coverage:**
+   - [`tests/test_tui_state.py`](../tests/test_tui_state.py#L401-L442) (`test_breadcrumb_mode_cycling_and_explicit_set`): Verifies `ALL -> SELECTED -> OFF -> ALL` transitions, version increments, idempotent `set_breadcrumb_mode`, and `TypeError` validation.
+   - [`tests/test_tui_controls.py`](../tests/test_tui_controls.py#L719-L740) (`test_key_b_cycles_breadcrumb_mode_in_normal_mode`, `test_key_b_in_search_mode_appends_character_without_toggling_breadcrumbs`): Verifies `b`/`B` key handling in `NORMAL` vs. `SEARCH` modes.
+   - [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L996-L1084) (`test_render_map_breadcrumb_modes_all_selected_off_and_filter_exclusion`): Verifies map title badge (`Trails: ALL`/`SEL`/`OFF`), corridor filter trail exclusion, and trail dot rendering across all three modes.
 
 ---
 
@@ -381,9 +440,9 @@ sequenceDiagram
 
 ---
 
-## 7. Consolidated Controls Reference (Proposed)
+## 7. Consolidated Controls Reference
 
-| Key | Mode | Action |Status |
+| Key | Mode | Action | Status |
 | :--- | :--- | :--- | :--- |
 | `h` / `j` / `k` / `l` or Arrows | Normal | Pan map viewport West / South / North / East | Existing |
 | `+` / `-` | Normal | Zoom In / Zoom Out (`0.2x` to `25.0x`) | Existing |
@@ -395,8 +454,8 @@ sequenceDiagram
 | `Space` | Normal | Pause / resume telemetry stream or replay clock | Existing |
 | `?` | Normal | Toggle interactive Keyboard Controls modal | Existing |
 | `q` / `Esc` | Normal | Clean exit from `railmon` TUI | Existing |
-| **`s` / `S`** | **Normal** | **Cycle roster sorting (`Train ID` → `Speed` → `Delay`)** | **Proposed (Tier 1)** |
-| **`b` / `B`** | **Normal** | **Cycle breadcrumb trails (`All` → `Selected` → `Off`)** | **Proposed (Tier 1)** |
+| **`s` / `S`** | **Normal** | **Cycle roster sorting (`Train ID` → `Speed` → `Delay`)** | **Implemented (Tier 1)** |
+| **`b` / `B`** | **Normal** | **Cycle breadcrumb trails (`All` → `Selected` → `Off`)** | **Implemented (Tier 1)** |
 | **`v`** | **Normal** | **Cycle station labels (`All` → `Hubs Only` → `Markers Only`)** | **Proposed (Tier 3)** |
 | **`t`** | **Normal** | **Toggle corridor-colored Braille track rendering** | **Proposed (Tier 3)** |
 | **`m`** | **Normal** | **Toggle Inspector between Train Telemetry & Station Board** | **Proposed (Tier 3)** |
@@ -408,10 +467,15 @@ sequenceDiagram
 
 ## 8. Phased Implementation & Verification Plan
 
-### Phase 1: Tier 1 Parity (`s` Sorting & `b` Breadcrumb Modes)
-1. Add `RosterSortMode` and `BreadcrumbMode` enums to [`tui/state.py`](../tui/state.py).
-2. Wire keybindings `s`/`S` and `b`/`B` in [`tui/app.py`](../tui/app.py) and update the help modal in [`tui/renderer.py`](../tui/renderer.py#L1117-L1143).
-3. Add unit tests in [`tests/test_state.py`](../tests/test_state.py), [`tests/test_tui_app.py`](../tests/test_tui_app.py), and [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py) verifying sort stability, selection preservation across sort changes, and breadcrumb visibility filtering.
+### Phase 1: Tier 1 Parity (`s` Sorting & `b` Breadcrumb Modes) — *Completed*
+1. **State & Comparators ([`tui/state.py`](../tui/state.py#L40-L53)):**
+   - Added [`RosterSortMode`](../tui/state.py#L40) (`TRAIN_ID`, `SPEED`, `DELAY`) and [`BreadcrumbMode`](../tui/state.py#L48) (`ALL`, `SELECTED`, `OFF`) enums, plus `_natural_sort_key`, `_speed_sort_key`, and `_delay_sort_key` comparators ([`tui/state.py`](../tui/state.py#L225-L244)).
+   - Added `sort_mode` and `breadcrumb_mode` fields to [`StateSnapshot`](../tui/state.py#L128-L129) and implemented thread-safe `set_sort_mode`, `cycle_sort_mode`, `set_breadcrumb_mode`, and `cycle_breadcrumb_mode` on [`TrainStateStore`](../tui/state.py#L485-L527).
+2. **Controller & Presentation ([`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py)):**
+   - Wired `s`/`S` (`TUIApp.cycle_sort`) and `b`/`B` (`TUIApp.cycle_breadcrumbs`) in [`TUIApp._handle_normal_input`](../tui/app.py#L449-L455).
+   - Updated [`TUIRenderer.render_roster`](../tui/renderer.py#L888-L895) to show `TRAIN▲`/`SPD▼`/`DLY▼` (and ASCII `TRAIN^`/`SPDv`/`DLYv`), [`TUIRenderer.render_map`](../tui/renderer.py#L716-L771) to filter breadcrumb overlays and show `| Trails: ALL | SEL | OFF`, and updated the status bar and help modal ([`tui/renderer.py`](../tui/renderer.py#L1093-L1169)).
+3. **Unit & Integration Test Suite:**
+   - Verified sort stability, natural ID tie-breaking, selection preservation across sort changes, keyboard mode isolation (`NORMAL` vs. `SEARCH`), and UTF-8/ASCII breadcrumb rendering in [`tests/test_tui_state.py`](../tests/test_tui_state.py#L344-L442), [`tests/test_tui_controls.py`](../tests/test_tui_controls.py#L697-L740), and [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L954-L1084).
 
 ### Phase 2: Tier 2 Inspector Analytics (Sparklines, Telemetry Age, Distance & ETA)
 1. Add `haversine_distance_km` to [`tui/geo.py`](../tui/geo.py).
