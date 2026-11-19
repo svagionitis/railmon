@@ -335,6 +335,8 @@ In [`../tui/geo.py`](../tui/geo.py), add `GeoProjector.resolve_track_cell(point:
 2. Add 10 intermediate stations (`AFI`, `SFE`, `TAN`, `ELE`, `ALI_BOE`, `LEP`, `SIN`, `OIN`, `VEL`, `PLK`) to [`../tui/data/stations.json`](../tui/data/stations.json) with `is_hub: false` so zoomed-in corridor views display accurate intermediate station markers without cluttering hub priorities at `Zoom: 1.0x`.
 
 ### Step 2: Calibrate Conformal Sub-Pixel Aspect Ratio in [`../tui/geo.py`](../tui/geo.py) and [`../tui/app.py`](../tui/app.py)
+> **Detailed Sub-Plan:** [Implementation Plan — Step 2: Calibrate Conformal Sub-Pixel Aspect Ratio (`tui/geo.py` & `tui/app.py`)](./tui-step-2-conformal-subpixel-aspect-ratio-plan.md)
+
 1. In [`../tui/geo.py`](../tui/geo.py):
    - Add `subpixel_aspect_ratio` property (`max(0.25, self.viewport.aspect_ratio / 2.0)`).
    - Add `_get_base_scale_x()` and `get_scale_y()`.

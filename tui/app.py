@@ -213,23 +213,23 @@ class TUIApp:
     # ------------------------------------------------------------------
 
     def pan(self, dx_cells: int, dy_cells: int) -> None:
-        """Pan viewport by character cell offsets with scale compensation.
+        """Pan viewport by character cell offsets with conformal scale compensation.
 
-        Translates discrete terminal cell displacement into continuous WGS84 degree
-        shifts based on current zoom magnification, font aspect ratio, and
-        standard parallel cosine scaling.
+        Translates discrete terminal cell displacement (2 horizontal sub-pixels per
+        column, 4 vertical sub-pixels per row) into continuous WGS84 degree shifts
+        using the projector's active conformal scales.
 
         Args:
             dx_cells: Horizontal column offset (positive = East, negative = West).
             dy_cells: Vertical row offset (positive = South, negative = North).
         """
         viewport = self.projector.viewport
+        scale_x = self.projector.get_scale_x()
+        scale_y = self.projector.get_scale_y()
         cos_phi0 = self.projector._cos_phi0
-        w_cells = max(10, viewport.width_cells)
-        base_span_lng = GREECE_PRESET.span_lng
 
-        d_lng = (dx_cells * base_span_lng) / (w_cells * viewport.zoom * cos_phi0)
-        d_lat = -(dy_cells * 2.0 * viewport.aspect_ratio * base_span_lng) / (w_cells * viewport.zoom)
+        d_lng = (dx_cells * 2.0) / (scale_x * cos_phi0)
+        d_lat = -(dy_cells * 4.0) / scale_y
 
         new_lat = max(34.0, min(43.0, viewport.center.lat + d_lat))
         new_lng = max(19.0, min(29.0, viewport.center.lng + d_lng))

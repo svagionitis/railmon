@@ -179,6 +179,20 @@ class TestTUIControls(unittest.TestCase):
         # At 4x zoom, geographic displacement must be exactly 1/4th
         self.assertAlmostEqual(delta_lng_4x, delta_lng_1x / 4.0, places=5)
 
+    def test_pan_exact_cell_displacement_conformal(self):
+        """Verify pan(dx_cells, dy_cells) shifts projected features by exact 1:1 character cell increments."""
+        test_pt = self.app.projector.viewport.center
+        px0, py0 = self.app.projector.geo_to_subpixel(test_pt)
+
+        # Pan camera +5 columns East and -3 rows North
+        self.app.pan(dx_cells=5, dy_cells=-3)
+        px1, py1 = self.app.projector.geo_to_subpixel(test_pt)
+
+        # Panning camera East (+5 cols = +10 subpixels) shifts stationary feature West (-10 subpixels)
+        # Panning camera North (-3 rows = -12 subpixels) shifts stationary feature South (+12 subpixels)
+        self.assertEqual(px1 - px0, -10)
+        self.assertEqual(py1 - py0, 12)
+
     def test_pan_boundary_clamping(self):
         """Verify pan operations clamp within Greece boundary limits."""
         # Pan extremely far North

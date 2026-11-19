@@ -234,17 +234,41 @@ class GeoProjector:
         """Sub-pixel canvas height (4 sub-pixels per character cell)."""
         return self.viewport.height_cells * 4
 
+    @property
+    def subpixel_aspect_ratio(self) -> float:
+        """Physical height-to-width ratio of a single 2x4 Braille sub-pixel dot.
+
+        Because each terminal character cell is subdivided into 2 horizontal
+        sub-pixels and 4 vertical sub-pixels, the 2:4 sub-pixel grid already
+        divides the character cell aspect ratio (H_cell / W_cell, typically ~2.0)
+        by 2.0, yielding a square 1.0 sub-pixel aspect ratio for a 2:1 font.
+        """
+        return max(0.25, self.viewport.aspect_ratio / 2.0)
+
+    def _get_base_scale_x(self) -> float:
+        """Compute base horizontal scale (sub-pixels / deg lng) fitting GREECE_PRESET at zoom=1.0."""
+        scale_x_w = self.sub_width / GREECE_PRESET.span_lng
+        scale_x_h = (self.sub_height * self.subpixel_aspect_ratio) / GREECE_PRESET.span_lat
+        return min(scale_x_w, scale_x_h)
+
     def get_scale_x(self) -> float:
         """Calculate the horizontal scale in sub-pixels per degree of longitude.
 
-        Base scale fits the Greek national bounding box (span ~5.2 deg lng)
-        across the canvas width at zoom=1.0.
+        Base scale fits the Greek national bounding box across both canvas width
+        and canvas height at zoom=1.0.
 
         Returns:
             Scale factor in sub-pixels per degree longitude.
         """
-        base_span_lng = GREECE_PRESET.span_lng
-        return (self.sub_width / base_span_lng) * self.viewport.zoom
+        return self._get_base_scale_x() * self.viewport.zoom
+
+    def get_scale_y(self) -> float:
+        """Calculate the vertical scale in sub-pixels per degree of latitude.
+
+        Returns:
+            Scale factor in sub-pixels per degree latitude.
+        """
+        return self.get_scale_x() / self.subpixel_aspect_ratio
 
     def geo_to_subpixel(self, point: GeoPoint) -> Tuple[int, int]:
         """Convert a WGS84 coordinate into sub-pixel canvas coordinates (px, py).
@@ -258,7 +282,7 @@ class GeoProjector:
         center_x = self.sub_width / 2.0
         center_y = self.sub_height / 2.0
         scale_x = self.get_scale_x()
-        scale_y = scale_x / self.viewport.aspect_ratio
+        scale_y = self.get_scale_y()
 
         delta_lng = point.lng - self.viewport.center.lng
         delta_lat = point.lat - self.viewport.center.lat
@@ -280,6 +304,62 @@ class GeoProjector:
         px, py = self.geo_to_subpixel(point)
         return px // 2, py // 4
 
+    def resolve_track_cell(
+        self,
+        point: GeoPoint,
+        canvas: Optional["BrailleCanvas"] = None,
+    ) -> Tuple[int, int]:
+        """Convert a WGS84 coordinate to character cell (col, row) with sub-pixel track tie-breaking.
+
+        When a point lies on a track polyline, floating-point rounding in geo_to_subpixel()
+        can occasionally place (px, py) 1 sub-pixel across a character cell boundary from the
+        integer Bresenham line rasterized on BrailleCanvas. If canvas is provided and the
+        primary cell (px // 2, py // 4) has no active Braille dots, this method inspects the
+        immediate 1-sub-pixel neighborhood and snaps to the adjacent cell containing the
+        rasterized track dot.
+
+        Args:
+            point: Geographic point (lat, lng).
+            canvas: Optional rasterized BrailleCanvas containing track bitmasks.
+
+        Returns:
+            Tuple of integer character cell coordinates (col, row).
+        """
+        px, py = self.geo_to_subpixel(point)
+        col = px // 2
+        row = py // 4
+
+        if canvas is None:
+            return col, row
+
+        w_cells = canvas.width_cells
+        h_cells = canvas.height_cells
+
+        if 0 <= col < w_cells and 0 <= row < h_cells:
+            if canvas.buffer[row * w_cells + col] != 0:
+                return col, row
+
+        neighbors = (
+            (0, -1),
+            (0, 1),
+            (-1, 0),
+            (1, 0),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        )
+        for dx, dy in neighbors:
+            adj_px = px + dx
+            adj_py = py + dy
+            if 0 <= adj_px < canvas.sub_width and 0 <= adj_py < canvas.sub_height:
+                adj_col = adj_px // 2
+                adj_row = adj_py // 4
+                if canvas.buffer[adj_row * w_cells + adj_col] != 0:
+                    return adj_col, adj_row
+
+        return col, row
+
     def subpixel_to_geo(self, px: int, py: int) -> GeoPoint:
         """Convert sub-pixel coordinates (px, py) back to WGS84 coordinates.
 
@@ -293,7 +373,7 @@ class GeoProjector:
         center_x = self.sub_width / 2.0
         center_y = self.sub_height / 2.0
         scale_x = self.get_scale_x()
-        scale_y = scale_x / self.viewport.aspect_ratio
+        scale_y = self.get_scale_y()
 
         delta_lng = (px - center_x) / (scale_x * self._cos_phi0)
         delta_lat = (center_y - py) / scale_y
@@ -324,10 +404,10 @@ class GeoProjector:
         self.viewport.center = bbox.center
         scale_x_needed = self.sub_width / (bbox.span_lng * self._cos_phi0)
         scale_y_needed = self.sub_height / bbox.span_lat
-        effective_scale = min(scale_x_needed, scale_y_needed * self.viewport.aspect_ratio)
+        effective_scale_x = min(scale_x_needed, scale_y_needed * self.subpixel_aspect_ratio)
 
-        base_scale = self.sub_width / GREECE_PRESET.span_lng
-        self.viewport.zoom = max(0.2, effective_scale / base_scale)
+        base_scale = self._get_base_scale_x()
+        self.viewport.zoom = max(0.2, effective_scale_x / base_scale)
 
 
 class BrailleCanvas:

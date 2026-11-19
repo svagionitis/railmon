@@ -189,6 +189,8 @@ class TestGeoProjector(unittest.TestCase):
 
     def test_aspect_ratio_scaling(self):
         """Verify aspect ratio scaling compensates for non-square terminal cells."""
+        self.assertAlmostEqual(self.projector.subpixel_aspect_ratio, 1.0, places=5)
+
         # 3 deg north vs 3 deg east relative to center (reduces integer quantization noise)
         center = self.viewport.center
         pt_north = GeoPoint(lat=center.lat + 3.0, lng=center.lng)
@@ -201,12 +203,84 @@ class TestGeoProjector(unittest.TestCase):
         delta_x = abs(ex - cx)
         delta_y = abs(ny - cy)
 
+        # With aspect_ratio = 2.0, subpixel_aspect_ratio = 2.0 / 2.0 = 1.0 (each 2x4 subpixel is square).
         # delta_x = scale_x * cos(39.5) * 3.0
-        # delta_y = (scale_x / 2.0) * 3.0
-        # Expected ratio delta_x / delta_y = 2.0 * cos(39.5) approx 2.0 * 0.7716 = 1.5432
-        observed_ratio = delta_x / delta_y
-        expected_ratio = 2.0 * self.projector._cos_phi0
-        self.assertAlmostEqual(observed_ratio, expected_ratio, delta=0.05)
+        # delta_y = (scale_x / 1.0) * 3.0
+        # Expected subpixel ratio delta_x / delta_y = cos(39.5) approx 0.7716
+        observed_subpixel_ratio = delta_x / delta_y
+        expected_subpixel_ratio = self.projector._cos_phi0
+        self.assertAlmostEqual(observed_subpixel_ratio, expected_subpixel_ratio, delta=0.03)
+
+        # In character cells (col = px / 2, row = py / 4):
+        # delta_col / delta_row = (delta_x / 2) / (delta_y / 4) = 2.0 * (delta_x / delta_y) = 2.0 * cos(39.5)
+        observed_cell_ratio = (delta_x / 2.0) / (delta_y / 4.0)
+        expected_cell_ratio = 2.0 * self.projector._cos_phi0
+        self.assertAlmostEqual(observed_cell_ratio, expected_cell_ratio, delta=0.06)
+
+        # Custom font aspect ratio (2.4 -> subpixel_aspect_ratio = 1.2)
+        custom_vp = Viewport(
+            center=GREECE_PRESET.center,
+            zoom=1.0,
+            width_cells=80,
+            height_cells=30,
+            aspect_ratio=2.4,
+        )
+        custom_proj = GeoProjector(custom_vp)
+        self.assertAlmostEqual(custom_proj.subpixel_aspect_ratio, 1.2, places=5)
+        self.assertAlmostEqual(
+            custom_proj.get_scale_x() / custom_proj.get_scale_y(),
+            1.2,
+            places=5,
+        )
+
+    def test_national_preset_fits_compact_80x24_viewport(self):
+        """Verify GREECE_PRESET fits within both axes at zoom=1.0 on compact 80x24 map panes."""
+        compact_vp = Viewport(
+            center=GREECE_PRESET.center,
+            zoom=1.0,
+            width_cells=50,
+            height_cells=20,
+            aspect_ratio=2.0,
+        )
+        compact_proj = GeoProjector(compact_vp)
+
+        sw = GeoPoint(lat=GREECE_PRESET.min_lat, lng=GREECE_PRESET.min_lng)
+        ne = GeoPoint(lat=GREECE_PRESET.max_lat, lng=GREECE_PRESET.max_lng)
+
+        sw_px, sw_py = compact_proj.geo_to_subpixel(sw)
+        ne_px, ne_py = compact_proj.geo_to_subpixel(ne)
+
+        self.assertGreaterEqual(sw_px, 0)
+        self.assertLessEqual(ne_px, compact_proj.sub_width)
+        self.assertGreaterEqual(ne_py, 0)
+        self.assertLessEqual(sw_py, compact_proj.sub_height)
+
+    def test_resolve_track_cell_subpixel_boundary_tiebreak(self):
+        """Verify resolve_track_cell resolves 1-subpixel cell boundary rounding onto active track cells."""
+        canvas = BrailleCanvas(width_cells=20, height_cells=15)
+        # Draw a vertical track line along subpixel px=20 (which belongs to cell col=10, left dot)
+        canvas.draw_line(20, 10, 20, 40)
+
+        # Find the geographic coordinate corresponding to (px=19, py=20)
+        # px=19 is in cell col=9 (right dot), 1 subpixel left of the drawn line at px=20 (col=10)
+        boundary_pt = self.projector.subpixel_to_geo(19, 20)
+        px, py = self.projector.geo_to_subpixel(boundary_pt)
+        self.assertEqual((px, py), (19, 20))
+
+        # Raw geo_to_cell lands in empty cell (col=9, row=5)
+        raw_col, raw_row = self.projector.geo_to_cell(boundary_pt)
+        self.assertEqual((raw_col, raw_row), (9, 5))
+        self.assertEqual(canvas.buffer[raw_row * canvas.width_cells + raw_col], 0)
+
+        # resolve_track_cell detects the adjacent track dot at px=20 (col=10, row=5) and snaps to it
+        resolved_col, resolved_row = self.projector.resolve_track_cell(boundary_pt, canvas)
+        self.assertEqual((resolved_col, resolved_row), (10, 5))
+        self.assertNotEqual(canvas.buffer[resolved_row * canvas.width_cells + resolved_col], 0)
+
+        # When canvas is None or no track dot is in the 1-subpixel neighborhood, returns primary cell
+        self.assertEqual(self.projector.resolve_track_cell(boundary_pt, None), (9, 5))
+        far_pt = self.projector.subpixel_to_geo(10, 20)
+        self.assertEqual(self.projector.resolve_track_cell(far_pt, canvas), (5, 5))
 
     def test_visibility_and_cell_mapping(self):
         """Verify visibility check and character cell mapping."""
