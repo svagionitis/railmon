@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 3 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 2 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
@@ -14,7 +14,7 @@
 +-----------------------------------+--------+----------------------------------------------+
 | Dimension                         | Score  | Status & Primary Finding                     |
 +-----------------------------------+--------+----------------------------------------------+
-| Geospatial Math & Braille Canvas  |  9/10  | Equirectangular projection sound; no ASCII   |
+| Geospatial Math & Braille Canvas  | 10/10  | P1-7 resolved; full ASCII fallback table     |
 | Test Suite & Empirical Benchmarks |  8/10  | 237 tests pass; 31.6k rows/s @ batch=100     |
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  | 10/10  | P0-5 & P1-2 fixed; user_version & integrity  |
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `293 passed in 44.3s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `307 passed in 44.2s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -366,11 +366,12 @@ sequenceDiagram
 - **Issue:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L5-L17). `sys.stdout.isatty()` is never checked before initializing curses, and `curses.error` (e.g., `TERM=dumb` or missing terminfo in containers) is not caught to fall back to `run_plain_stream_mode()`.
 - **Fix:** Implemented `is_tty_supported()` in [`../tui/app.py`](../tui/app.py) and [`../train_tracker.py`](../train_tracker.py) validating `sys.stdout.isatty()`. Guarded `run_tui()` to raise `curses.error` when stdout is not a TTY. Added pre-flight TTY verification in `run_tui_mode()` and caught `curses.error` during curses execution to cleanly tear down worker threads, checkpoint SQLite WAL, and close DB connections before seamlessly falling back to `run_plain_stream_mode()`. Added top-level `--headless` and `--daemon` override flags in `build_parser()` and `main()`.
 
-### P1-7: Missing ASCII Fallback for Non-UTF-8 Terminals & Unsafe `init_pair`
-- **Location:** [`BrailleCanvas.render_rows`](../tui/geo.py#L401-L415), [`TUIRenderer.init_colors`](../tui/renderer.py#L434-L463), [`TUIRenderer.render_map`](../tui/renderer.py#L590-L684)
+### P1-7: Missing ASCII Fallback for Non-UTF-8 Terminals & Unsafe `init_pair` [RESOLVED]
+- **Location:** [`BrailleCanvas.render_rows`](../tui/geo.py#L401-L415), [`TUIRenderer.init_colors`](../tui/renderer.py#L434-L463), [`TUIRenderer.render_map`](../tui/renderer.py#L590-L684) | **Plan:** [`./p1-7-ascii-fallback-safe-init-pair-fix-plan.md`](./p1-7-ascii-fallback-safe-init-pair-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/terminal-and-rendering-compatibility.md`](../.agents/rules/terminal-and-rendering-compatibility.md#L14-L33):
   1. No encoding detection (`sys.stdout.encoding` / `locale.getpreferredencoding()`) or ASCII fallback table (`.`, `-`, `*`, `#`, `+`, `|`) when UTF-8 is unavailable.
   2. `curses.init_pair(...)` calls in `init_colors()` are not wrapped in `try...except curses.error:`.
+- **Fix:** Implemented `is_utf8_supported()` in [`../tui/geo.py`](../tui/geo.py) inspecting `sys.stdout.encoding`, `locale.getpreferredencoding()`, and `RAILMON_ASCII` / `TERM=ascii` overrides, alongside precomputed 256-element `ASCII_BRAILLE_TABLE` mapping 2x4 dot subpixel masks to standard ASCII track characters (`.`, `-`, `|`, `+`, `/`, `\`). Added `ascii_mode` support to `BrailleCanvas` and `TUIRenderer`, with `GLYPHS_UTF8` and `GLYPHS_ASCII` palettes replacing Unicode compass glyphs (`▲►▼◄` $\to$ `^>v<`), station hubs (`◉` $\to$ `#`/`+`), breadcrumbs (`·` $\to$ `.`), callouts (`◄` $\to$ `<`), degree signs (`°` $\to$ `d`), and status badges (`❚❚` $\to$ `||`, `●` $\to$ `*`, `✕` $\to$ `[X]`). Hardened `TUIRenderer.init_colors()` with `curses.COLOR_PAIRS` bounds checking and individual `try...except curses.error:` blocks per pair, tracking allocated pairs in `_INITIALIZED_COLOR_PAIRS` so `safe_color_pair()` safely degrades to fallback attributes on monochrome or limited consoles. Exposed top-level `--ascii` flag in `build_parser()` and wired auto-detection into `run_tui_mode()`.
 
 ### P1-8: Non-Compliant Logging Hierarchy & Missing `RotatingFileHandler`
 - **Location:** [`../train_tracker.py`](../train_tracker.py), [`../storage/recorder.py`](../storage/recorder.py#L18), [`../tui/stream_worker.py`](../tui/stream_worker.py#L16)

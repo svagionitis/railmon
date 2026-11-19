@@ -19,6 +19,7 @@ from tui.renderer import (
     PAIR_TRAIN_WARN,
     PaneGeometry,
     TUIRenderer,
+    _INITIALIZED_COLOR_PAIRS,
     calculate_scroll_offset,
     format_progress_bar,
     get_compass_bearing,
@@ -26,6 +27,8 @@ from tui.renderer import (
     get_heading_glyph,
     get_string_display_width,
     get_train_color_pair,
+    safe_addstr,
+    safe_color_pair,
     truncate_to_display_width,
 )
 from tui.state import ConnectionStatus, StateSnapshot, TrainRecord, TrainStateStore
@@ -96,6 +99,10 @@ class MockCursesWindow:
     def box(self):
         self.boxed = True
         self.calls.append(("box",))
+
+    def border(self, ls=0, rs=0, ts=0, bs=0, tl=0, tr=0, bl=0, br=0):
+        self.boxed = True
+        self.calls.append(("border", ls, rs, ts, bs, tl, tr, bl, br))
 
     def addstr(self, y, x, text, attr=0):
         self.strings.append((y, x, text, attr))
@@ -532,6 +539,198 @@ class TestTUIAppLifecycle(unittest.TestCase):
         with patch("time.monotonic", return_value=102.0):  # 2.0s later
             self.app._update_message_rate(total_messages=20)  # +10 messages
             self.assertEqual(self.app._current_msg_rate, 5.0)  # 10 / 2 = 5 msg/s
+
+
+class TestRendererSafeColorPairsAndASCIIFallback(unittest.TestCase):
+    """Test suite for guarded init_pair color initialization and 7-bit ASCII rendering."""
+
+    def setUp(self):
+        _INITIALIZED_COLOR_PAIRS.clear()
+        self.stations = [
+            StationNode(
+                id="ATH",
+                code="1001",
+                name_el="Athens",
+                name_en="Athens",
+                point=GeoPoint(lat=37.9926, lng=23.7203),
+                corridor="PATHE",
+                is_hub=True,
+            ),
+            StationNode(
+                id="SKA",
+                code="1005",
+                name_el="SKA",
+                name_en="SKA",
+                point=GeoPoint(lat=38.0744, lng=23.7381),
+                corridor="PATHE",
+                is_hub=False,
+            ),
+        ]
+        self.tracks = [
+            TrackPolyline(
+                corridor_id="pathe",
+                name="PATHE",
+                points=[
+                    GeoPoint(lat=37.9926, lng=23.7203),
+                    GeoPoint(lat=38.0744, lng=23.7381),
+                ],
+                cumulative_distances_m=[0.0, 10000.0],
+                total_length_m=10000.0,
+            )
+        ]
+        self.renderer = TUIRenderer(
+            stations=self.stations,
+            tracks=self.tracks,
+            ascii_mode=True,
+        )
+
+    def test_init_colors_has_colors_false(self):
+        """Verify init_colors safely terminates if curses reports no color support."""
+        with patch("curses.has_colors", return_value=False):
+            with patch("curses.start_color") as mock_start:
+                self.renderer.init_colors()
+                mock_start.assert_not_called()
+                self.assertEqual(len(_INITIALIZED_COLOR_PAIRS), 0)
+
+    def test_init_colors_start_color_raises_curses_error(self):
+        """Verify init_colors catches curses.error on start_color."""
+        with patch("curses.has_colors", return_value=True):
+            with patch("curses.start_color", side_effect=curses.error("start_color failed")):
+                self.renderer.init_colors()
+                self.assertEqual(len(_INITIALIZED_COLOR_PAIRS), 0)
+
+    def test_init_colors_partial_init_pair_failure(self):
+        """Verify init_colors records successful pairs and silently degrades on init_pair errors."""
+        def mock_init_pair(pair_idx, fg, bg):
+            if pair_idx == 4:
+                raise curses.error("Color pair 4 failed")
+
+        with patch("curses.has_colors", return_value=True), \
+             patch("curses.start_color"), \
+             patch("curses.use_default_colors"), \
+             patch("curses.init_pair", side_effect=mock_init_pair), \
+             patch("curses.COLOR_PAIRS", 10, create=True):
+            self.renderer.init_colors()
+            # Pair 4 failed, so it must not be in _INITIALIZED_COLOR_PAIRS
+            self.assertNotIn(4, _INITIALIZED_COLOR_PAIRS)
+            # Other pairs < 10 must succeed
+            self.assertIn(1, _INITIALIZED_COLOR_PAIRS)
+            self.assertIn(2, _INITIALIZED_COLOR_PAIRS)
+            self.assertIn(3, _INITIALIZED_COLOR_PAIRS)
+            # Pairs >= 10 must be skipped
+            self.assertNotIn(10, _INITIALIZED_COLOR_PAIRS)
+            self.assertNotIn(16, _INITIALIZED_COLOR_PAIRS)
+
+    def test_safe_color_pair_behavior(self):
+        """Verify safe_color_pair only returns curses.color_pair when pair was allocated."""
+        _INITIALIZED_COLOR_PAIRS.clear()
+        _INITIALIZED_COLOR_PAIRS.add(1)
+
+        with patch("curses.has_colors", return_value=True):
+            with patch("curses.color_pair", return_value=100) as mock_cp:
+                # Pair 1 is initialized
+                res1 = safe_color_pair(1, fallback_attr=curses.A_BOLD)
+                self.assertEqual(res1, 100)
+                mock_cp.assert_called_with(1)
+
+                # Pair 2 is not initialized
+                res2 = safe_color_pair(2, fallback_attr=curses.A_BOLD)
+                self.assertEqual(res2, curses.A_BOLD)
+
+    def test_get_heading_glyph_and_compass_bearing_ascii(self):
+        """Verify heading glyphs and compass bearing format in pure 7-bit ASCII."""
+        self.assertEqual(get_heading_glyph(0.0, ascii_mode=True), "^")
+        self.assertEqual(get_heading_glyph(90.0, ascii_mode=True), ">")
+        self.assertEqual(get_heading_glyph(180.0, ascii_mode=True), "v")
+        self.assertEqual(get_heading_glyph(270.0, ascii_mode=True), "<")
+
+        compass = get_compass_bearing(45.0, ascii_mode=True)
+        self.assertIn("d", compass)
+        self.assertNotIn("°", compass)
+        self.assertTrue(all(ord(c) < 128 for c in compass))
+
+    def test_renderer_ascii_mode_no_high_order_characters(self):
+        """Verify that all UI panes render exclusively pure 7-bit ASCII characters when ascii_mode=True."""
+        pos = create_test_position(
+            train_id="1",
+            train_number="1597",
+            train_type="InterCity",
+            speed=95.0,
+            delay=2.0,
+            origin="Athens",
+            destination="Thessaloniki",
+            lat=38.0,
+            lng=23.7,
+        )
+        record = TrainRecord(position=pos)
+        store = TrainStateStore()
+        store.update_positions([pos])
+        store.set_connection_status(ConnectionStatus.CONNECTED, "Live feed active")
+        snapshot = store.get_snapshot()
+
+        viewport = Viewport(
+            center=GeoPoint(lat=38.0, lng=23.7),
+            zoom=1.0,
+            width_cells=40,
+            height_cells=15,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+
+        # 1. Header
+        win_hdr = MockCursesWindow(1, 80)
+        self.renderer.render_header(win_hdr, snapshot, width=80)
+        for _, _, text, _ in win_hdr.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in header")
+
+        # 2. Map
+        win_map = MockCursesWindow(15, 40)
+        self.renderer.render_map(win_map, snapshot, projector)
+        for _, _, text, _ in win_map.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in map")
+
+        # 3. Roster
+        win_roster = MockCursesWindow(10, 40)
+        self.renderer.render_roster(win_roster, snapshot)
+        for _, _, text, _ in win_roster.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in roster")
+
+        # 4. Inspector
+        win_insp = MockCursesWindow(12, 40)
+        self.renderer.render_inspector(win_insp, snapshot)
+        for _, _, text, _ in win_insp.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in inspector")
+
+        # 5. Status bar (both normal and search modes)
+        win_stat = MockCursesWindow(1, 80)
+        self.renderer.render_status_bar(win_stat, snapshot, width=80, msg_rate=12.5)
+        for _, _, text, _ in win_stat.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in status bar")
+
+        win_stat_search = MockCursesWindow(1, 80)
+        self.renderer.render_status_bar(win_stat_search, snapshot, width=80, search_mode=True, search_buffer="IC")
+        for _, _, text, _ in win_stat_search.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in search bar")
+
+        # 6. Undersized warning banner
+        win_small = MockCursesWindow(15, 50)
+        self.renderer.render_undersized(win_small, height=15, width=50)
+        for _, _, text, _ in win_small.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in undersized banner")
+
+        # 7. Help dialog
+        win_help = MockCursesWindow(24, 80)
+        self.renderer.render_help_modal(win_help, height=24, width=80)
+        for _, _, text, _ in win_help.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in help dialog")
 
 
 if __name__ == "__main__":

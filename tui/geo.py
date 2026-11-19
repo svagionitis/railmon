@@ -5,9 +5,12 @@ and terminal screen space with font aspect ratio compensation, alongside
 a 2x4 sub-pixel Braille rasterizer for rendering railway tracks.
 """
 
+import locale
 import math
+import os
+import sys
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 
 # Base Unicode code point for Braille Patterns block (U+2800)
@@ -20,6 +23,81 @@ DOT_MASKS: Tuple[Tuple[int, ...], Tuple[int, ...]] = (
     (0x01, 0x02, 0x04, 0x40),  # col 0: dots 1, 2, 3, 7
     (0x08, 0x10, 0x20, 0x80),  # col 1: dots 4, 5, 6, 8
 )
+
+
+def _generate_ascii_braille_table() -> Tuple[str, ...]:
+    """Precompute 256-element lookup table mapping 2x4 subpixel bitmasks to ASCII characters."""
+    table: List[str] = []
+    for mask in range(256):
+        if mask == 0:
+            table.append(" ")
+            continue
+        c0 = [bool(mask & DOT_MASKS[0][r]) for r in range(4)]
+        c1 = [bool(mask & DOT_MASKS[1][r]) for r in range(4)]
+        total = sum(c0) + sum(c1)
+        if total == 1:
+            table.append(".")
+        elif any(c0) and not any(c1):
+            table.append("|")
+        elif any(c1) and not any(c0):
+            table.append("|")
+        else:
+            horiz = sum(1 for r in range(4) if c0[r] and c1[r])
+            if horiz > 0 and total <= 3:
+                table.append("-")
+            elif (c0[0] or c0[1]) and (c1[2] or c1[3]) and not ((c0[2] or c0[3]) and (c1[0] or c1[1])) and total <= 3:
+                table.append("\\")
+            elif (c0[2] or c0[3]) and (c1[0] or c1[1]) and not ((c0[0] or c0[1]) and (c1[2] or c1[3])) and total <= 3:
+                table.append("/")
+            elif total >= 3:
+                table.append("+")
+            else:
+                table.append("-")
+    return tuple(table)
+
+
+ASCII_BRAILLE_TABLE: Tuple[str, ...] = _generate_ascii_braille_table()
+
+
+def is_utf8_supported(stream: Optional[Any] = None) -> bool:
+    """Determine whether the output stream and runtime environment support UTF-8 encoding.
+
+    Inspects stream.encoding (defaulting to sys.stdout), locale.getpreferredencoding(),
+    and validates actual encoding capabilities by attempting to encode representative
+    Unicode Braille and directional glyphs.
+
+    Args:
+        stream: Optional stream object to probe. Defaults to sys.stdout.
+
+    Returns:
+        bool: True if the environment safely encodes UTF-8 characters;
+              False if restricted to 7-bit ASCII, legacy code pages, or encoding fails.
+    """
+    if os.environ.get("RAILMON_ASCII", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if os.environ.get("TERM", "").strip().lower() in {"ascii"}:
+        return False
+
+    target_stream = stream if stream is not None else sys.stdout
+    encoding = getattr(target_stream, "encoding", None)
+    if not encoding:
+        try:
+            encoding = locale.getpreferredencoding(False)
+        except Exception:
+            encoding = "ascii"
+    if not encoding:
+        return False
+
+    norm_enc = encoding.lower().replace("-", "").replace("_", "")
+    if "utf8" not in norm_enc:
+        return False
+
+    test_chars = "\u2801\u25c9\u25b2\u00b7\u2500"
+    try:
+        test_chars.encode(encoding)
+        return True
+    except (UnicodeEncodeError, LookupError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -266,12 +344,14 @@ class BrailleCanvas:
         sub_height: Canvas height in sub-pixels (height_cells * 4).
     """
 
-    def __init__(self, width_cells: int, height_cells: int):
+    def __init__(self, width_cells: int, height_cells: int, ascii_mode: bool = False):
         """Initialize the Braille canvas with dimensions in character cells.
 
         Args:
             width_cells: Terminal columns allocated for the canvas.
             height_cells: Terminal rows allocated for the canvas.
+            ascii_mode: Whether to render using standard 7-bit ASCII characters
+                        instead of Unicode Braille patterns.
         """
         if width_cells <= 0 or height_cells <= 0:
             raise ValueError("Canvas dimensions must be positive integers.")
@@ -280,6 +360,7 @@ class BrailleCanvas:
         self.height_cells = height_cells
         self.sub_width = width_cells * 2
         self.sub_height = height_cells * 4
+        self.ascii_mode = ascii_mode
         self.buffer = bytearray(width_cells * height_cells)
 
     def clear(self) -> None:
@@ -398,26 +479,37 @@ class BrailleCanvas:
             p2 = points[i + 1]
             self.draw_line(p1[0], p1[1], p2[0], p2[1])
 
-    def render_rows(self) -> List[str]:
+    def render_rows(self, ascii_mode: Optional[bool] = None) -> List[str]:
         """Convert the canvas buffer into a list of terminal row strings.
 
+        Args:
+            ascii_mode: Optional boolean override to force ASCII or Braille rendering.
+                        If None, uses self.ascii_mode.
+
         Returns:
-            List of Unicode strings representing character cells row-by-row.
+            List of character strings representing character cells row-by-row.
         """
+        use_ascii = self.ascii_mode if ascii_mode is None else ascii_mode
         rows: List[str] = []
         for r in range(self.height_cells):
             row_chars: List[str] = []
             row_offset = r * self.width_cells
             for c in range(self.width_cells):
                 cell_bits = self.buffer[row_offset + c]
-                row_chars.append(chr(BRAILLE_BASE + cell_bits))
+                if use_ascii:
+                    row_chars.append(ASCII_BRAILLE_TABLE[cell_bits])
+                else:
+                    row_chars.append(chr(BRAILLE_BASE + cell_bits))
             rows.append("".join(row_chars))
         return rows
 
-    def render_to_string(self) -> str:
+    def render_to_string(self, ascii_mode: Optional[bool] = None) -> str:
         """Render the complete canvas as a multi-line string joined by newlines.
 
+        Args:
+            ascii_mode: Optional boolean override to force ASCII or Braille rendering.
+
         Returns:
-            Multi-line string representing the rendered Braille grid.
+            Multi-line string representing the rendered grid.
         """
-        return "\n".join(self.render_rows())
+        return "\n".join(self.render_rows(ascii_mode=ascii_mode))

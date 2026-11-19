@@ -42,9 +42,68 @@ PAIR_CONNECTED = 16
 
 # Directional compass glyphs and bearings
 HEADING_GLYPHS = ("▲", "◥", "►", "◢", "▼", "◣", "◄", "◤")
+HEADING_GLYPHS_ASCII = ("^", ">", ">", "v", "v", "<", "<", "^")
 COMPASS_POINTS_16 = (
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+)
+
+
+@dataclass(frozen=True)
+class RenderGlyphs:
+    """Character glyph set for TUI rendering."""
+
+    station_hub: str
+    station_normal: str
+    trail_dot: str
+    callout_arrow: str
+    search_cursor: str
+    degree_sym: str
+    ellipsis: str
+    badge_rec: str
+    badge_paused: str
+    badge_live: str
+    badge_connecting: str
+    badge_reconnecting: str
+    badge_conn_error: str
+    badge_demo: str
+    warn_icon: str
+
+
+GLYPHS_UTF8 = RenderGlyphs(
+    station_hub="◉",
+    station_normal="◉",
+    trail_dot="·",
+    callout_arrow="◄",
+    search_cursor="█",
+    degree_sym="°",
+    ellipsis="…",
+    badge_rec=" [● REC]",
+    badge_paused=" ❚❚ PAUSED ",
+    badge_live=" ● LIVE ",
+    badge_connecting=" ○ CONNECTING... ",
+    badge_reconnecting=" ⟳ RECONNECTING... ",
+    badge_conn_error=" ✕ CONN ERROR ",
+    badge_demo=" ● DEMO MODE ",
+    warn_icon="⚠️  ",
+)
+
+GLYPHS_ASCII = RenderGlyphs(
+    station_hub="#",
+    station_normal="+",
+    trail_dot=".",
+    callout_arrow="<",
+    search_cursor="_",
+    degree_sym="d",
+    ellipsis="...",
+    badge_rec=" [* REC]",
+    badge_paused=" || PAUSED ",
+    badge_live=" * LIVE ",
+    badge_connecting=" .. CONNECTING... ",
+    badge_reconnecting=" >> RECONNECTING... ",
+    badge_conn_error=" [X] CONN ERROR ",
+    badge_demo=" * DEMO MODE ",
+    warn_icon="[!] ",
 )
 
 
@@ -217,34 +276,38 @@ def truncate_to_display_width(text: str, max_width: int, ellipsis: str = "…") 
     return "".join(chars) + ellipsis
 
 
-def get_heading_glyph(heading: Optional[float]) -> str:
+def get_heading_glyph(heading: Optional[float], ascii_mode: bool = False) -> str:
     """Map a heading degree to one of 8 compass directional glyphs.
 
     Args:
         heading: Compass angle in degrees (0-360 clockwise from North).
+        ascii_mode: Whether to return standard 7-bit ASCII arrows (^>v<).
 
     Returns:
-        One of the 8 heading glyphs: ▲, ◥, ►, ◢, ▼, ◣, ◄, ◤.
+        One of the 8 heading glyphs.
     """
+    glyphs = HEADING_GLYPHS_ASCII if ascii_mode else HEADING_GLYPHS
     if heading is None:
-        return "▲"
+        return glyphs[0]
     octant = int((heading + 22.5) % 360 // 45)
-    return HEADING_GLYPHS[octant]
+    return glyphs[octant]
 
 
-def get_compass_bearing(heading: Optional[float]) -> str:
+def get_compass_bearing(heading: Optional[float], ascii_mode: bool = False) -> str:
     """Format heading angle into degrees and 16-point cardinal direction text.
 
     Args:
         heading: Compass angle in degrees.
+        ascii_mode: Whether to format degrees in ASCII ("d") or Unicode ("°").
 
     Returns:
-        Formatted string, e.g. "342.5° (NNW)" or "N/A".
+        Formatted string, e.g. "342.5° (NNW)", "342.5d (NNW)", or "N/A".
     """
     if heading is None:
         return "N/A"
+    deg_sym = "d" if ascii_mode else "°"
     idx = int((heading + 11.25) % 360 // 22.5)
-    return f"{heading:5.1f}° ({COMPASS_POINTS_16[idx]})"
+    return f"{heading:5.1f}{deg_sym} ({COMPASS_POINTS_16[idx]})"
 
 
 def get_delay_color_pair(delay_min: float) -> int:
@@ -359,6 +422,7 @@ def safe_addstr(
     text: str,
     attr: int = 0,
     max_w: Optional[int] = None,
+    ascii_mode: bool = False,
 ) -> None:
     """Safely write a string to a curses window, avoiding border wrap and errors.
 
@@ -369,6 +433,7 @@ def safe_addstr(
         text: String to write.
         attr: Curses attribute mask.
         max_w: Optional explicit column limit.
+        ascii_mode: Whether to format truncation ellipsis in ASCII ("...") or Unicode ("…").
     """
     try:
         max_y, max_x = win.getmaxyx()
@@ -387,7 +452,8 @@ def safe_addstr(
 
     display_w = get_string_display_width(text)
     if display_w > available_w:
-        text = truncate_to_display_width(text, available_w, ellipsis="…")
+        el = "..." if ascii_mode else "…"
+        text = truncate_to_display_width(text, available_w, ellipsis=el)
 
     try:
         win.addstr(y, x, text, attr)
@@ -396,8 +462,11 @@ def safe_addstr(
         pass
 
 
+_INITIALIZED_COLOR_PAIRS: Set[int] = set()
+
+
 def safe_color_pair(pair_idx: int, fallback_attr: int = curses.A_NORMAL) -> int:
-    """Safely return curses color pair attribute or fallback if curses not initialized.
+    """Safely return curses color pair attribute or fallback if curses not initialized or pair failed.
 
     Args:
         pair_idx: Curses color pair index.
@@ -406,8 +475,9 @@ def safe_color_pair(pair_idx: int, fallback_attr: int = curses.A_NORMAL) -> int:
     Returns:
         Color pair attribute integer or fallback.
     """
+    global _INITIALIZED_COLOR_PAIRS
     try:
-        if curses.has_colors():
+        if curses.has_colors() and pair_idx in _INITIALIZED_COLOR_PAIRS:
             return curses.color_pair(pair_idx)
     except curses.error:
         pass
@@ -421,45 +491,72 @@ class TUIRenderer:
         self,
         stations: Optional[Sequence[StationNode]] = None,
         tracks: Optional[Sequence[TrackPolyline]] = None,
+        ascii_mode: bool = False,
     ):
         """Initialize renderer with static railway network vector data.
 
         Args:
             stations: List or sequence of StationNode objects.
             tracks: List or sequence of TrackPolyline objects.
+            ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
         """
         self.stations: Sequence[StationNode] = stations or []
         self.tracks: Sequence[TrackPolyline] = tracks or []
+        self.ascii_mode: bool = ascii_mode
+        self.glyphs: RenderGlyphs = GLYPHS_ASCII if ascii_mode else GLYPHS_UTF8
 
     def init_colors(self) -> None:
-        """Initialize standard curses color pairs and semantic visual attributes."""
-        if not curses.has_colors():
+        """Initialize standard curses color pairs and semantic visual attributes with error bounds."""
+        global _INITIALIZED_COLOR_PAIRS
+        _INITIALIZED_COLOR_PAIRS.clear()
+
+        try:
+            if not curses.has_colors():
+                return
+        except curses.error:
             return
 
-        curses.start_color()
+        try:
+            curses.start_color()
+        except curses.error:
+            return
+
         try:
             curses.use_default_colors()
             bg = -1
         except curses.error:
             bg = curses.COLOR_BLACK
 
-        # Initialize color pairs
-        curses.init_pair(PAIR_DEFAULT, curses.COLOR_WHITE, bg)
-        curses.init_pair(PAIR_HEADER, curses.COLOR_CYAN, bg)
-        curses.init_pair(PAIR_BORDER, curses.COLOR_BLUE, bg)
-        curses.init_pair(PAIR_TRACK, curses.COLOR_WHITE, bg)
-        curses.init_pair(PAIR_STATION, curses.COLOR_YELLOW, bg)
-        curses.init_pair(PAIR_STATION_DIM, curses.COLOR_YELLOW, bg)
-        curses.init_pair(PAIR_TRAIN_ON_TIME, curses.COLOR_GREEN, bg)
-        curses.init_pair(PAIR_TRAIN_WARN, curses.COLOR_YELLOW, bg)
-        curses.init_pair(PAIR_TRAIN_ALERT, curses.COLOR_RED, bg)
-        curses.init_pair(PAIR_TRAIN_PROAST, curses.COLOR_CYAN, bg)
-        curses.init_pair(PAIR_TRAIN_FREIGHT, curses.COLOR_MAGENTA, bg)
-        curses.init_pair(PAIR_TRAIN_HALTED, curses.COLOR_WHITE, bg)
-        curses.init_pair(PAIR_ROSTER_SELECT, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(PAIR_TRAIL, curses.COLOR_GREEN, bg)
-        curses.init_pair(PAIR_STATUS_BAR, curses.COLOR_BLACK, curses.COLOR_WHITE)
-        curses.init_pair(PAIR_CONNECTED, curses.COLOR_GREEN, bg)
+        max_pairs = getattr(curses, "COLOR_PAIRS", 64)
+
+        pairs = [
+            (PAIR_DEFAULT, curses.COLOR_WHITE, bg),
+            (PAIR_HEADER, curses.COLOR_CYAN, bg),
+            (PAIR_BORDER, curses.COLOR_BLUE, bg),
+            (PAIR_TRACK, curses.COLOR_WHITE, bg),
+            (PAIR_STATION, curses.COLOR_YELLOW, bg),
+            (PAIR_STATION_DIM, curses.COLOR_YELLOW, bg),
+            (PAIR_TRAIN_ON_TIME, curses.COLOR_GREEN, bg),
+            (PAIR_TRAIN_WARN, curses.COLOR_YELLOW, bg),
+            (PAIR_TRAIN_ALERT, curses.COLOR_RED, bg),
+            (PAIR_TRAIN_PROAST, curses.COLOR_CYAN, bg),
+            (PAIR_TRAIN_FREIGHT, curses.COLOR_MAGENTA, bg),
+            (PAIR_TRAIN_HALTED, curses.COLOR_WHITE, bg),
+            (PAIR_ROSTER_SELECT, curses.COLOR_BLACK, curses.COLOR_CYAN),
+            (PAIR_TRAIL, curses.COLOR_GREEN, bg),
+            (PAIR_STATUS_BAR, curses.COLOR_BLACK, curses.COLOR_WHITE),
+            (PAIR_CONNECTED, curses.COLOR_GREEN, bg),
+        ]
+
+        for pair_idx, fg, pair_bg in pairs:
+            if pair_idx >= max_pairs:
+                continue
+            try:
+                curses.init_pair(pair_idx, fg, pair_bg)
+                _INITIALIZED_COLOR_PAIRS.add(pair_idx)
+            except curses.error:
+                # Silently degrade: safe_color_pair will return fallback_attr
+                pass
 
     def render_undersized(self, win: Any, height: int, width: int) -> None:
         """Render centered warning banner when terminal size falls below minimum.
@@ -474,12 +571,16 @@ class TUIRenderer:
         alert_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD)
 
         try:
-            win.box()
+            if self.ascii_mode:
+                win.border(ord('|'), ord('|'), ord('-'), ord('-'), ord('+'), ord('+'), ord('+'), ord('+'))
+            else:
+                win.box()
         except curses.error:
             pass
 
+        warn_title = f"{self.glyphs.warn_icon}TERMINAL WINDOW TOO SMALL"
         lines = [
-            ("⚠️  TERMINAL WINDOW TOO SMALL", alert_attr | curses.A_BOLD),
+            (warn_title, alert_attr | curses.A_BOLD),
             ("", 0),
             (f"Current Size:  {width} columns x {height} rows", border_attr),
             (f"Required Size: {MIN_COLS} columns x {MIN_ROWS} rows", border_attr | curses.A_BOLD),
@@ -493,7 +594,7 @@ class TUIRenderer:
             if 0 <= y < height:
                 text_w = get_string_display_width(text)
                 x = max(1, (width - text_w) // 2)
-                safe_addstr(win, y, x, text, attr)
+                safe_addstr(win, y, x, text, attr, ascii_mode=self.ascii_mode)
 
     def render_header(self, win: Any, snapshot: StateSnapshot, width: int) -> None:
         """Render the top full-width header strip.
@@ -526,24 +627,24 @@ class TUIRenderer:
         time_str = time.strftime(" %H:%M:%S ")
 
         # Draw left header elements
-        safe_addstr(win, 0, 0, left_text, header_attr)
+        safe_addstr(win, 0, 0, left_text, header_attr, ascii_mode=self.ascii_mode)
         left_w = get_string_display_width(left_text)
 
         cnt_attr = warn_attr if delayed_count > 0 else dim_attr
-        safe_addstr(win, 0, left_w, counts_text, cnt_attr)
+        safe_addstr(win, 0, left_w, counts_text, cnt_attr, ascii_mode=self.ascii_mode)
         left_w += get_string_display_width(counts_text)
 
-        # Draw [● REC] status badge if recording is active
+        # Draw recording status badge if recording is active
         if snapshot.is_recording and width > left_w + 12:
-            rec_text = " [● REC]"
+            rec_text = self.glyphs.badge_rec
             rec_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
-            safe_addstr(win, 0, left_w, rec_text, rec_attr)
+            safe_addstr(win, 0, left_w, rec_text, rec_attr, ascii_mode=self.ascii_mode)
             left_w += get_string_display_width(rec_text)
 
         # Draw right-aligned clock
         time_x = width - get_string_display_width(time_str)
         if time_x > left_w:
-            safe_addstr(win, 0, time_x, time_str, dim_attr)
+            safe_addstr(win, 0, time_x, time_str, dim_attr, ascii_mode=self.ascii_mode)
 
     def render_map(
         self,
@@ -571,7 +672,10 @@ class TUIRenderer:
 
         # Draw border
         try:
-            win.box()
+            if self.ascii_mode:
+                win.border(ord('|'), ord('|'), ord('-'), ord('-'), ord('+'), ord('+'), ord('+'), ord('+'))
+            else:
+                win.box()
         except curses.error:
             pass
 
@@ -581,14 +685,15 @@ class TUIRenderer:
         if snapshot.follow_mode and snapshot.selected_train:
             tn = snapshot.selected_train.position.train_number or snapshot.selected_train.position.id
             follow_str = f" | Follow: #{tn}"
-        title = f" Map Viewport: {center.lat:.2f}°N, {center.lng:.2f}°E | Zoom: {projector.viewport.zoom:.1f}x{follow_str} "
-        safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4)
+        d_sym = self.glyphs.degree_sym
+        title = f" Map Viewport: {center.lat:.2f}{d_sym}N, {center.lng:.2f}{d_sym}E | Zoom: {projector.viewport.zoom:.1f}x{follow_str} "
+        safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
         inner_h = max_y - 2
         inner_w = max_x - 2
 
         # 1. Rasterize tracks using BrailleCanvas
-        canvas = BrailleCanvas(width_cells=inner_w, height_cells=inner_h)
+        canvas = BrailleCanvas(width_cells=inner_w, height_cells=inner_h, ascii_mode=self.ascii_mode)
         for track in self.tracks:
             sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
             canvas.draw_polyline(sub_points)
@@ -596,15 +701,16 @@ class TUIRenderer:
         # Blit canvas rows to curses buffer
         rows = canvas.render_rows()
         for r_idx, row_str in enumerate(rows):
-            safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w)
+            safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
 
         # 2. Overlay historical breadcrumbs
+        trail_ch = ord(self.glyphs.trail_dot)
         for record in snapshot.trains.values():
             for crumb in record.trail:
                 col, row = projector.geo_to_cell(GeoPoint(lat=crumb.lat, lng=crumb.lng))
                 if 0 <= col < inner_w and 0 <= row < inner_h:
                     try:
-                        win.addch(1 + row, 1 + col, ord("·"), trail_attr)
+                        win.addch(1 + row, 1 + col, trail_ch, trail_attr)
                     except curses.error:
                         pass
 
@@ -619,7 +725,7 @@ class TUIRenderer:
                 continue
 
             # Draw station marker glyph
-            glyph = "◉"
+            glyph = self.glyphs.station_hub if stn.is_hub else self.glyphs.station_normal
             try:
                 win.addstr(1 + row, 1 + col, glyph, station_attr)
             except curses.error:
@@ -647,6 +753,7 @@ class TUIRenderer:
                     label,
                     station_attr if stn.is_hub else station_dim_attr,
                     max_w=inner_w - label_start_x,
+                    ascii_mode=self.ascii_mode,
                 )
                 for dx in range(label_w):
                     occupied_cells.add((label_start_x + dx, row))
@@ -661,7 +768,7 @@ class TUIRenderer:
 
             is_selected = selected_record is not None and record.position.id == selected_record.position.id
             heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
-            glyph = get_heading_glyph(heading_deg)
+            glyph = get_heading_glyph(heading_deg, ascii_mode=self.ascii_mode)
             pair = get_train_color_pair(record)
             train_attr = safe_color_pair(pair, curses.A_BOLD)
 
@@ -679,8 +786,9 @@ class TUIRenderer:
                 spd_str = f"{int(round(pos.speed or 0))}km/h"
                 dly_val = int(round(pos.delay or 0))
                 dly_str = f"+{dly_val}m" if dly_val >= 0 else f"{dly_val}m"
-                tag = f" ◄ [{tn}] ({spd_str}, {dly_str})"
-                safe_addstr(win, 1 + row, 1 + col + 1, tag, train_attr, max_w=inner_w - (col + 1))
+                arrow = self.glyphs.callout_arrow
+                tag = f" {arrow} [{tn}] ({spd_str}, {dly_str})"
+                safe_addstr(win, 1 + row, 1 + col + 1, tag, train_attr, max_w=inner_w - (col + 1), ascii_mode=self.ascii_mode)
 
     def render_roster(
         self,
@@ -703,25 +811,28 @@ class TUIRenderer:
         select_attr = safe_color_pair(PAIR_ROSTER_SELECT, curses.A_REVERSE) | curses.A_BOLD
 
         try:
-            win.box()
+            if self.ascii_mode:
+                win.border(ord('|'), ord('|'), ord('-'), ord('-'), ord('+'), ord('+'), ord('+'), ord('+'))
+            else:
+                win.box()
         except curses.error:
             pass
 
         train_count = len(snapshot.filtered_trains)
         filter_tag = f" (Filter: '{snapshot.filter_query}')" if snapshot.filter_query else ""
         title = f" ACTIVE TRAINS ({train_count}){filter_tag} "
-        safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4)
+        safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
         # Table header row
         # Layout: [Cursor:2][#:3][TRAIN:6][TYPE:5][SPD:5][DLY:5][ST:4]
         table_hdr = " #   TRAIN  TYPE  SPD   DLY  ST"
-        safe_addstr(win, 1, 1, table_hdr, header_attr, max_w=max_x - 2)
+        safe_addstr(win, 1, 1, table_hdr, header_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
         inner_h = max_y - 2
         visible_rows = max(0, inner_h - 1)  # exclude table header
         if visible_rows <= 0 or train_count == 0:
             if train_count == 0:
-                safe_addstr(win, 2, 2, "No trains match filter.", border_attr)
+                safe_addstr(win, 2, 2, "No trains match filter.", border_attr, ascii_mode=self.ascii_mode)
             return
 
         offset = calculate_scroll_offset(snapshot.selected_index, train_count, visible_rows)
@@ -763,7 +874,7 @@ class TUIRenderer:
             row_line = f"{cursor_mark} {seq_num}  {train_num:<6}{t_type:<5}{spd_str:>4} {dly_str:>5}  {st_code}"
             pair = get_train_color_pair(record)
             row_attr = select_attr if is_selected else safe_color_pair(pair, curses.A_NORMAL)
-            safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2)
+            safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
     def render_inspector(
         self,
@@ -787,24 +898,28 @@ class TUIRenderer:
         dim_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL) | curses.A_DIM
 
         try:
-            win.box()
+            if self.ascii_mode:
+                win.border(ord('|'), ord('|'), ord('-'), ord('-'), ord('+'), ord('+'), ord('+'), ord('+'))
+            else:
+                win.box()
         except curses.error:
             pass
 
         title = " SELECTED TRAIN TELEMETRY "
-        safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4)
+        safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
         record = snapshot.selected_train
         if record is None:
             empty_msg1 = "No train selected."
-            empty_msg2 = "Use [Tab] or [↑/↓] to select a train."
-            safe_addstr(win, 2, max(2, (max_x - len(empty_msg1)) // 2), empty_msg1, dim_attr)
-            safe_addstr(win, 3, max(2, (max_x - len(empty_msg2)) // 2), empty_msg2, dim_attr)
+            select_hint = "[UP/DOWN]" if self.ascii_mode else "[↑/↓]"
+            empty_msg2 = f"Use [Tab] or {select_hint} to select a train."
+            safe_addstr(win, 2, max(2, (max_x - len(empty_msg1)) // 2), empty_msg1, dim_attr, ascii_mode=self.ascii_mode)
+            safe_addstr(win, 3, max(2, (max_x - len(empty_msg2)) // 2), empty_msg2, dim_attr, ascii_mode=self.ascii_mode)
             return
 
         pos = record.position
         heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
-        compass_str = get_compass_bearing(heading_deg)
+        compass_str = get_compass_bearing(heading_deg, ascii_mode=self.ascii_mode)
 
         delay_val = pos.delay or 0.0
         delay_pair = get_delay_color_pair(delay_val)
@@ -848,8 +963,8 @@ class TUIRenderer:
             if r_idx >= inner_h:
                 break
             y = 1 + r_idx
-            safe_addstr(win, y, 2, f"{label:<13}", title_attr, max_w=13)
-            safe_addstr(win, y, 16, value, attr, max_w=max_x - 17)
+            safe_addstr(win, y, 2, f"{label:<13}", title_attr, max_w=13, ascii_mode=self.ascii_mode)
+            safe_addstr(win, y, 16, value, attr, max_w=max_x - 17, ascii_mode=self.ascii_mode)
 
     def render_status_bar(
         self,
@@ -880,47 +995,48 @@ class TUIRenderer:
         prompt_attr = safe_color_pair(PAIR_ROSTER_SELECT, curses.A_BOLD) | curses.A_BOLD
 
         # Background bar fill
-        safe_addstr(win, 0, 0, " " * width, status_attr)
+        safe_addstr(win, 0, 0, " " * width, status_attr, ascii_mode=self.ascii_mode)
 
         if search_mode:
             # Interactive search input prompt
-            prompt_text = f" Search filter: {search_buffer}█"
+            cursor = self.glyphs.search_cursor
+            prompt_text = f" Search filter: {search_buffer}{cursor}"
             hint_text = "(Enter: Apply, Esc: Cancel) "
-            safe_addstr(win, 0, 0, prompt_text, prompt_attr, max_w=max(0, width - len(hint_text)))
+            safe_addstr(win, 0, 0, prompt_text, prompt_attr, max_w=max(0, width - len(hint_text)), ascii_mode=self.ascii_mode)
             hint_x = max(0, width - len(hint_text))
-            safe_addstr(win, 0, hint_x, hint_text, status_attr)
+            safe_addstr(win, 0, hint_x, hint_text, status_attr, ascii_mode=self.ascii_mode)
             return
 
         # Keybindings cheat sheet
         follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
         shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
-        safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24))
+        safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         # Connection status badge
         if paused:
-            badge = " ❚❚ PAUSED "
+            badge = self.glyphs.badge_paused
             b_attr = warn_attr
         else:
             status = snapshot.connection_status
             if status == ConnectionStatus.CONNECTED:
-                badge = f" ● LIVE ({msg_rate:3.1f} msg/s) "
+                badge = f"{self.glyphs.badge_live}({msg_rate:3.1f} msg/s) "
                 b_attr = connected_attr
             elif status == ConnectionStatus.CONNECTING:
-                badge = " ○ CONNECTING... "
+                badge = self.glyphs.badge_connecting
                 b_attr = status_attr
             elif status == ConnectionStatus.RECONNECTING:
-                badge = " ⟳ RECONNECTING... "
+                badge = self.glyphs.badge_reconnecting
                 b_attr = warn_attr
             elif status == ConnectionStatus.ERROR:
-                badge = " ✕ CONN ERROR "
+                badge = self.glyphs.badge_conn_error
                 b_attr = alert_attr
             else:
-                badge = " ● DEMO MODE "
+                badge = self.glyphs.badge_demo
                 b_attr = connected_attr
 
         badge_w = get_string_display_width(badge)
         badge_x = max(0, width - badge_w)
-        safe_addstr(win, 0, badge_x, badge, b_attr)
+        safe_addstr(win, 0, badge_x, badge, b_attr, ascii_mode=self.ascii_mode)
 
     def render_help_modal(self, win: Any, height: int, width: int) -> None:
         """Render centered keybinding guide and symbols reference dialog overlay.
@@ -976,8 +1092,14 @@ class TUIRenderer:
                 ("?, q", "Toggle this help dialog / Clean exit dashboard"),
             ]),
             ("SYMBOLS & COLOR LEGEND", [
-                ("▲►▼◄ Headings", "Green: On-time (<=3m)  Yellow: Delay (4-10m)"),
-                ("◉ Station   · Trail", "Red: Alert (>10m)    Cyan: Suburban  Magenta: Cargo"),
+                (
+                    "^>v< Headings" if self.ascii_mode else "▲►▼◄ Headings",
+                    "Green: On-time (<=3m)  Yellow: Delay (4-10m)",
+                ),
+                (
+                    "#/+ Station  . Trail" if self.ascii_mode else "◉ Station   · Trail",
+                    "Red: Alert (>10m)    Cyan: Suburban  Magenta: Cargo",
+                ),
             ]),
         ]
 
@@ -985,18 +1107,18 @@ class TUIRenderer:
         for sec_title, items in help_sections:
             if curr_y >= start_y + box_h - 2:
                 break
-            safe_addstr(win, curr_y, start_x + 2, f"[{sec_title}]", header_attr, max_w=box_w - 4)
+            safe_addstr(win, curr_y, start_x + 2, f"[{sec_title}]", header_attr, max_w=box_w - 4, ascii_mode=self.ascii_mode)
             curr_y += 1
             for k_label, desc in items:
                 if curr_y >= start_y + box_h - 2:
                     break
-                safe_addstr(win, curr_y, start_x + 3, f"{k_label:<19}", key_attr, max_w=19)
-                safe_addstr(win, curr_y, start_x + 22, desc, text_attr, max_w=box_w - 24)
+                safe_addstr(win, curr_y, start_x + 3, f"{k_label:<19}", key_attr, max_w=19, ascii_mode=self.ascii_mode)
+                safe_addstr(win, curr_y, start_x + 22, desc, text_attr, max_w=box_w - 24, ascii_mode=self.ascii_mode)
                 curr_y += 1
 
         footer_msg = " [Press ? or any key to close] "
         f_x = max(start_x + 2, start_x + (box_w - len(footer_msg)) // 2)
-        safe_addstr(win, start_y + box_h - 1, f_x, footer_msg, dim_attr)
+        safe_addstr(win, start_y + box_h - 1, f_x, footer_msg, dim_attr, ascii_mode=self.ascii_mode)
 
     def render_all(
         self,

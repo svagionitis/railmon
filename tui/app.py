@@ -60,6 +60,7 @@ class TUIApp:
         tracks: Optional[Sequence[TrackPolyline]] = None,
         target_fps: float = 20.0,
         stop_event: Optional[threading.Event] = None,
+        ascii_mode: bool = False,
     ):
         """Initialize the TUI application controller.
 
@@ -71,6 +72,7 @@ class TUIApp:
             tracks: List or sequence of TrackPolyline entities.
             target_fps: Target frames per second (default: 20.0).
             stop_event: Optional external shutdown event triggered by OS signals.
+            ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
         """
         self.stdscr = stdscr
         self.store = store
@@ -79,6 +81,7 @@ class TUIApp:
         self.frame_interval = 1.0 / self.target_fps
         self.running = False
         self.stop_event = stop_event
+        self.ascii_mode = ascii_mode
 
         # Interactive state & modal input
         self.input_mode: InputMode = InputMode.NORMAL
@@ -97,7 +100,7 @@ class TUIApp:
         self.tracks = tracks
 
         # Initialize renderer and viewport projector
-        self.renderer = TUIRenderer(stations=self.stations, tracks=self.tracks)
+        self.renderer = TUIRenderer(stations=self.stations, tracks=self.tracks, ascii_mode=self.ascii_mode)
 
         # Base viewport covers Greece corridor
         viewport = Viewport(
@@ -513,6 +516,7 @@ def run_tui(
     tracks: Optional[Sequence[TrackPolyline]] = None,
     target_fps: float = 20.0,
     stop_event: Optional[threading.Event] = None,
+    ascii_mode: bool = False,
 ) -> None:
     """Safely start the Curses TUI application with automatic terminal restoration.
 
@@ -523,6 +527,7 @@ def run_tui(
         tracks: Optional list of TrackPolyline objects.
         target_fps: Rendering target frames per second.
         stop_event: Optional external shutdown event triggered by OS signals.
+        ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
 
     Raises:
         curses.error: If standard output is not an interactive TTY or curses initialization fails.
@@ -539,6 +544,7 @@ def run_tui(
             tracks=tracks,
             target_fps=target_fps,
             stop_event=stop_event,
+            ascii_mode=ascii_mode,
         )
         app.run_loop()
 

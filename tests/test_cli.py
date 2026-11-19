@@ -20,8 +20,14 @@ class TestCLIArgumentParser(unittest.TestCase):
         self.assertEqual(args.mode, "stream")
         self.assertFalse(args.tui)
         self.assertFalse(args.demo)
+        self.assertFalse(args.ascii)
         self.assertEqual(args.fps, 20.0)
         self.assertEqual(args.reconnect_delay, 3.0)
+
+    def test_ascii_flag(self):
+        """TC-CLI-01B: --ascii flag parsed correctly."""
+        args = self.parser.parse_args(["--ascii"])
+        self.assertTrue(args.ascii)
 
     def test_tui_flag_live(self):
         """TC-CLI-02: --tui sets tui=True and mode=stream."""
@@ -358,6 +364,42 @@ class TestCLITTYAndHeadlessFallback(unittest.TestCase):
             retention_days=7,
             archive_path="my_arch.db",
         )
+
+
+class TestCLIASCIIFallbackRouting(unittest.TestCase):
+    """Test suite for --ascii CLI argument routing and run_tui_mode propagation."""
+
+    @patch("train_tracker.run_tui_mode")
+    def test_main_tui_forwards_ascii_flag(self, mock_tui):
+        """TC-ASCII-01: Verify main passes ascii_mode=True when --ascii is provided."""
+        ret = main(["--tui", "--ascii"])
+        self.assertEqual(ret, 0)
+        mock_tui.assert_called_once_with(
+            demo=False,
+            fps=20.0,
+            reconnect_delay=3.0,
+            ascii_mode=True,
+        )
+
+    @patch("train_tracker.run_tui_mode")
+    def test_main_tui_default_ascii_false(self, mock_tui):
+        """TC-ASCII-02: Verify main does not pass ascii_mode by default, allowing auto-detection."""
+        ret = main(["--tui"])
+        self.assertEqual(ret, 0)
+        mock_tui.assert_called_once_with(
+            demo=False,
+            fps=20.0,
+            reconnect_delay=3.0,
+        )
+
+    @patch("train_tracker.is_tty_supported", return_value=True)
+    @patch("tui.app.run_tui")
+    def test_run_tui_mode_forwards_ascii_mode(self, mock_run_tui, mock_tty):
+        """TC-ASCII-03: Verify run_tui_mode passes resolved ascii_mode to run_tui."""
+        run_tui_mode(demo=True, ascii_mode=True)
+        self.assertTrue(mock_run_tui.called)
+        _, kwargs = mock_run_tui.call_args
+        self.assertTrue(kwargs.get("ascii_mode"))
 
 
 if __name__ == "__main__":

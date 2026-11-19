@@ -637,6 +637,12 @@ Examples:
         help="Run in headless background daemon mode (alias for --headless).",
     )
     parser.add_argument(
+        "--ascii",
+        action="store_true",
+        default=False,
+        help="Force pure 7-bit ASCII rendering fallback (disable Unicode Braille and UTF-8 glyphs).",
+    )
+    parser.add_argument(
         "--demo",
         action="store_true",
         help="Run offline using synthetic telemetry simulator (no live network connection required).",
@@ -812,6 +818,7 @@ def run_tui_mode(
     enable_deadband: bool = True,
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
+    ascii_mode: Optional[bool] = None,
 ) -> None:
     """Launch the interactive curses terminal map application.
 
@@ -828,6 +835,7 @@ def run_tui_mode(
         enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
         retention_days: Optional telemetry retention window in days.
         archive_path: Optional target SQLite database for archived telemetry.
+        ascii_mode: Optional boolean to force 7-bit ASCII fallback or UTF-8 mode (auto-detected if None).
     """
     if not is_tty_supported():
         logger.warning(
@@ -851,6 +859,7 @@ def run_tui_mode(
     try:
         import curses
         from tui.app import run_tui
+        from tui.geo import is_utf8_supported
         from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
         from tui.state import TrainStateStore
         from tui.stream_worker import StreamWorker
@@ -921,7 +930,16 @@ def run_tui_mode(
     # 4. Start background ingestion thread
     worker.start()
 
-    # 5. Execute curses event loop with terminal protection and fallback
+    # 5. Resolve ASCII fallback mode
+    if ascii_mode is None:
+        use_ascii = not is_utf8_supported(sys.stdout)
+    else:
+        use_ascii = bool(ascii_mode)
+
+    if use_ascii:
+        logger.info("Non-UTF-8 environment or --ascii specified; enabling 7-bit ASCII fallback matrix.")
+
+    # 6. Execute curses event loop with terminal protection and fallback
     fallback_needed = False
     curses_error_cls = getattr(curses, "error", Exception)
     with install_signal_handlers() as stop_event:
@@ -933,6 +951,7 @@ def run_tui_mode(
                 tracks=tracks,
                 target_fps=fps,
                 stop_event=stop_event,
+                ascii_mode=use_ascii,
             )
         except curses_error_cls as exc:
             logger.warning(
@@ -1462,12 +1481,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                     tui_kwargs["retention_days"] = args.retention_days
                 if getattr(args, "archive_db", None) is not None:
                     tui_kwargs["archive_path"] = args.archive_db
+                if getattr(args, "ascii", False):
+                    tui_kwargs["ascii_mode"] = True
                 run_tui_mode(**tui_kwargs)
             else:
+                extra_tui_kwargs: Dict[str, Any] = {}
+                if getattr(args, "ascii", False):
+                    extra_tui_kwargs["ascii_mode"] = True
                 run_tui_mode(
                     demo=args.demo,
                     fps=args.fps,
                     reconnect_delay=args.reconnect_delay,
+                    **extra_tui_kwargs,
                 )
         else:
             is_rec = getattr(args, "record", False)

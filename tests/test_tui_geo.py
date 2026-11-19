@@ -1,18 +1,22 @@
 """Unit tests for the TUI geospatial projection and Braille canvas engine."""
 
+import os
 import unittest
+from unittest.mock import patch
 from tui.geo import (
+    ASCII_BRAILLE_TABLE,
     BRAILLE_BASE,
     DOT_MASKS,
-    GeoPoint,
     BoundingBox,
-    Viewport,
-    GeoProjector,
     BrailleCanvas,
+    GeoPoint,
+    GeoProjector,
     GREECE_PRESET,
-    PROASTIAKOS_PRESET,
-    PATHE_PRESET,
     NORTHERN_GREECE_PRESET,
+    PATHE_PRESET,
+    PROASTIAKOS_PRESET,
+    Viewport,
+    is_utf8_supported,
 )
 
 
@@ -250,6 +254,75 @@ class TestGeoProjector(unittest.TestCase):
         self.assertAlmostEqual(self.viewport.center.lng, PROASTIAKOS_PRESET.center.lng, delta=0.01)
         # Because Proastiakos span is smaller than Greece span, zoom must be > 1.0
         self.assertGreater(self.viewport.zoom, 1.0)
+
+
+class TestBrailleCanvasASCIIFallback(unittest.TestCase):
+    """Test suite for BrailleCanvas 7-bit ASCII fallback and encoding detection."""
+
+    def test_ascii_braille_table_properties(self):
+        """Verify ASCII_BRAILLE_TABLE contains 256 pure 7-bit ASCII entries."""
+        self.assertEqual(len(ASCII_BRAILLE_TABLE), 256)
+        for i, char in enumerate(ASCII_BRAILLE_TABLE):
+            self.assertEqual(len(char), 1)
+            self.assertLess(ord(char), 128, f"Non-ASCII character '{char}' at index {i}")
+
+        # Blank mask must be space
+        self.assertEqual(ASCII_BRAILLE_TABLE[0], " ")
+        # Single dot masks must be '.'
+        self.assertEqual(ASCII_BRAILLE_TABLE[0x01], ".")
+        self.assertEqual(ASCII_BRAILLE_TABLE[0x08], ".")
+
+    def test_canvas_ascii_mode_rasterization(self):
+        """Verify BrailleCanvas rasterizes to pure ASCII when ascii_mode=True."""
+        canvas = BrailleCanvas(width_cells=5, height_cells=3, ascii_mode=True)
+        # Draw a horizontal line across the middle
+        canvas.draw_line(0, 5, 9, 5)
+
+        rows = canvas.render_rows()
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            self.assertEqual(len(row), 5)
+            for ch in row:
+                self.assertLess(ord(ch), 128)
+
+        # Middle row should contain track characters ('-' or '+')
+        self.assertTrue(any(ch in "-+" for ch in rows[1]))
+
+    def test_canvas_render_rows_override(self):
+        """Verify ascii_mode parameter override in render_rows."""
+        canvas = BrailleCanvas(width_cells=2, height_cells=2, ascii_mode=False)
+        canvas.set_pixel(0, 0)
+
+        # Normal Braille
+        braille_rows = canvas.render_rows(ascii_mode=False)
+        self.assertEqual(braille_rows[0][0], "⠁")
+
+        # Overridden to ASCII
+        ascii_rows = canvas.render_rows(ascii_mode=True)
+        self.assertEqual(ascii_rows[0][0], ".")
+
+    def test_is_utf8_supported_detection(self):
+        """Verify is_utf8_supported correctly detects stream encoding and overrides."""
+        class MockStream:
+            def __init__(self, encoding):
+                self.encoding = encoding
+
+        # UTF-8 streams
+        self.assertTrue(is_utf8_supported(MockStream("utf-8")))
+        self.assertTrue(is_utf8_supported(MockStream("UTF8")))
+
+        # Non-UTF-8 streams
+        self.assertFalse(is_utf8_supported(MockStream("us-ascii")))
+        self.assertFalse(is_utf8_supported(MockStream("ascii")))
+        self.assertFalse(is_utf8_supported(MockStream("iso-8859-1")))
+        self.assertFalse(is_utf8_supported(MockStream("cp1252")))
+
+        # Environment variable overrides
+        with patch.dict(os.environ, {"RAILMON_ASCII": "1"}):
+            self.assertFalse(is_utf8_supported(MockStream("utf-8")))
+
+        with patch.dict(os.environ, {"TERM": "ascii"}):
+            self.assertFalse(is_utf8_supported(MockStream("utf-8")))
 
 
 if __name__ == "__main__":
