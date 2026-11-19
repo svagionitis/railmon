@@ -61,7 +61,7 @@ class TUIApp:
         worker: StreamWorker,
         stations: Optional[Sequence[StationNode]] = None,
         tracks: Optional[Sequence[TrackPolyline]] = None,
-        target_fps: float = 20.0,
+        target_fps: float = 15.0,
         stop_event: Optional[threading.Event] = None,
         ascii_mode: bool = False,
     ):
@@ -73,14 +73,14 @@ class TUIApp:
             worker: Running StreamWorker ingestion thread.
             stations: List or sequence of StationNode entities.
             tracks: List or sequence of TrackPolyline entities.
-            target_fps: Target frames per second (default: 20.0).
+            target_fps: Target frames per second (default: 15.0).
             stop_event: Optional external shutdown event triggered by OS signals.
             ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
         """
         self.stdscr = stdscr
         self.store = store
         self.worker = worker
-        self.target_fps = max(5.0, min(60.0, target_fps))
+        self.target_fps = max(1.0, min(15.0, float(target_fps)))
         self.frame_interval = 1.0 / self.target_fps
         self.running = False
         self.stop_event = stop_event
@@ -92,6 +92,16 @@ class TUIApp:
         self._pre_search_query: str = ""
         self.show_help: bool = False
         self.paused: bool = False
+
+        # Render cycle optimization & dirty-checking state
+        self._force_redraw: bool = True
+        self._last_rendered_version: Optional[int] = None
+        self._last_viewport_state: Optional[Tuple[float, float, float, int, int]] = None
+        self._last_clock_sec: Optional[int] = None
+        self._last_rendered_msg_rate: Optional[float] = None
+        self._last_modal_state: Optional[Tuple[InputMode, str, bool, bool]] = None
+        self._render_count: int = 0
+        self._skip_count: int = 0
 
         # Load geospatial network data if not injected
         if stations is None:
@@ -167,6 +177,16 @@ class TUIApp:
             self.windows.clear()
             self.windows["root"] = self.stdscr
 
+    @property
+    def render_count(self) -> int:
+        """Total number of rendered frames executed."""
+        return self._render_count
+
+    @property
+    def skip_count(self) -> int:
+        """Total number of unchanged idle frames skipped."""
+        return self._skip_count
+
     def handle_resize(self) -> None:
         """Respond to terminal resize signal by rebuilding geometry and repainting."""
         try:
@@ -177,6 +197,7 @@ class TUIApp:
 
         self.rebuild_windows()
         self.stdscr.clear()
+        self._force_redraw = True
 
     def _update_message_rate(self, total_messages: int) -> None:
         """Compute messages per second ingestion frequency."""
@@ -435,6 +456,7 @@ class TUIApp:
         try:
             while self.running and (self.stop_event is None or not self.stop_event.is_set()):
                 frame_start = time.monotonic()
+                is_dirty = self._force_redraw
 
                 # 1. Sample user keyboard input (non-blocking)
                 try:
@@ -443,14 +465,17 @@ class TUIApp:
                     key = -1
 
                 if key != -1:
+                    is_dirty = True
                     if not self.process_input(key):
                         self.running = False
                         break
 
                 # 1b. Periodic stale train cleanup (defense-in-depth against stream stall)
                 if (frame_start - self._last_prune_time) >= self._prune_interval_sec:
-                    self.store.prune_stale_trains()
+                    pruned = self.store.prune_stale_trains()
                     self._last_prune_time = frame_start
+                    if pruned > 0:
+                        is_dirty = True
 
                 # 2. Extract atomic snapshot without lock contention
                 snapshot = self.store.get_snapshot()
@@ -461,44 +486,80 @@ class TUIApp:
                     pos = snapshot.selected_train.position
                     self.projector.viewport.center = GeoPoint(lat=pos.lat, lng=pos.lng)
 
-                # 4. Render all dashboard panes
-                self.renderer.render_all(
-                    windows=self.windows,
-                    geometry=self.geometry,
-                    snapshot=snapshot,
-                    projector=self.projector,
-                    msg_rate=self._current_msg_rate,
-                    search_mode=(self.input_mode == InputMode.SEARCH),
-                    search_buffer=self.search_buffer,
-                    show_help=self.show_help,
-                    paused=self.paused,
+                # 4. Extract current signatures for dirty check
+                current_sec = int(time.time())
+                vp = self.projector.viewport
+                current_vp = (
+                    round(vp.center.lat, 6),
+                    round(vp.center.lng, 6),
+                    round(vp.zoom, 4),
+                    vp.width_cells,
+                    vp.height_cells,
+                )
+                current_modal = (
+                    self.input_mode,
+                    self.search_buffer,
+                    self.show_help,
+                    self.paused,
                 )
 
-                # 5. Flush frame using double buffering (noutrefresh + doupdate)
-                if self.geometry.is_valid:
-                    for win in self.windows.values():
-                        if win is not self.stdscr:
+                if (
+                    is_dirty
+                    or snapshot.version != self._last_rendered_version
+                    or current_vp != self._last_viewport_state
+                    or current_sec != self._last_clock_sec
+                    or self._current_msg_rate != self._last_rendered_msg_rate
+                    or current_modal != self._last_modal_state
+                ):
+                    # 4a. Render all dashboard panes
+                    self.renderer.render_all(
+                        windows=self.windows,
+                        geometry=self.geometry,
+                        snapshot=snapshot,
+                        projector=self.projector,
+                        msg_rate=self._current_msg_rate,
+                        search_mode=(self.input_mode == InputMode.SEARCH),
+                        search_buffer=self.search_buffer,
+                        show_help=self.show_help,
+                        paused=self.paused,
+                    )
+
+                    # 4b. Flush frame using double buffering (noutrefresh + doupdate)
+                    if self.geometry.is_valid:
+                        for win in self.windows.values():
+                            if win is not self.stdscr:
+                                try:
+                                    win.noutrefresh()
+                                except curses.error:
+                                    pass
+                        if self.show_help:
                             try:
-                                win.noutrefresh()
+                                self.stdscr.noutrefresh()
                             except curses.error:
                                 pass
-                    if self.show_help:
+                    else:
                         try:
                             self.stdscr.noutrefresh()
                         except curses.error:
                             pass
-                else:
+
                     try:
-                        self.stdscr.noutrefresh()
+                        curses.doupdate()
                     except curses.error:
                         pass
 
-                try:
-                    curses.doupdate()
-                except curses.error:
-                    pass
+                    # 4c. Update cache signatures
+                    self._force_redraw = False
+                    self._last_rendered_version = snapshot.version
+                    self._last_viewport_state = current_vp
+                    self._last_clock_sec = current_sec
+                    self._last_rendered_msg_rate = self._current_msg_rate
+                    self._last_modal_state = current_modal
+                    self._render_count += 1
+                else:
+                    self._skip_count += 1
 
-                # 6. Precise frame-rate sleep
+                # 5. Precise frame-rate sleep
                 elapsed = time.monotonic() - frame_start
                 sleep_sec = max(0.001, self.frame_interval - elapsed)
                 time.sleep(sleep_sec)
@@ -526,7 +587,7 @@ def run_tui(
     worker: StreamWorker,
     stations: Optional[Sequence[StationNode]] = None,
     tracks: Optional[Sequence[TrackPolyline]] = None,
-    target_fps: float = 20.0,
+    target_fps: float = 15.0,
     stop_event: Optional[threading.Event] = None,
     ascii_mode: bool = False,
 ) -> None:

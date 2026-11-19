@@ -81,6 +81,12 @@ class MockCursesWindow:
         self.erased = True
         self.calls.append(("erase",))
 
+    def clear(self):
+        self.calls.append(("clear",))
+
+    def refresh(self):
+        self.calls.append(("refresh",))
+
     def box(self):
         self.boxed = True
         self.calls.append(("box",))
@@ -114,7 +120,7 @@ class TestTUIControls(unittest.TestCase):
             worker=self.worker,
             stations=[],
             tracks=[],
-            target_fps=20.0,
+            target_fps=15.0,
         )
         # Allocate geometry and windows
         self.app.rebuild_windows()
@@ -538,6 +544,132 @@ class TestTUIControls(unittest.TestCase):
 
         self.assertNotIn("t-stale", self.store.get_snapshot().trains)
         self.assertEqual(self.store._total_trains_pruned, 1)
+
+    def test_target_fps_clamping(self):
+        """TC-P2-2-01: target_fps is clamped to [1.0, 15.0] range."""
+        app_default = TUIApp(stdscr=self.stdscr, store=self.store, worker=self.worker)
+        self.assertEqual(app_default.target_fps, 15.0)
+
+        app_over = TUIApp(stdscr=self.stdscr, store=self.store, worker=self.worker, target_fps=60.0)
+        self.assertEqual(app_over.target_fps, 15.0)
+
+        app_20 = TUIApp(stdscr=self.stdscr, store=self.store, worker=self.worker, target_fps=20.0)
+        self.assertEqual(app_20.target_fps, 15.0)
+
+        app_mid = TUIApp(stdscr=self.stdscr, store=self.store, worker=self.worker, target_fps=10.0)
+        self.assertEqual(app_mid.target_fps, 10.0)
+
+        app_under = TUIApp(stdscr=self.stdscr, store=self.store, worker=self.worker, target_fps=0.1)
+        self.assertEqual(app_under.target_fps, 1.0)
+
+    @patch("time.time", return_value=1700000000.0)
+    @patch("curses.doupdate")
+    def test_run_loop_skips_unchanged_idle_frames(self, mock_doupdate, mock_time):
+        """TC-P2-2-02: run_loop renders once on initial frame and skips unchanged idle frames."""
+        call_count = 0
+        def fake_getch():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 4:
+                return ord('q')
+            return -1
+
+        self.app.stdscr.getch = fake_getch
+        self.app.setup_terminal = MagicMock()
+        self.app.renderer.render_all = MagicMock()
+
+        self.app.run_loop()
+
+        # 4 iterations: iteration 1 renders, iterations 2 & 3 skip, iteration 4 processes 'q' and exits
+        self.assertEqual(self.app.render_count, 1)
+        self.assertEqual(self.app.skip_count, 2)
+        self.assertEqual(self.app.renderer.render_all.call_count, 1)
+        self.assertEqual(mock_doupdate.call_count, 1)
+
+    @patch("time.time", return_value=1700000000.0)
+    @patch("curses.doupdate")
+    def test_run_loop_renders_when_telemetry_updates_version(self, mock_doupdate, mock_time):
+        """TC-P2-2-03: run_loop triggers render when snapshot.version changes."""
+        call_count = 0
+        def fake_getch():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                # Telemetry update arrives from StreamWorker
+                new_pos = create_test_position("t-new", "999", lat=39.0, lng=22.0)
+                self.store.update_positions([new_pos])
+            elif call_count >= 4:
+                return ord('q')
+            return -1
+
+        self.app.stdscr.getch = fake_getch
+        self.app.setup_terminal = MagicMock()
+        self.app.renderer.render_all = MagicMock()
+
+        self.app.run_loop()
+
+        # Iteration 1 (initial) and iteration 2 (new telemetry version) render; iteration 3 skips
+        self.assertEqual(self.app.render_count, 2)
+        self.assertEqual(self.app.skip_count, 1)
+        self.assertEqual(self.app.renderer.render_all.call_count, 2)
+
+    @patch("curses.doupdate")
+    def test_run_loop_renders_when_clock_second_advances(self, mock_doupdate):
+        """TC-P2-2-04: run_loop triggers render when the 1 Hz header clock second rolls over."""
+        simulated_time = 1700000000.0
+        def fake_time():
+            return simulated_time
+
+        call_count = 0
+        def fake_getch():
+            nonlocal call_count, simulated_time
+            call_count += 1
+            if call_count == 2:
+                # Advance time by 1.1s so current_sec increments
+                simulated_time += 1.1
+            elif call_count >= 4:
+                return ord('q')
+            return -1
+
+        self.app.stdscr.getch = fake_getch
+        self.app.setup_terminal = MagicMock()
+        self.app.renderer.render_all = MagicMock()
+
+        with patch("time.time", side_effect=fake_time):
+            self.app.run_loop()
+
+        # Iteration 1 (initial) renders, iteration 2 (clock tick) renders, iteration 3 skips
+        self.assertEqual(self.app.render_count, 2)
+        self.assertEqual(self.app.skip_count, 1)
+        self.assertEqual(self.app.renderer.render_all.call_count, 2)
+
+    @patch("time.time", return_value=1700000000.0)
+    @patch("curses.doupdate")
+    def test_run_loop_renders_on_input_or_resize(self, mock_doupdate, mock_time):
+        """TC-P2-2-05: run_loop renders on user keyboard input and handle_resize sets _force_redraw."""
+        self.app.handle_resize()
+        self.assertTrue(self.app._force_redraw)
+
+        call_count = 0
+        def fake_getch():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                return ord('l')  # Pan camera right
+            elif call_count >= 4:
+                return ord('q')
+            return -1
+
+        self.app.stdscr.getch = fake_getch
+        self.app.setup_terminal = MagicMock()
+        self.app.renderer.render_all = MagicMock()
+
+        self.app.run_loop()
+
+        # Iteration 1 (initial force_redraw) renders, iteration 2 (key 'l') renders, iteration 3 skips
+        self.assertEqual(self.app.render_count, 2)
+        self.assertEqual(self.app.skip_count, 1)
+        self.assertEqual(self.app.renderer.render_all.call_count, 2)
 
 
 if __name__ == "__main__":

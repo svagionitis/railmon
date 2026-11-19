@@ -511,7 +511,7 @@ class TestTUIAppLifecycle(unittest.TestCase):
             worker=self.worker,
             stations=[],
             tracks=[],
-            target_fps=20.0,
+            target_fps=15.0,
         )
 
     def test_app_rebuild_windows(self):

@@ -21,7 +21,7 @@ class TestCLIArgumentParser(unittest.TestCase):
         self.assertFalse(args.tui)
         self.assertFalse(args.demo)
         self.assertFalse(args.ascii)
-        self.assertEqual(args.fps, 20.0)
+        self.assertEqual(args.fps, 15.0)
         self.assertEqual(args.reconnect_delay, 3.0)
 
     def test_ascii_flag(self):
@@ -119,7 +119,7 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
         ret = main(["--tui", "--demo"])
         self.assertEqual(ret, 0)
         mock_run_tui.assert_called_once_with(
-            demo=True, fps=20.0, reconnect_delay=3.0
+            demo=True, fps=15.0, reconnect_delay=3.0
         )
 
     @patch("train_tracker.run_plain_stream_mode")
@@ -387,7 +387,7 @@ class TestCLIASCIIFallbackRouting(unittest.TestCase):
         self.assertEqual(ret, 0)
         mock_tui.assert_called_once_with(
             demo=False,
-            fps=20.0,
+            fps=15.0,
             reconnect_delay=3.0,
             ascii_mode=True,
         )
@@ -399,7 +399,7 @@ class TestCLIASCIIFallbackRouting(unittest.TestCase):
         self.assertEqual(ret, 0)
         mock_tui.assert_called_once_with(
             demo=False,
-            fps=20.0,
+            fps=15.0,
             reconnect_delay=3.0,
         )
 

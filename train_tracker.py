@@ -809,8 +809,8 @@ Examples:
     parser.add_argument(
         "--fps",
         type=float,
-        default=20.0,
-        help="Target frame rate for TUI rendering loop (default: 20.0, range: 5.0-60.0).",
+        default=15.0,
+        help="Target frame rate for TUI rendering loop (default: 15.0, range: 1.0-15.0).",
     )
     parser.add_argument(
         "--reconnect-delay",
@@ -988,7 +988,7 @@ def is_tty_supported() -> bool:
 
 def run_tui_mode(
     demo: bool = False,
-    fps: float = 20.0,
+    fps: float = 15.0,
     reconnect_delay: float = 3.0,
     record: bool = False,
     db_path: str = "railway_history.db",

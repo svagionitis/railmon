@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 5 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 4 P2 compliance gaps)
 
 ---
 
@@ -400,11 +400,12 @@ sequenceDiagram
   2. `DeadbandFilter._states` never evicted stale train keys over multi-month daemon uptime.
 - **Fix:** Standardized default stale timeout to $1800.0\text{s}$ ($30\text{ minutes}$) across `TrainStateStore` and `TrainRecord.is_stale`. Wired periodic $60\text{s}$ stale-train pruning into `StreamWorker._run_loop()` and defense-in-depth verification into `TUIApp.run_loop()`. Added bounded TTL cache eviction (`stale_timeout_sec=1800.0`, `stale_prune_interval_sec=300.0`) and mutex locking in `DeadbandFilter`, auto-pruning expired entries on ingestion and periodically via `TelemetryRecorder._worker_loop()`. Verified with 9 dedicated automated test cases across state, filter, worker, and recorder suites.
 
-### P2-2: TUI Frame Rate Default Exceeds Cap & Redraws Unchanged Frames
-- **Location:** [`build_parser`](../train_tracker.py#L220-L225), [`TUIApp.__init__`](../tui/app.py#L59,L74), [`TUIApp.run_loop`](../tui/app.py#L419-L483)
+### P2-2: TUI Frame Rate Default Exceeds Cap & Redraws Unchanged Frames [RESOLVED]
+- **Location:** [`build_parser`](../train_tracker.py#L810-L814), [`TUIApp.__init__`](../tui/app.py#L64,L83), [`TUIApp.run_loop`](../tui/app.py#L429-L505) | **Plan:** [`./p2-2-tui-frame-rate-cap-idle-redraw-fix-plan.md`](./p2-2-tui-frame-rate-cap-idle-redraw-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/performance-and-resource-bounds.md`](../.agents/rules/performance-and-resource-bounds.md#L18-L23):
   1. Default FPS is `20.0` (clamped up to `60.0`) instead of the mandated 10–15 FPS cap.
   2. `TUIApp.run_loop()` rasterizes the full Braille canvas and redraws all subwindows every frame even when `snapshot.version` and viewport state are unchanged.
+- **Fix:** Standardized default frame rate to 15.0 FPS across CLI parser and application constructors, enforcing clamping to `[1.0, 15.0]` FPS in `TUIApp.__init__`. Implemented a composite dirty-state tracking engine in `TUIApp.run_loop` that evaluates snapshot version, camera viewport coordinates/zoom, 1 Hz header clock second rollover, telemetry ingestion rate, and modal flags. When the display state is static, curses rasterization (Braille canvas creation, coordinate projections) and `doupdate()` calls are completely bypassed, incrementing `skip_count` and reducing idle CPU load to negligible levels ($<1\%$ CPU core). Verified with 23 passing TUI control tests including `target_fps` clamping and idle frame skipping tests.
 
 ### P2-3: Python 3.12+ `datetime.utcnow()` Deprecation Warnings
 - **Location:** [`TelemetryHistoryRow.from_train_position`](../storage/models.py#L157), [`TelemetryRecorder`](../storage/recorder.py#L84,L129,L253)

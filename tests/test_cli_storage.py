@@ -232,7 +232,7 @@ class TestCLIRouting(unittest.TestCase):
         self.assertEqual(ret, 0)
         mock_tui.assert_called_once_with(
             demo=False,
-            fps=20.0,
+            fps=15.0,
             reconnect_delay=3.0,
             record=True,
             db_path="tui_hist.db",
