@@ -5,6 +5,7 @@ real-time auto-follow camera tracking, modal search filter editing, and help dia
 """
 
 import curses
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -511,6 +512,32 @@ class TestTUIControls(unittest.TestCase):
         self.assertIn("NAVIGATION & VIEWPORT", combined)
         self.assertIn("TRAIN SELECTION & TRACKING", combined)
         self.assertIn("Press ? or any key to close", combined)
+
+    def test_app_periodic_prune_in_run_loop(self):
+        """TC-P2-06: TUIApp.run_loop periodically invokes store.prune_stale_trains."""
+        pos = create_test_position("t-stale")
+        self.store.update_positions([pos])
+        self.store._trains["t-stale"].last_updated = time.time() - 2000.0
+
+        self.app._prune_interval_sec = 0.001
+        self.app._last_prune_time = time.monotonic() - 1.0
+
+        call_count = 0
+        def fake_getch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                return ord('q')
+            return -1
+
+        self.app.stdscr.getch = fake_getch
+        self.app.setup_terminal = MagicMock()
+        self.app.renderer.render_all = MagicMock()
+
+        self.app.run_loop()
+
+        self.assertNotIn("t-stale", self.store.get_snapshot().trains)
+        self.assertEqual(self.store._total_trains_pruned, 1)
 
 
 if __name__ == "__main__":

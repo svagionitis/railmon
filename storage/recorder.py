@@ -74,6 +74,7 @@ class TelemetryRecorder:
         self._total_records_archived: int = 0
         self._last_flush_time: float = 0.0
         self._last_archive_time: float = 0.0
+        self._last_filter_prune_time: float = 0.0
         self._disk_full_tripped: bool = False
 
         self._lock = threading.Lock()
@@ -178,6 +179,7 @@ class TelemetryRecorder:
             self._total_records_archived = 0
             self._last_flush_time = time.time()
             self._last_archive_time = time.time()
+            self._last_filter_prune_time = time.time()
 
             if not self._has_sufficient_disk_space():
                 return
@@ -324,6 +326,17 @@ class TelemetryRecorder:
                 and (now - self._last_archive_time) >= self.config.retention_archive_interval_sec
             ):
                 self._run_retention_archive()
+
+            if self.filter is not None:
+                prune_interval = self.filter.config.stale_prune_interval_sec
+                if (now - self._last_filter_prune_time) >= prune_interval:
+                    evicted = self.filter.prune_stale_states()
+                    if evicted > 0:
+                        logger.debug(
+                            "TelemetryRecorder evicted %d stale train states from DeadbandFilter.",
+                            evicted,
+                        )
+                    self._last_filter_prune_time = now
 
         # Draining phase on shutdown (skip if disk-full circuit breaker tripped)
         if not self._disk_full_tripped:

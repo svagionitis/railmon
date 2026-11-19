@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 1 P1 deficiency, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 5 P2 compliance gaps)
 
 ---
 
@@ -16,7 +16,7 @@
 +-----------------------------------+--------+----------------------------------------------+
 | Geospatial Math & Braille Canvas  | 10/10  | P1-7 resolved; full ASCII fallback table     |
 | Test Suite & Empirical Benchmarks |  8/10  | 237 tests pass; 31.6k rows/s @ batch=100     |
-| Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
+| Threading & State Store           | 10/10  | P2-1 resolved; prune_stale wired & deadband TTL|
 | SQLite Connection & Transactions  | 10/10  | P0-5 & P1-2 fixed; user_version & integrity  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
 | Resilience & Stream Handling      | 10/10  | P0-2, P1-5 & P1-6 fixed; TTY fallback sound  |
@@ -24,7 +24,7 @@
 | Security & Data Protection        |  9/10  | P1-1 & P1-3 fixed; 0600 umask & path safe    |
 | Observability & Logging           | 10/10  | P1-8 resolved; railmon hierarchy & rotation  |
 | Storage Retention & Disk Bounds   |  9/10  | P0-6 fixed; archival & disk_usage check      |
-| Packaging & Versioning            |  3/10  | Missing pyproject.toml and __version__       |
+| Packaging & Versioning            | 10/10  | P1-9 resolved; pyproject.toml & __version__  |
 +-----------------------------------+--------+----------------------------------------------+
 ```
 
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `319 passed in 41.8s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `334 passed in 33.7s` | 100% pass | PASS |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -393,11 +393,12 @@ sequenceDiagram
 
 ## 5. Performance, Memory & Code Hygiene Gaps (P2)
 
-### P2-1: Dead Stale-Train Pruning & Unbounded Deadband State Cache
-- **Location:** [`TrainStateStore.prune_stale_trains`](../tui/state.py#L261-L281), [`DeadbandFilter._states`](../storage/filter.py#L48)
+### P2-1: Dead Stale-Train Pruning & Unbounded Deadband State Cache [RESOLVED]
+- **Location:** [`TrainStateStore.prune_stale_trains`](../tui/state.py#L261-L281), [`DeadbandFilter._states`](../storage/filter.py#L48) | **Plan:** [`./p2-1-dead-stale-train-pruning-deadband-cache-fix-plan.md`](./p2-1-dead-stale-train-pruning-deadband-cache-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/performance-and-resource-bounds.md`](../.agents/rules/performance-and-resource-bounds.md#L25-L29).
-  1. `TrainStateStore.prune_stale_trains()` is never invoked by `StreamWorker` or `TUIApp`, and its default `stale_timeout_sec=120.0` does not match the 30-minute (`1800.0s`) rule specification.
-  2. `DeadbandFilter._states` never evicts stale train keys over multi-month daemon uptime.
+  1. `TrainStateStore.prune_stale_trains()` was never invoked by `StreamWorker` or `TUIApp`, and its default `stale_timeout_sec=120.0` did not match the 30-minute (`1800.0s`) rule specification.
+  2. `DeadbandFilter._states` never evicted stale train keys over multi-month daemon uptime.
+- **Fix:** Standardized default stale timeout to $1800.0\text{s}$ ($30\text{ minutes}$) across `TrainStateStore` and `TrainRecord.is_stale`. Wired periodic $60\text{s}$ stale-train pruning into `StreamWorker._run_loop()` and defense-in-depth verification into `TUIApp.run_loop()`. Added bounded TTL cache eviction (`stale_timeout_sec=1800.0`, `stale_prune_interval_sec=300.0`) and mutex locking in `DeadbandFilter`, auto-pruning expired entries on ingestion and periodically via `TelemetryRecorder._worker_loop()`. Verified with 9 dedicated automated test cases across state, filter, worker, and recorder suites.
 
 ### P2-2: TUI Frame Rate Default Exceeds Cap & Redraws Unchanged Frames
 - **Location:** [`build_parser`](../train_tracker.py#L220-L225), [`TUIApp.__init__`](../tui/app.py#L59,L74), [`TUIApp.run_loop`](../tui/app.py#L419-L483)

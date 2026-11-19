@@ -4,6 +4,7 @@ Deadband filtering and coordinate compression for high-frequency telemetry.
 
 from dataclasses import dataclass
 import math
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -21,6 +22,8 @@ class DeadbandConfig:
     track_status_change: bool = True          # Force admit if status changed
     track_station_change: bool = True         # Force admit if next_station changed
     track_schedule_change: bool = True        # Force admit if schedule_id changed
+    stale_timeout_sec: float = 1800.0         # Max inactivity before vehicle state is evicted (30m)
+    stale_prune_interval_sec: float = 300.0   # Cadence for periodic stale state cleanup (5m)
 
 
 @dataclass
@@ -45,10 +48,35 @@ class DeadbandFilter:
 
     def __init__(self, config: Optional[DeadbandConfig] = None):
         self.config = config or DeadbandConfig()
+        self._lock = threading.Lock()
         self._states: Dict[str, _LastRecordedState] = {}
         self._total_inspected: int = 0
         self._total_admitted: int = 0
         self._total_suppressed: int = 0
+        self._total_evicted: int = 0
+        self._last_prune_ts: float = 0.0
+
+    def prune_stale_states(
+        self,
+        max_age_sec: Optional[float] = None,
+        now_epoch: Optional[float] = None,
+    ) -> int:
+        """
+        Evict cached train states that have not received telemetry updates within max_age_sec.
+        Returns count of evicted vehicle states.
+        """
+        cutoff = max_age_sec if max_age_sec is not None else self.config.stale_timeout_sec
+        current_time = now_epoch if now_epoch is not None else time.time()
+        with self._lock:
+            stale_keys = [
+                tid for tid, state in self._states.items()
+                if (current_time - state.timestamp) > cutoff
+            ]
+            for tid in stale_keys:
+                del self._states[tid]
+            self._total_evicted += len(stale_keys)
+            self._last_prune_ts = current_time
+            return len(stale_keys)
 
     @staticmethod
     def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -77,55 +105,67 @@ class DeadbandFilter:
             Reason is one of: 'initial', 'distance', 'delay', 'status', 'station',
                               'schedule', 'speed', 'heartbeat', or None if suppressed.
         """
-        self._total_inspected += 1
         current_time = now_epoch if now_epoch is not None else time.time()
         train_id = pos.train_number
 
-        last = self._states.get(train_id)
-        if last is None:
-            self._admit(train_id, pos, current_time)
-            return True, "initial"
+        with self._lock:
+            # Automatic periodic eviction of stale train states
+            if (current_time - self._last_prune_ts) >= self.config.stale_prune_interval_sec:
+                stale_keys = [
+                    tid for tid, state in self._states.items()
+                    if (current_time - state.timestamp) > self.config.stale_timeout_sec
+                ]
+                for tid in stale_keys:
+                    del self._states[tid]
+                self._total_evicted += len(stale_keys)
+                self._last_prune_ts = current_time
 
-        # 1. Status transition check (e.g. Κανονική -> Στάση)
-        if self.config.track_status_change and pos.status != last.status:
-            self._admit(train_id, pos, current_time)
-            return True, "status"
+            self._total_inspected += 1
+            last = self._states.get(train_id)
+            if last is None:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "initial"
 
-        # 2. Next station change check
-        if self.config.track_station_change and pos.next_station != last.next_station:
-            self._admit(train_id, pos, current_time)
-            return True, "station"
+            # 1. Status transition check (e.g. Κανονική -> Στάση)
+            if self.config.track_status_change and pos.status != last.status:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "status"
 
-        # 3. Schedule change check
-        if self.config.track_schedule_change and pos.schedule_id != last.schedule_id:
-            self._admit(train_id, pos, current_time)
-            return True, "schedule"
+            # 2. Next station change check
+            if self.config.track_station_change and pos.next_station != last.next_station:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "station"
 
-        # 4. Delay change check
-        if abs(pos.delay - last.delay) >= self.config.min_delay_delta_min:
-            self._admit(train_id, pos, current_time)
-            return True, "delay"
+            # 3. Schedule change check
+            if self.config.track_schedule_change and pos.schedule_id != last.schedule_id:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "schedule"
 
-        # 5. Distance displacement check
-        dist_m = self.haversine_distance(last.lat, last.lng, pos.lat, pos.lng)
-        if dist_m >= self.config.min_distance_m:
-            self._admit(train_id, pos, current_time)
-            return True, "distance"
+            # 4. Delay change check
+            if abs(pos.delay - last.delay) >= self.config.min_delay_delta_min:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "delay"
 
-        # 6. Speed change check
-        if abs(pos.speed - last.speed) >= self.config.min_speed_delta_kmh:
-            self._admit(train_id, pos, current_time)
-            return True, "speed"
+            # 5. Distance displacement check
+            dist_m = self.haversine_distance(last.lat, last.lng, pos.lat, pos.lng)
+            if dist_m >= self.config.min_distance_m:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "distance"
 
-        # 7. Heartbeat interval check
-        elapsed = current_time - last.timestamp
-        if elapsed >= self.config.max_heartbeat_interval_sec:
-            self._admit(train_id, pos, current_time)
-            return True, "heartbeat"
+            # 6. Speed change check
+            if abs(pos.speed - last.speed) >= self.config.min_speed_delta_kmh:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "speed"
 
-        # Suppressed redundant record
-        self._total_suppressed += 1
-        return False, None
+            # 7. Heartbeat interval check
+            elapsed = current_time - last.timestamp
+            if elapsed >= self.config.max_heartbeat_interval_sec:
+                self._admit_locked(train_id, pos, current_time)
+                return True, "heartbeat"
+
+            # Suppressed redundant record
+            self._total_suppressed += 1
+            return False, None
 
     def filter_batch(
         self, positions: List[TrainPosition], now_epoch: Optional[float] = None
@@ -135,6 +175,11 @@ class DeadbandFilter:
 
     def _admit(self, train_id: str, pos: TrainPosition, current_time: float) -> None:
         """Update internal cache with newly admitted telemetry state."""
+        with self._lock:
+            self._admit_locked(train_id, pos, current_time)
+
+    def _admit_locked(self, train_id: str, pos: TrainPosition, current_time: float) -> None:
+        """Internal helper to mutate state cache under active lock."""
         self._states[train_id] = _LastRecordedState(
             timestamp=current_time,
             lat=pos.lat,
@@ -149,23 +194,28 @@ class DeadbandFilter:
 
     def reset(self) -> None:
         """Clear all cached vehicle states and reset metric counters."""
-        self._states.clear()
-        self._total_inspected = 0
-        self._total_admitted = 0
-        self._total_suppressed = 0
+        with self._lock:
+            self._states.clear()
+            self._total_inspected = 0
+            self._total_admitted = 0
+            self._total_suppressed = 0
+            self._total_evicted = 0
+            self._last_prune_ts = 0.0
 
     @property
     def stats(self) -> Dict[str, float]:
         """Return compression and admission metrics."""
-        ratio = (
-            (self._total_suppressed / self._total_inspected * 100.0)
-            if self._total_inspected > 0
-            else 0.0
-        )
-        return {
-            "total_inspected": float(self._total_inspected),
-            "total_admitted": float(self._total_admitted),
-            "total_suppressed": float(self._total_suppressed),
-            "suppression_ratio_pct": round(ratio, 2),
-            "tracked_trains": float(len(self._states)),
-        }
+        with self._lock:
+            ratio = (
+                (self._total_suppressed / self._total_inspected * 100.0)
+                if self._total_inspected > 0
+                else 0.0
+            )
+            return {
+                "total_inspected": float(self._total_inspected),
+                "total_admitted": float(self._total_admitted),
+                "total_suppressed": float(self._total_suppressed),
+                "total_evicted": float(self._total_evicted),
+                "suppression_ratio_pct": round(ratio, 2),
+                "tracked_trains": float(len(self._states)),
+            }

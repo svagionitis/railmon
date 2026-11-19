@@ -35,6 +35,7 @@ class StreamWorker:
         recorder: Optional[Any] = None,
         base_backoff_sec: float = 3.0,
         max_backoff_sec: float = 60.0,
+        prune_interval_sec: float = 60.0,
     ):
         self.store = store
         self.client = client
@@ -44,6 +45,7 @@ class StreamWorker:
 
         self.base_backoff_sec = base_backoff_sec
         self.max_backoff_sec = max_backoff_sec
+        self.prune_interval_sec = prune_interval_sec
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -51,6 +53,7 @@ class StreamWorker:
         self._pause_event.set()  # Unpaused by default
         self._disconnect_time: Optional[float] = None
         self._consecutive_failures: int = 0
+        self._last_prune_time: float = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -93,6 +96,20 @@ class StreamWorker:
         self._pause_event.set()
         self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
 
+    def _check_prune(self) -> int:
+        """Periodically prune stale trains from the state store."""
+        now = time.monotonic()
+        if (now - self._last_prune_time) >= self.prune_interval_sec:
+            self._last_prune_time = now
+            pruned = self.store.prune_stale_trains()
+            if pruned > 0:
+                logger.debug(
+                    "StreamWorker pruned %d stale train(s) from TrainStateStore.",
+                    pruned,
+                )
+            return pruned
+        return 0
+
     def _run_loop(self) -> None:
         """Main worker execution loop with exponential backoff and error recovery."""
         backoff = self.base_backoff_sec
@@ -132,11 +149,15 @@ class StreamWorker:
                         if self.recorder is not None and getattr(self.recorder, "is_running", False):
                             self.recorder.enqueue_batch(batch)
 
+                    self._check_prune()
+
                 # If generator completed normally without error
+                self._check_prune()
                 if self._stop_event.is_set():
                     break
 
             except Exception as exc:
+                self._check_prune()
                 if self._stop_event.is_set():
                     break
 

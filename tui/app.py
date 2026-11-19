@@ -124,6 +124,10 @@ class TUIApp:
         self._last_rate_time = time.monotonic()
         self._current_msg_rate = 0.0
 
+        # Periodic stale train cleanup (defense-in-depth against stream stall)
+        self._last_prune_time = time.monotonic()
+        self._prune_interval_sec: float = 60.0
+
     def setup_terminal(self) -> None:
         """Configure curses terminal modes for responsive, non-blocking UI."""
         curses.curs_set(0)  # Hide hardware cursor
@@ -442,6 +446,11 @@ class TUIApp:
                     if not self.process_input(key):
                         self.running = False
                         break
+
+                # 1b. Periodic stale train cleanup (defense-in-depth against stream stall)
+                if (frame_start - self._last_prune_time) >= self._prune_interval_sec:
+                    self.store.prune_stale_trains()
+                    self._last_prune_time = frame_start
 
                 # 2. Extract atomic snapshot without lock contention
                 snapshot = self.store.get_snapshot()

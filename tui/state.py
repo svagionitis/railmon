@@ -68,8 +68,8 @@ class TrainRecord:
         self.last_updated = now
         self.update_count += 1
 
-    def is_stale(self, threshold_sec: float = 120.0) -> bool:
-        """Check if train has stopped receiving updates beyond threshold."""
+    def is_stale(self, threshold_sec: float = 1800.0) -> bool:
+        """Check if train has stopped receiving updates beyond threshold (default: 30 minutes)."""
         return (time.time() - self.last_updated) > threshold_sec
 
 
@@ -198,7 +198,7 @@ def _natural_sort_key(rec: TrainRecord) -> Tuple[int, str]:
 class TrainStateStore:
     """Thread-safe state repository for live train positions and UI view state."""
 
-    def __init__(self, stale_timeout_sec: float = 120.0, max_trail_len: int = 15):
+    def __init__(self, stale_timeout_sec: float = 1800.0, max_trail_len: int = 15):
         self._lock = threading.RLock()
         self._stale_timeout_sec = stale_timeout_sec
         self._max_trail_len = max_trail_len
@@ -207,6 +207,8 @@ class TrainStateStore:
         self._trains: Dict[str, TrainRecord] = {}
         self._total_messages: int = 0
         self._last_update_ts: float = 0.0
+        self._last_prune_ts: float = 0.0
+        self._total_trains_pruned: int = 0
         self._version: int = 0
 
         # UI & View state
@@ -278,6 +280,8 @@ class TrainStateStore:
 
             if stale_ids:
                 self._version += 1
+                self._total_trains_pruned += len(stale_ids)
+            self._last_prune_ts = now
             return len(stale_ids)
 
     def set_connection_status(self, status: ConnectionStatus, message: str = "") -> None:

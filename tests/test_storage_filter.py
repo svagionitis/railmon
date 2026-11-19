@@ -209,6 +209,68 @@ class TestDeadbandFilter(unittest.TestCase):
         self.filter.reset()
         self.assertEqual(len(self.filter._states), 0)
         self.assertEqual(self.filter.stats["total_inspected"], 0.0)
+        self.assertEqual(self.filter.stats["total_evicted"], 0.0)
+
+    def test_deadband_config_defaults(self):
+        """TC-P2-07: DeadbandConfig defines 1800s timeout and 300s prune interval by default."""
+        cfg = DeadbandConfig()
+        self.assertEqual(cfg.stale_timeout_sec, 1800.0)
+        self.assertEqual(cfg.stale_prune_interval_sec, 300.0)
+
+    def test_prune_stale_states_manual(self):
+        """TC-P2-07: prune_stale_states evicts vehicles exceeding max_age_sec."""
+        pos1 = _create_sample_position("IC52")
+        pos2 = _create_sample_position("IC53")
+        self.filter.should_record(pos1, now_epoch=1000.0)
+        self.filter.should_record(pos2, now_epoch=1500.0)
+
+        # At t=1700, IC52 is 700s old (> 600s); IC53 is 200s old (<= 600s)
+        evicted = self.filter.prune_stale_states(max_age_sec=600.0, now_epoch=1700.0)
+        self.assertEqual(evicted, 1)
+        self.assertNotIn("IC52", self.filter._states)
+        self.assertIn("IC53", self.filter._states)
+        self.assertEqual(self.filter.stats["total_evicted"], 1.0)
+        self.assertEqual(self.filter.stats["tracked_trains"], 1.0)
+
+    def test_auto_prune_stale_states_on_should_record(self):
+        """TC-P2-08: should_record auto-prunes stale states when prune_interval has elapsed."""
+        cfg = DeadbandConfig(stale_timeout_sec=600.0, stale_prune_interval_sec=300.0)
+        filt = DeadbandFilter(cfg)
+
+        pos1 = _create_sample_position("IC52")
+        pos2 = _create_sample_position("IC53")
+        filt.should_record(pos1, now_epoch=1000.0)
+        filt.should_record(pos2, now_epoch=1050.0)
+        self.assertEqual(len(filt._states), 2)
+
+        # Ingestion at t=1700 triggers auto-prune (1700 - 0 >= 300; both > 600s old)
+        pos3 = _create_sample_position("IC54")
+        admitted, reason = filt.should_record(pos3, now_epoch=1700.0)
+
+        self.assertTrue(admitted)
+        self.assertEqual(reason, "initial")
+        self.assertNotIn("IC52", filt._states)
+        self.assertNotIn("IC53", filt._states)
+        self.assertIn("IC54", filt._states)
+        self.assertEqual(filt.stats["total_evicted"], 2.0)
+        self.assertEqual(filt.stats["tracked_trains"], 1.0)
+
+    def test_reemergent_train_admitted_as_initial(self):
+        """TC-P2-09: Vehicle evicted after dormancy is safely admitted as 'initial' when re-observed."""
+        pos = _create_sample_position("IC52", lat=38.0, lng=23.5)
+        # First observation -> admitted initial
+        adm1, r1 = self.filter.should_record(pos, now_epoch=1000.0)
+        self.assertTrue(adm1)
+        self.assertEqual(r1, "initial")
+
+        # Evict IC52
+        self.filter.prune_stale_states(max_age_sec=600.0, now_epoch=2000.0)
+        self.assertNotIn("IC52", self.filter._states)
+
+        # Stationary re-appearance at t=2500 -> admitted as 'initial'
+        adm2, r2 = self.filter.should_record(pos, now_epoch=2500.0)
+        self.assertTrue(adm2)
+        self.assertEqual(r2, "initial")
 
 
 if __name__ == "__main__":

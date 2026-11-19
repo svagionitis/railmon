@@ -127,6 +127,53 @@ class TestTrainStateStore(unittest.TestCase):
         self.assertIsNone(snapshot.selected_train)
         self.assertFalse(snapshot.follow_mode)
 
+    def test_default_stale_timeout_30_minutes(self):
+        """TC-P2-01 & TC-P2-02: Verify default stale timeout is 1800s (30m) for store and TrainRecord."""
+        default_store = TrainStateStore()
+        self.assertEqual(default_store._stale_timeout_sec, 1800.0)
+
+        t = _create_sample_train("ic-50", "IC 50")
+        rec = TrainRecord(position=t)
+        # Inactive for 1700s (< 1800s) -> not stale
+        rec.last_updated = time.time() - 1700.0
+        self.assertFalse(rec.is_stale())
+
+        # Inactive for 1801s (> 1800s) -> stale
+        rec.last_updated = time.time() - 1801.0
+        self.assertTrue(rec.is_stale())
+
+    def test_prune_stale_trains_30m_boundary_and_counters(self):
+        """TC-P2-03: Verify 30m boundary enforcement, total_trains_pruned tracking, and idempotency."""
+        store = TrainStateStore()
+        t1 = _create_sample_train("ic-50", "IC 50")
+        t2 = _create_sample_train("ic-51", "IC 51")
+        t3 = _create_sample_train("ic-52", "IC 52")
+        store.update_positions([t1, t2, t3])
+
+        now = time.time()
+        store._trains["ic-50"].last_updated = now - 100.0   # Active (recent)
+        store._trains["ic-51"].last_updated = now - 1790.0  # Active (< 1800s)
+        store._trains["ic-52"].last_updated = now - 1850.0  # Stale (> 1800s)
+
+        v_before = store._version
+        pruned = store.prune_stale_trains()  # Default 1800s cutoff
+        self.assertEqual(pruned, 1)
+        self.assertEqual(store._total_trains_pruned, 1)
+        self.assertGreater(store._last_prune_ts, 0.0)
+        self.assertGreater(store._version, v_before)
+
+        snap = store.get_snapshot()
+        self.assertIn("ic-50", snap.trains)
+        self.assertIn("ic-51", snap.trains)
+        self.assertNotIn("ic-52", snap.trains)
+
+        # Calling again when no trains are stale -> returns 0, version unchanged
+        v_after = store._version
+        pruned_second = store.prune_stale_trains()
+        self.assertEqual(pruned_second, 0)
+        self.assertEqual(store._version, v_after)
+        self.assertEqual(store._total_trains_pruned, 1)
+
     def test_cursor_navigation_next_prev_wrap(self):
         """Verify select_next and select_prev cycle correctly with wrap-around."""
         t1 = _create_sample_train("ic-50", "IC 50")
@@ -603,6 +650,36 @@ class TestStreamWorker(unittest.TestCase):
             snap = self.store.get_snapshot()
             self.assertEqual(snap.connection_status, ConnectionStatus.RECONNECTING)
             self.assertIn("HTTP 503 Server Error", snap.status_message)
+        finally:
+            worker.stop(timeout_sec=1.0)
+
+    def test_stream_worker_periodic_prune(self):
+        """TC-P2-05: StreamWorker periodically invokes prune_stale_trains on configured cadence."""
+        t_stale = _create_sample_train("ic-99", "IC 99")
+        self.store.update_positions([t_stale])
+        self.store._trains["ic-99"].last_updated = time.time() - 2000.0
+
+        def single_batch_stream():
+            yield [_create_sample_train("ic-100", "IC 100")]
+
+        worker = StreamWorker(
+            store=self.store,
+            custom_stream=single_batch_stream,
+            prune_interval_sec=0.001,
+        )
+        worker.start()
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                snap = self.store.get_snapshot()
+                if "ic-100" in snap.trains and "ic-99" not in snap.trains:
+                    break
+                time.sleep(0.01)
+
+            snap = self.store.get_snapshot()
+            self.assertIn("ic-100", snap.trains)
+            self.assertNotIn("ic-99", snap.trains)
+            self.assertGreaterEqual(self.store._total_trains_pruned, 1)
         finally:
             worker.stop(timeout_sec=1.0)
 
