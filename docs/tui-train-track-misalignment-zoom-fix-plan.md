@@ -346,9 +346,11 @@ In [`../tui/geo.py`](../tui/geo.py), add `GeoProjector.resolve_track_cell(point:
    - Update `TUIApp.pan(dx_cells, dy_cells)` to compute `d_lng` and `d_lat` from `self.projector.get_scale_x()` and `self.projector.get_scale_y()`.
 
 ### Step 3: Add Orthogonal Map Snapping to [`../tui/mock_engine.py`](../tui/mock_engine.py)
+> **Detailed Sub-Plan:** [Implementation Plan — Step 3: Orthogonal Map Snapping (`tui/mock_engine.py`)](./tui-step-3-orthogonal-map-snapping-plan.md)
+
 1. Add `project_point_to_segment(point: GeoPoint, p0: GeoPoint, p1: GeoPoint) -> Tuple[GeoPoint, float]` in [`../tui/mock_engine.py`](../tui/mock_engine.py).
 2. Add `TrackPolyline.project_point(self, point: GeoPoint) -> Tuple[GeoPoint, float, float]` returning `(snapped_point, perpendicular_distance_m, segment_heading_deg)`.
-3. Add `snap_to_track_network(point: GeoPoint, tracks: Sequence[TrackPolyline], max_snap_distance_m: float = 1500.0) -> GeoPoint`.
+3. Add `snap_to_track_network(point: GeoPoint, tracks: Sequence[TrackPolyline], corridor_hint: Optional[str] = None, max_snap_distance_m: float = 1500.0) -> GeoPoint`.
 
 ### Step 4: Integrate Display Snapping & Cell Resolution in [`../tui/renderer.py`](../tui/renderer.py)
 In [`TUIRenderer.render_map()`](../tui/renderer.py#L721-L807):

@@ -15,13 +15,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Sequence, Tuple
 
 from train_tracker import TrainPosition
 from tui.geo import GeoPoint
 
 # Earth radius in meters (WGS84 mean radius)
 EARTH_RADIUS_M = 6371000.0
+
+# Default maximum orthogonal snapping distance in meters for visual map-matching
+DEFAULT_SNAP_THRESHOLD_M = 1500.0
 
 # Default data file paths
 DATA_DIR = Path(__file__).parent / "data"
@@ -65,6 +68,51 @@ def calculate_bearing(p1: GeoPoint, p2: GeoPoint) -> float:
 
     bearing = math.degrees(math.atan2(y, x))
     return (bearing + 360.0) % 360.0
+
+
+def project_point_to_segment(
+    point: GeoPoint, p0: GeoPoint, p1: GeoPoint
+) -> Tuple[GeoPoint, float]:
+    """Orthogonally project a geographic point onto a line segment [p0, p1].
+
+    Uses a local Equirectangular tangent-plane approximation scaled at the
+    segment's mean latitude to compute the clamped projection parameter
+    t in [0.0, 1.0], the interpolated GeoPoint on [p0, p1], and the
+    perpendicular distance in meters.
+
+    Args:
+        point: Query geographic coordinate (lat, lng).
+        p0: Segment start coordinate (lat, lng).
+        p1: Segment end coordinate (lat, lng).
+
+    Returns:
+        Tuple of (snapped_geopoint, perpendicular_distance_m).
+    """
+    mean_lat_rad = math.radians((p0.lat + p1.lat) * 0.5)
+    m_per_deg_lat = (math.pi / 180.0) * EARTH_RADIUS_M
+    m_per_deg_lng = m_per_deg_lat * math.cos(mean_lat_rad)
+
+    ux = (p1.lng - p0.lng) * m_per_deg_lng
+    uy = (p1.lat - p0.lat) * m_per_deg_lat
+
+    vx = (point.lng - p0.lng) * m_per_deg_lng
+    vy = (point.lat - p0.lat) * m_per_deg_lat
+
+    seg_len_sq = ux * ux + uy * uy
+    if seg_len_sq <= 1e-12:
+        return p0, math.hypot(vx, vy)
+
+    t = (vx * ux + vy * uy) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+
+    snapped_lat = p0.lat + t * (p1.lat - p0.lat)
+    snapped_lng = p0.lng + t * (p1.lng - p0.lng)
+
+    dx = vx - t * ux
+    dy = vy - t * uy
+    perp_dist_m = math.hypot(dx, dy)
+
+    return GeoPoint(lat=snapped_lat, lng=snapped_lng), perp_dist_m
 
 
 @dataclass(frozen=True)
@@ -177,6 +225,92 @@ class TrackPolyline:
         heading = calculate_bearing(p0, p1)
 
         return GeoPoint(lat=lat, lng=lng), heading
+
+    def project_point(self, point: GeoPoint) -> Tuple[GeoPoint, float, float]:
+        """Project a geographic coordinate onto the closest segment of this polyline.
+
+        Args:
+            point: Query GeoPoint (lat, lng) to project onto the track.
+
+        Returns:
+            Tuple of (snapped_point, perpendicular_distance_m, segment_heading_deg).
+        """
+        best_point = self.points[0]
+        best_dist_m = float("inf")
+        best_heading = (
+            calculate_bearing(self.points[0], self.points[1])
+            if len(self.points) > 1
+            else 0.0
+        )
+
+        for i in range(1, len(self.points)):
+            p0 = self.points[i - 1]
+            p1 = self.points[i]
+            snapped_pt, dist_m = project_point_to_segment(point, p0, p1)
+            if dist_m < best_dist_m:
+                best_dist_m = dist_m
+                best_point = snapped_pt
+                best_heading = calculate_bearing(p0, p1)
+
+        return best_point, best_dist_m, best_heading
+
+
+def snap_to_track_network(
+    point: GeoPoint,
+    tracks: Sequence[TrackPolyline],
+    corridor_hint: Optional[str] = None,
+    max_snap_distance_m: float = DEFAULT_SNAP_THRESHOLD_M,
+) -> GeoPoint:
+    """Snap a geographic coordinate to the nearest track polyline if within threshold.
+
+    Evaluates orthogonal projection across the provided track polylines and returns
+    the snapped centerline coordinate if the minimum perpendicular distance is within
+    max_snap_distance_m. If no track segment lies within the threshold (or tracks is
+    empty), returns the original GeoPoint unmodified.
+
+    Args:
+        point: Raw geographic coordinate (lat, lng).
+        tracks: Sequence of available TrackPolyline corridors.
+        corridor_hint: Optional corridor ID or name hint. Even when provided, all
+            tracks are checked if the hinted corridor is not an exact ID match or if
+            a closer shared-trunk segment exists within threshold.
+        max_snap_distance_m: Maximum perpendicular distance in meters allowed for
+            snapping (defaults to 1500.0m).
+
+    Returns:
+        Snapped GeoPoint on the nearest track segment, or unmodified point.
+    """
+    if not tracks or max_snap_distance_m < 0.0:
+        return point
+
+    best_point = point
+    best_dist_m = float("inf")
+
+    if corridor_hint:
+        hint_lower = corridor_hint.strip().lower()
+        hinted_tracks = [
+            t
+            for t in tracks
+            if t.corridor_id.lower() == hint_lower
+            or hint_lower in t.corridor_id.lower()
+        ]
+        for track in hinted_tracks:
+            snapped_pt, dist_m, _ = track.project_point(point)
+            if dist_m < best_dist_m:
+                best_dist_m = dist_m
+                best_point = snapped_pt
+        if best_dist_m <= max_snap_distance_m:
+            return best_point
+
+    for track in tracks:
+        snapped_pt, dist_m, _ = track.project_point(point)
+        if dist_m < best_dist_m:
+            best_dist_m = dist_m
+            best_point = snapped_pt
+
+    if best_dist_m <= max_snap_distance_m:
+        return best_point
+    return point
 
 
 def load_stations(path: Optional[str] = None) -> Dict[str, StationNode]:

@@ -3,6 +3,7 @@
 import unittest
 from tui.geo import GREECE_PRESET, GeoPoint
 from tui.mock_engine import (
+    DEFAULT_SNAP_THRESHOLD_M,
     MockTelemetryEngine,
     SimulatedTrain,
     StationNode,
@@ -12,6 +13,8 @@ from tui.mock_engine import (
     haversine_distance,
     load_stations,
     load_tracks,
+    project_point_to_segment,
+    snap_to_track_network,
 )
 from train_tracker import TrainPosition
 
@@ -216,6 +219,72 @@ class TestGeodesicMath(unittest.TestCase):
         p_mid, h_mid = poly.interpolate_at_distance(poly.total_length_m / 2.0)
         self.assertTrue(38.0 < p_mid.lat < 39.0)
         self.assertTrue(23.0 < p_mid.lng < 24.0)
+
+    def test_project_point_to_segment_orthogonal_and_clamped_endpoints(self):
+        """Verify orthogonal point-to-segment projection for interior, clamped, and degenerate segments."""
+        p0 = GeoPoint(lat=38.0, lng=23.0)
+        p1 = GeoPoint(lat=38.0, lng=23.1)
+
+        # 1. Interior point (0 < t < 1): 0.0045 deg (~500.4m) due north of midpoint (38.0, 23.05)
+        query_mid = GeoPoint(lat=38.0045, lng=23.05)
+        snapped_mid, dist_mid = project_point_to_segment(query_mid, p0, p1)
+        self.assertAlmostEqual(snapped_mid.lat, 38.0, places=6)
+        self.assertAlmostEqual(snapped_mid.lng, 23.05, places=6)
+        self.assertAlmostEqual(dist_mid, 500.4, delta=3.0)
+
+        # 2. Clamped before start (t = 0.0): west of p0
+        query_west = GeoPoint(lat=38.0, lng=22.95)
+        snapped_west, dist_west = project_point_to_segment(query_west, p0, p1)
+        self.assertEqual(snapped_west, p0)
+        self.assertGreater(dist_west, 4000.0)
+
+        # 3. Clamped past end (t = 1.0): east of p1
+        query_east = GeoPoint(lat=38.0, lng=23.15)
+        snapped_east, dist_east = project_point_to_segment(query_east, p0, p1)
+        self.assertEqual(snapped_east, p1)
+        self.assertGreater(dist_east, 4000.0)
+
+        # 4. Degenerate zero-length segment (p0 == p1)
+        snapped_deg, dist_deg = project_point_to_segment(query_mid, p0, p0)
+        self.assertEqual(snapped_deg, p0)
+        self.assertAlmostEqual(dist_deg, haversine_distance(query_mid, p0), delta=5.0)
+
+    def test_track_polyline_project_point_and_snap_to_network(self):
+        """Verify polyline projection and tolerance-bounded network snapping."""
+        tracks_dict = load_tracks()
+        tracks_list = list(tracks_dict.values())
+        pathe = tracks_dict["pathe-mainline"]
+
+        # Case Study A: Point offset ~334m north of Eleonas (38.3747°N, 23.4635°E)
+        eleonas_offset = GeoPoint(lat=38.3747 + 0.0030, lng=23.4635)
+        snapped_pt, perp_dist_m, seg_heading = pathe.project_point(eleonas_offset)
+
+        self.assertTrue(250.0 <= perp_dist_m <= 360.0, f"Unexpected perp_dist_m: {perp_dist_m}")
+        self.assertTrue(0.0 <= seg_heading < 360.0)
+
+        # Re-projecting the snapped point onto pathe-mainline must yield ~0.0m distance
+        _, re_dist_m, _ = pathe.project_point(snapped_pt)
+        self.assertLessEqual(re_dist_m, 0.05)
+
+        # Network snapping within default 1500m threshold must snap to centerline
+        self.assertEqual(DEFAULT_SNAP_THRESHOLD_M, 1500.0)
+        net_snapped = snap_to_track_network(eleonas_offset, tracks_list)
+        self.assertAlmostEqual(net_snapped.lat, snapped_pt.lat, places=6)
+        self.assertAlmostEqual(net_snapped.lng, snapped_pt.lng, places=6)
+
+        # Corridor hint resolution
+        hint_snapped = snap_to_track_network(
+            eleonas_offset, tracks_list, corridor_hint="PATHE"
+        )
+        self.assertAlmostEqual(hint_snapped.lat, snapped_pt.lat, places=6)
+        self.assertAlmostEqual(hint_snapped.lng, snapped_pt.lng, places=6)
+
+        # Off-corridor point (> 1500m threshold, e.g., 15km away in the Aegean Sea) must remain raw
+        off_network_pt = GeoPoint(lat=38.3000, lng=24.2000)
+        unsnapped = snap_to_track_network(
+            off_network_pt, tracks_list, max_snap_distance_m=1500.0
+        )
+        self.assertEqual(unsnapped, off_network_pt)
 
 
 class TestMockTelemetryEngine(unittest.TestCase):
