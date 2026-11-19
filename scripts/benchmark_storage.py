@@ -65,7 +65,7 @@ def _make_bench_position(
     )
 
 
-def run_write_throughput_benchmark(
+def run_write_benchmark(
     num_records: int = 10000,
     batch_sizes: List[int] = [10, 50, 100, 500],
 ) -> List[Dict[str, Any]]:
@@ -130,7 +130,7 @@ def run_write_throughput_benchmark(
     return results
 
 
-def run_deadband_efficiency_benchmark(
+def run_deadband_benchmark(
     stationary_duration_steps: int = 600,
     moving_duration_steps: int = 600,
 ) -> Dict[str, Any]:
@@ -349,14 +349,20 @@ def print_benchmark_report(
     print("=" * 80)
 
 
+# Backward compatibility shims for external tools and historical docs
+run_write_throughput_benchmark = run_write_benchmark
+run_deadband_efficiency_benchmark = run_deadband_benchmark
+run_read_benchmark = run_read_latency_benchmark
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hellenic Railways SQLite Storage Benchmark")
     parser.add_argument("--json", type=str, default="", help="Path to export benchmark results as JSON")
     parser.add_argument("--records", type=int, default=5000, help="Number of records for write benchmark")
     args = parser.parse_args()
 
-    writes = run_write_throughput_benchmark(num_records=args.records, batch_sizes=[10, 50, 100, 500])
-    deadband = run_deadband_efficiency_benchmark(stationary_duration_steps=600, moving_duration_steps=600)
+    writes = run_write_benchmark(num_records=args.records, batch_sizes=[10, 50, 100, 500])
+    deadband = run_deadband_benchmark(stationary_duration_steps=600, moving_duration_steps=600)
     reads = run_read_latency_benchmark(num_records=min(args.records, 10000))
 
     print_benchmark_report(writes, deadband, reads)

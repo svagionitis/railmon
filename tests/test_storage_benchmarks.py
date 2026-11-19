@@ -4,6 +4,7 @@ Validates write throughput, query response latency, deadband filtering efficienc
 and WAL checkpointing dynamics.
 """
 
+import ast
 import os
 import queue
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 from datetime import datetime, timezone
 from typing import List
 
+from scripts import benchmark_storage
 from storage.db import Database
 from storage.filter import DeadbandConfig, DeadbandFilter
 from storage.models import TrainPosition
@@ -242,6 +244,52 @@ class TestStorageBenchmarks(unittest.TestCase):
         # Confirm data integrity remains 100%
         stats = self.repo.get_database_stats()
         self.assertEqual(stats.total_telemetry_rows, 100)
+
+
+class TestBenchmarkNamingCompliance(unittest.TestCase):
+    """Verify function name length compliance and alias backward-compatibility."""
+
+    def test_benchmark_storage_function_lengths(self) -> None:
+        """Verify all defined functions in scripts/benchmark_storage.py have < 30 chars."""
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "benchmark_storage.py"
+        )
+        with open(script_path, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=script_path)
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.assertLess(
+                    len(node.name),
+                    30,
+                    f"Function '{node.name}' has {len(node.name)} characters, exceeding 29-character limit",
+                )
+
+    def test_benchmark_backward_compatibility_aliases(self) -> None:
+        """Verify legacy function names resolve to canonical implementations."""
+        self.assertIs(
+            benchmark_storage.run_write_throughput_benchmark,
+            benchmark_storage.run_write_benchmark,
+        )
+        self.assertIs(
+            benchmark_storage.run_deadband_efficiency_benchmark,
+            benchmark_storage.run_deadband_benchmark,
+        )
+        self.assertIs(
+            benchmark_storage.run_read_benchmark,
+            benchmark_storage.run_read_latency_benchmark,
+        )
+
+    def test_smoke_canonical_benchmark_functions(self) -> None:
+        """Smoke test canonical benchmark functions with minimal parameter sets."""
+        writes = benchmark_storage.run_write_benchmark(num_records=5, batch_sizes=[5])
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0]["num_records"], 5)
+
+        deadband = benchmark_storage.run_deadband_benchmark(
+            stationary_duration_steps=5, moving_duration_steps=5
+        )
+        self.assertEqual(deadband["total_emitted_positions"], 10)
 
 
 if __name__ == "__main__":

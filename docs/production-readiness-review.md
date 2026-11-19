@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 2 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 1 P2 compliance gap)
 
 ---
 
@@ -417,9 +417,10 @@ sequenceDiagram
 - **Issue:** Violates [`../.agents/rules/communication.md`](../.agents/rules/communication.md#L17) ("Use strongly typed `Enum` instead of boolean parameters in function signatures").
 - **Fix:** Introduced strongly typed enums across public APIs: `TelemetrySource`, `RecordingMode`, `DeadbandFilterMode`, `OutputVerbosity`, and `GlyphMode` in [`../train_tracker.py`](../train_tracker.py); `CycleDirection` in [`../tui/app.py`](../tui/app.py); `HelpOverlay` and `PlaybackState` in [`../tui/renderer.py`](../tui/renderer.py); and centralized `InputMode` in [`../tui/state.py`](../tui/state.py). Implemented defensive parameter normalization and backwards-compatibility coercion shims across all modified function signatures. Added 20 automated verification tests in [`../tests/test_enums.py`](../tests/test_enums.py) validating enum definitions, typed call sites, and legacy boolean keyword/positional arguments.
 
-### P2-5: Function Name Length Violations ($> 30$ Characters)
-- **Location:** [`run_deadband_efficiency_benchmark`](../scripts/benchmark_storage.py#L133) (33 chars), [`run_write_throughput_benchmark`](../scripts/benchmark_storage.py#L68) (30 chars)
+### P2-5: Function Name Length Violations ($> 30$ Characters) [RESOLVED]
+- **Location:** [`run_deadband_efficiency_benchmark`](../scripts/benchmark_storage.py#L133) (33 chars), [`run_write_throughput_benchmark`](../scripts/benchmark_storage.py#L68) (30 chars) | **Plan:** [`./p2-5-function-name-length-violations-fix-plan.md`](./p2-5-function-name-length-violations-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/communication.md`](../.agents/rules/communication.md#L16) ("Keep function names short, clear, and descriptive: fewer than 30 characters").
+- **Fix:** Shortened benchmark function identifiers in [`../scripts/benchmark_storage.py`](../scripts/benchmark_storage.py) to canonical names strictly $< 30$ characters: `run_write_benchmark` (19 chars) and `run_deadband_benchmark` (22 chars). Provided module-level backward-compatibility shims (`run_write_throughput_benchmark`, `run_deadband_efficiency_benchmark`, `run_read_benchmark`). Added automated AST character length verification, alias identity assertions, and canonical smoke tests in [`../tests/test_storage_benchmarks.py`](../tests/test_storage_benchmarks.py).
 
 ### P2-6: Skill Documentation CLI Flag Drift
 - **Location:** [`../.agents/skills/package-distribution-validator/SKILL.md`](../.agents/skills/package-distribution-validator/SKILL.md#L38), [`../.agents/skills/storage-benchmark-gate/SKILL.md`](../.agents/skills/storage-benchmark-gate/SKILL.md#L38-L40)
