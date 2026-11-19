@@ -22,7 +22,7 @@ from tui.geo import (
     Viewport,
 )
 from tui.renderer import PaneGeometry, TUIRenderer
-from tui.state import ConnectionStatus, TrainStateStore
+from tui.state import ConnectionStatus, RosterSortMode, TrainStateStore
 from tui.stream_worker import StreamWorker
 
 
@@ -693,6 +693,28 @@ class TestTUIControls(unittest.TestCase):
         self.assertEqual(self.app.render_count, 2)
         self.assertEqual(self.app.skip_count, 1)
         self.assertEqual(self.app.renderer.render_all.call_count, 2)
+
+    def test_key_s_cycles_roster_sort_mode_in_normal_mode(self):
+        """Verify pressing 's' or 'S' in NORMAL mode cycles roster sort mode (TRAIN_ID -> SPEED -> DELAY -> TRAIN_ID)."""
+        self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.TRAIN_ID)
+
+        self.assertTrue(self.app.process_input(ord("s")))
+        self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.SPEED)
+
+        self.assertTrue(self.app.process_input(ord("S")))
+        self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.DELAY)
+
+        self.assertTrue(self.app.process_input(ord("s")))
+        self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.TRAIN_ID)
+
+    def test_key_s_in_search_mode_appends_character_without_sorting(self):
+        """Verify pressing 's' while in SEARCH mode edits the search query rather than cycling sort mode."""
+        self.app.process_input(ord("/"))
+        self.assertEqual(self.app.input_mode, InputMode.SEARCH)
+
+        self.app.process_input(ord("s"))
+        self.assertEqual(self.app.search_buffer, "s")
+        self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.TRAIN_ID)
 
 
 if __name__ == "__main__":

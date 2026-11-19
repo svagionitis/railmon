@@ -30,7 +30,7 @@ from tui.geo import (
 )
 from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_tracks
 from tui.renderer import HelpOverlay, PaneGeometry, PlaybackState, TUIRenderer
-from tui.state import ConnectionStatus, InputMode, StateSnapshot, TrainStateStore
+from tui.state import ConnectionStatus, InputMode, RosterSortMode, StateSnapshot, TrainStateStore
 from tui.stream_worker import StreamWorker
 
 
@@ -367,6 +367,10 @@ class TUIApp:
         self.search_buffer = ""
         self._pre_search_query = ""
 
+    def cycle_sort(self) -> RosterSortMode:
+        """Cycle active train roster sorting criterion (Train ID -> Speed -> Delay)."""
+        return self.store.cycle_sort_mode()
+
     def toggle_pause(self) -> None:
         """Toggle paused state for telemetry ingestion."""
         self.paused = not self.paused
@@ -430,6 +434,10 @@ class TUIApp:
         # Clear filters and selection
         elif key in (ord("c"), ord("C")):
             self.clear_all()
+
+        # Cycle train roster sorting (Train ID, Speed, Delay)
+        elif key in (ord("s"), ord("S")):
+            self.cycle_sort()
 
         # Search filter prompt activation
         elif key in SEARCH_OPEN_KEYS:

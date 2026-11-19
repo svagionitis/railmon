@@ -37,6 +37,14 @@ class InputMode(Enum):
     HELP = auto()  # Fullscreen keybinding reference dialog overlay
 
 
+class RosterSortMode(Enum):
+    """Ordering criteria for the active train roster table."""
+
+    TRAIN_ID = auto()  # Ascending natural alphanumeric train number (e.g. 50 before 1597)
+    SPEED = auto()  # Descending speed in km/h (fastest first), tie-broken by TRAIN_ID
+    DELAY = auto()  # Descending delay in minutes (most delayed first), tie-broken by TRAIN_ID
+
+
 @dataclass(frozen=True)
 class HistoricalBreadcrumb:
     """A historical geographic point recorded during train movement."""
@@ -109,6 +117,7 @@ class StateSnapshot:
     version: int
     is_recording: bool = False
     recording_db: Optional[str] = None
+    sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
 
 
 def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
@@ -213,6 +222,18 @@ def _natural_sort_key(rec: TrainRecord) -> Tuple[int, str]:
     return (1, tn or rec.position.id)
 
 
+def _speed_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
+    """Sort trains by descending speed, with natural train number as tie-breaker."""
+    spd = float(rec.position.speed) if rec.position.speed is not None else 0.0
+    return (-spd, _natural_sort_key(rec))
+
+
+def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
+    """Sort trains by descending delay, with natural train number as tie-breaker."""
+    dly = float(rec.position.delay) if rec.position.delay is not None else 0.0
+    return (-dly, _natural_sort_key(rec))
+
+
 class TrainStateStore:
     """Thread-safe state repository for live train positions and UI view state."""
 
@@ -234,6 +255,7 @@ class TrainStateStore:
         self._follow_mode: bool = False
         self._filter_query: str = ""
         self._corridor_filter: Optional[str] = None
+        self._sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
         self._is_recording: bool = False
@@ -354,6 +376,7 @@ class TrainStateStore:
                 version=self._version,
                 is_recording=self._is_recording,
                 recording_db=self._recording_db,
+                sort_mode=self._sort_mode,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -448,6 +471,28 @@ class TrainStateStore:
             self._corridor_filter = corridor.strip() if corridor else None
             self._version += 1
 
+    def set_sort_mode(self, mode: RosterSortMode) -> None:
+        """Explicitly set the active roster sort ordering mode."""
+        if not isinstance(mode, RosterSortMode):
+            raise TypeError(f"Expected RosterSortMode, got {type(mode).__name__}")
+        with self._lock:
+            if self._sort_mode != mode:
+                self._sort_mode = mode
+                self._version += 1
+
+    def cycle_sort_mode(self) -> RosterSortMode:
+        """Cycle active roster sort mode: TRAIN_ID -> SPEED -> DELAY -> TRAIN_ID."""
+        cycle_order = (
+            RosterSortMode.TRAIN_ID,
+            RosterSortMode.SPEED,
+            RosterSortMode.DELAY,
+        )
+        with self._lock:
+            curr_idx = cycle_order.index(self._sort_mode)
+            self._sort_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
+            self._version += 1
+            return self._sort_mode
+
     def clear(self) -> None:
         """Reset state store completely."""
         with self._lock:
@@ -488,7 +533,12 @@ class TrainStateStore:
 
             results.append(rec)
 
-        results.sort(key=_natural_sort_key)
+        if self._sort_mode == RosterSortMode.SPEED:
+            results.sort(key=_speed_sort_key)
+        elif self._sort_mode == RosterSortMode.DELAY:
+            results.sort(key=_delay_sort_key)
+        else:
+            results.sort(key=_natural_sort_key)
         return results
 
     def _get_current_index(self, filtered: List[TrainRecord]) -> int:

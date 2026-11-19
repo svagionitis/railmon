@@ -31,7 +31,7 @@ from tui.renderer import (
     safe_color_pair,
     truncate_to_display_width,
 )
-from tui.state import ConnectionStatus, StateSnapshot, TrainRecord, TrainStateStore
+from tui.state import ConnectionStatus, RosterSortMode, StateSnapshot, TrainRecord, TrainStateStore
 from tui.stream_worker import StreamWorker
 
 
@@ -943,6 +943,48 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
         stored_pos = after_snapshot.trains["ON_TRACK"].position
         self.assertEqual(stored_pos.lat, raw_on_corridor_lat)
         self.assertEqual(stored_pos.lng, raw_on_corridor_lng)
+
+    def test_render_roster_displays_sort_direction_indicators_utf8_and_ascii(self):
+        """Verify roster column header reflects active RosterSortMode in both UTF-8 and ASCII modes."""
+        store = TrainStateStore()
+        store.update_positions(
+            [
+                create_test_position("t-1", "1597", speed=110.0, delay=5.0),
+                create_test_position("t-2", "IC50", speed=140.0, delay=0.0),
+            ]
+        )
+
+        utf8_renderer = TUIRenderer(ascii_mode=False)
+        ascii_renderer = TUIRenderer(ascii_mode=True)
+
+        # 1. TRAIN_ID sort mode
+        snap_id = store.get_snapshot()
+        win_utf8 = MockCursesWindow(12, 36)
+        win_ascii = MockCursesWindow(12, 36)
+        utf8_renderer.render_roster(win_utf8, snap_id)
+        ascii_renderer.render_roster(win_ascii, snap_id)
+        self.assertTrue(any("TRAIN▲" in text for (_, _, text, _) in win_utf8.strings))
+        self.assertTrue(any("TRAIN^" in text for (_, _, text, _) in win_ascii.strings))
+
+        # 2. SPEED sort mode
+        store.set_sort_mode(RosterSortMode.SPEED)
+        snap_spd = store.get_snapshot()
+        win_utf8 = MockCursesWindow(12, 36)
+        win_ascii = MockCursesWindow(12, 36)
+        utf8_renderer.render_roster(win_utf8, snap_spd)
+        ascii_renderer.render_roster(win_ascii, snap_spd)
+        self.assertTrue(any("SPD▼" in text for (_, _, text, _) in win_utf8.strings))
+        self.assertTrue(any("SPDv" in text for (_, _, text, _) in win_ascii.strings))
+
+        # 3. DELAY sort mode
+        store.set_sort_mode(RosterSortMode.DELAY)
+        snap_dly = store.get_snapshot()
+        win_utf8 = MockCursesWindow(12, 36)
+        win_ascii = MockCursesWindow(12, 36)
+        utf8_renderer.render_roster(win_utf8, snap_dly)
+        ascii_renderer.render_roster(win_ascii, snap_dly)
+        self.assertTrue(any("DLY▼" in text for (_, _, text, _) in win_utf8.strings))
+        self.assertTrue(any("DLYv" in text for (_, _, text, _) in win_ascii.strings))
 
 
 if __name__ == "__main__":

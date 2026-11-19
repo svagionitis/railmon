@@ -16,6 +16,7 @@ from tui.mock_engine import MockTelemetryEngine
 from tui.state import (
     ConnectionStatus,
     HistoricalBreadcrumb,
+    RosterSortMode,
     StateSnapshot,
     TrainRecord,
     TrainStateStore,
@@ -29,6 +30,7 @@ def _create_sample_train(
     lat: float = 38.0,
     lng: float = 23.7,
     speed: float = 120.0,
+    delay: float = 2.0,
     corridor: str = "PATHE",
     origin: str = "Athens",
     destination: str = "Thessaloniki",
@@ -51,7 +53,7 @@ def _create_sample_train(
         lat=lat,
         lng=lng,
         altitude=45.0,
-        delay=2,
+        delay=delay,
         progress=0.15,
         chainage_m=12000,
         corridor=corridor,
@@ -337,6 +339,63 @@ class TestTrainStateStore(unittest.TestCase):
         # Clear selection disengages follow mode
         self.store.clear_selection()
         self.assertFalse(self.store.get_snapshot().follow_mode)
+
+    def test_sort_mode_cycling_and_ordering(self):
+        """Verify RosterSortMode cycles TRAIN_ID -> SPEED -> DELAY -> TRAIN_ID with deterministic tie-breaking."""
+        t1 = _create_sample_train("t-1597", "1597", speed=80.0, delay=4.0)
+        t2 = _create_sample_train("t-ic50", "IC 50", speed=140.0, delay=0.0)
+        t3 = _create_sample_train("t-ic52", "IC 52", speed=80.0, delay=12.0)
+        t4 = _create_sample_train("t-2232", "2232", speed=0.0, delay=-1.0)
+        self.store.update_positions([t1, t2, t3, t4])
+
+        # 1. Default sort mode is TRAIN_ID (natural ascending: IC 50, IC 52, 1597, 2232)
+        snap_id = self.store.get_snapshot()
+        self.assertEqual(snap_id.sort_mode, RosterSortMode.TRAIN_ID)
+        self.assertEqual(
+            [r.position.id for r in snap_id.filtered_trains],
+            ["t-ic50", "t-ic52", "t-1597", "t-2232"],
+        )
+
+        # Select t-1597 (at index 2 in TRAIN_ID order)
+        self.store.select_by_id("t-1597")
+        self.assertEqual(self.store.get_snapshot().selected_index, 2)
+
+        # 2. Cycle to SPEED (descending speed, tie-broken by natural ID: IC 50 (140), IC 52 (80), 1597 (80), 2232 (0))
+        v_before = self.store.get_snapshot().version
+        new_mode = self.store.cycle_sort_mode()
+        self.assertEqual(new_mode, RosterSortMode.SPEED)
+        snap_spd = self.store.get_snapshot()
+        self.assertEqual(snap_spd.sort_mode, RosterSortMode.SPEED)
+        self.assertGreater(snap_spd.version, v_before)
+        self.assertEqual(
+            [r.position.id for r in snap_spd.filtered_trains],
+            ["t-ic50", "t-ic52", "t-1597", "t-2232"],
+        )
+
+        # 3. Cycle to DELAY (descending delay: IC 52 (+12), 1597 (+4), IC 50 (0), 2232 (-1))
+        new_mode = self.store.cycle_sort_mode()
+        self.assertEqual(new_mode, RosterSortMode.DELAY)
+        snap_dly = self.store.get_snapshot()
+        self.assertEqual(snap_dly.sort_mode, RosterSortMode.DELAY)
+        self.assertEqual(
+            [r.position.id for r in snap_dly.filtered_trains],
+            ["t-ic52", "t-1597", "t-ic50", "t-2232"],
+        )
+        # Selected train t-1597 is preserved and moves to index 1 in DELAY sort order
+        self.assertEqual(snap_dly.selected_train.position.id, "t-1597")
+        self.assertEqual(snap_dly.selected_index, 1)
+
+        # Cursor navigation select_next() follows DELAY sort order (from t-1597 -> t-ic50)
+        self.assertEqual(self.store.select_next(), "t-ic50")
+
+        # 4. Cycle back to TRAIN_ID
+        self.assertEqual(self.store.cycle_sort_mode(), RosterSortMode.TRAIN_ID)
+
+        # Explicit set_sort_mode and type validation
+        self.store.set_sort_mode(RosterSortMode.SPEED)
+        self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.SPEED)
+        with self.assertRaises(TypeError):
+            self.store.set_sort_mode("SPEED")  # type: ignore[arg-type]
 
     def test_snapshot_thread_isolation(self):
         """Verify mutating the store does not corrupt an existing snapshot or its trail deques."""

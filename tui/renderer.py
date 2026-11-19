@@ -16,7 +16,7 @@ import unicodedata
 
 from tui.geo import BrailleCanvas, GeoPoint, GeoProjector
 from tui.mock_engine import StationNode, TrackPolyline, snap_to_track_network
-from tui.state import ConnectionStatus, InputMode, StateSnapshot, TrainRecord
+from tui.state import ConnectionStatus, InputMode, RosterSortMode, StateSnapshot, TrainRecord
 
 
 class HelpOverlay(Enum):
@@ -83,6 +83,8 @@ class RenderGlyphs:
     badge_conn_error: str
     badge_demo: str
     warn_icon: str
+    sort_asc: str
+    sort_desc: str
 
 
 GLYPHS_UTF8 = RenderGlyphs(
@@ -101,6 +103,8 @@ GLYPHS_UTF8 = RenderGlyphs(
     badge_conn_error=" ✕ CONN ERROR ",
     badge_demo=" ● DEMO MODE ",
     warn_icon="⚠️  ",
+    sort_asc="▲",
+    sort_desc="▼",
 )
 
 GLYPHS_ASCII = RenderGlyphs(
@@ -119,6 +123,8 @@ GLYPHS_ASCII = RenderGlyphs(
     badge_conn_error=" [X] CONN ERROR ",
     badge_demo=" * DEMO MODE ",
     warn_icon="[!] ",
+    sort_asc="^",
+    sort_desc="v",
 )
 
 
@@ -847,9 +853,15 @@ class TUIRenderer:
         title = f" ACTIVE TRAINS ({train_count}){filter_tag} "
         safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
-        # Table header row
+        # Table header row with active sort direction indicator
         # Layout: [Cursor:2][#:3][TRAIN:6][TYPE:5][SPD:5][DLY:5][ST:4]
-        table_hdr = " #   TRAIN  TYPE  SPD   DLY  ST"
+        sort_mode = getattr(snapshot, "sort_mode", RosterSortMode.TRAIN_ID)
+        if sort_mode == RosterSortMode.SPEED:
+            table_hdr = f" #   TRAIN  TYPE  SPD{self.glyphs.sort_desc}  DLY  ST"
+        elif sort_mode == RosterSortMode.DELAY:
+            table_hdr = f" #   TRAIN  TYPE  SPD   DLY{self.glyphs.sort_desc} ST"
+        else:
+            table_hdr = f" #   TRAIN{self.glyphs.sort_asc} TYPE  SPD   DLY  ST"
         safe_addstr(win, 1, 1, table_hdr, header_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
         inner_h = max_y - 2
@@ -1048,7 +1060,7 @@ class TUIRenderer:
 
         # Keybindings cheat sheet
         follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
-        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
         safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         # Connection status badge
@@ -1085,7 +1097,7 @@ class TUIRenderer:
             height: Total terminal screen height.
             width: Total terminal screen width.
         """
-        box_h = min(22, max(16, height - 2))
+        box_h = min(23, max(17, height - 2))
         box_w = min(74, max(46, width - 4))
         start_y = max(1, (height - box_h) // 2)
         start_x = max(1, (width - box_w) // 2)
@@ -1122,6 +1134,7 @@ class TUIRenderer:
             ]),
             ("TRAIN SELECTION & TRACKING", [
                 ("Tab, n / p", "Select Next / Previous train in active roster"),
+                ("s / S", "Cycle train roster sorting (Train ID, Speed, Delay)"),
                 ("f / F", "Toggle real-time auto-follow camera lock"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),
