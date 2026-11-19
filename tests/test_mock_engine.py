@@ -87,6 +87,75 @@ class TestRailNetworkTopology(unittest.TestCase):
                     f"Non-increasing distance in {cid} at segment {i}",
                 )
 
+    def test_high_density_vertex_counts_and_chord_bounds(self):
+        """Verify high-density track polyline vertex counts and segment chord bounds."""
+        total_vertices = sum(len(t.points) for t in self.tracks.values())
+        self.assertGreaterEqual(
+            total_vertices,
+            300,
+            f"Expected at least 300 total track vertices across corridors, got {total_vertices}",
+        )
+        pathe = self.tracks["pathe-mainline"]
+        self.assertGreaterEqual(
+            len(pathe.points),
+            100,
+            f"Expected at least 100 vertices on pathe-mainline, got {len(pathe.points)}",
+        )
+
+    def test_all_stations_anchored_to_track_vertices(self):
+        """Verify every station in stations.json is anchored directly to a track vertex (<= 50m)."""
+        self.assertGreaterEqual(
+            len(self.stations),
+            61,
+            f"Expected at least 61 stations (including intermediate nodes), got {len(self.stations)}",
+        )
+        all_track_points = [pt for track in self.tracks.values() for pt in track.points]
+
+        for station_id, st in self.stations.items():
+            min_dist_m = min(haversine_distance(st.point, pt) for pt in all_track_points)
+            self.assertLessEqual(
+                min_dist_m,
+                50.0,
+                f"Station {station_id} ({st.name_en}) is {min_dist_m:.1f}m away from nearest track vertex",
+            )
+
+    def test_boeotia_and_attica_case_study_alignments(self):
+        """Verify Case Study A (Eleonas/Tanagra) and Case Study B (Afidnes/Sfendali) track alignments."""
+        pathe_pts = self.tracks["pathe-mainline"].points
+        chalkida_pts = self.tracks["proastiakos-chalkida"].points
+
+        case_study_waypoints = {
+            "Afidnes (AFI)": GeoPoint(lat=38.1877, lng=23.8446),
+            "Sfendali (SFE)": GeoPoint(lat=38.2356, lng=23.7845),
+            "Tanagra (TAN)": GeoPoint(lat=38.3400, lng=23.5814),
+            "Eleonas (ELE)": GeoPoint(lat=38.3747, lng=23.4635),
+        }
+        for label, target_pt in case_study_waypoints.items():
+            min_dist_m = min(haversine_distance(target_pt, pt) for pt in pathe_pts)
+            self.assertLessEqual(
+                min_dist_m,
+                50.0,
+                f"PATHE mainline misses {label} by {min_dist_m:.1f}m",
+            )
+
+        # Shared trunk from SKA (38.0744, 23.7381) to Inoi (38.3194, 23.6067) must be identical
+        ska_pt = GeoPoint(lat=38.0744, lng=23.7381)
+        inoi_pt = GeoPoint(lat=38.3194, lng=23.6067)
+
+        pathe_ska_idx = pathe_pts.index(ska_pt)
+        pathe_inoi_idx = pathe_pts.index(inoi_pt)
+        chalkida_ska_idx = chalkida_pts.index(ska_pt)
+        chalkida_inoi_idx = chalkida_pts.index(inoi_pt)
+
+        pathe_trunk = pathe_pts[pathe_ska_idx : pathe_inoi_idx + 1]
+        chalkida_trunk = chalkida_pts[chalkida_ska_idx : chalkida_inoi_idx + 1]
+        self.assertEqual(
+            pathe_trunk,
+            chalkida_trunk,
+            "PATHE mainline and Proastiakos Chalkida must share identical vertices between SKA and Inoi",
+        )
+        self.assertGreaterEqual(len(pathe_trunk), 15)
+
 
 class TestGeodesicMath(unittest.TestCase):
     """Test Haversine distance, forward bearing, and polyline interpolation."""

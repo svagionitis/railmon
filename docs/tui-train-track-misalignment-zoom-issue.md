@@ -190,3 +190,8 @@ Eliminates artificial 50% vertical compression and restores circular conformal g
    - Verify that physical trains running on those corridors render within $\le 1$ character cell of the drawn track line.
 2. **Regression Testing**:
    - Execute the test suite ([`tests/test_mock_engine.py`](../tests/test_mock_engine.py) and [`tests/test_tui_geo.py`](../tests/test_tui_geo.py)) to ensure synthetic simulator kinematics and coordinate bounds remain 100% compliant.
+
+---
+
+## 7. Related Implementation Plan
+- [Implementation Plan — TUI Live Train Telemetry and Vector Track Misalignment During Viewport Zoom](./tui-train-track-misalignment-zoom-fix-plan.md)
