@@ -624,7 +624,17 @@ Examples:
     parser.add_argument(
         "--tui",
         action="store_true",
-        help="Launch full-screen interactive curses terminal map dashboard.",
+        help="Launch full-screen interactive curses terminal map dashboard (auto-falls back to plain stream if non-TTY or unsupported).",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Force headless plain-text streaming mode (suppresses interactive curses TUI even if --tui is set).",
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run in headless background daemon mode (alias for --headless).",
     )
     parser.add_argument(
         "--demo",
@@ -783,6 +793,16 @@ Examples:
     return parser
 
 
+def is_tty_supported() -> bool:
+    """Validate whether stdout supports interactive full-screen curses rendering.
+
+    Returns:
+        bool: True if sys.stdout is an interactive terminal with an active TTY;
+              False if redirected to a pipe, regular file, or null device.
+    """
+    return bool(hasattr(sys.stdout, "isatty") and sys.stdout.isatty())
+
+
 def run_tui_mode(
     demo: bool = False,
     fps: float = 20.0,
@@ -795,6 +815,10 @@ def run_tui_mode(
 ) -> None:
     """Launch the interactive curses terminal map application.
 
+    If standard output is not a TTY or curses initialization fails (e.g. missing
+    terminfo database, container environment, or missing windows-curses), automatically
+    falls back to plain-text streaming mode.
+
     Args:
         demo: If True, run offline mock simulation; otherwise connect to live SSE stream.
         fps: Target frames per second for curses refresh loop.
@@ -802,19 +826,53 @@ def run_tui_mode(
         record: If True, persist incoming telemetry to SQLite in background.
         db_path: Destination SQLite database file path when recording is active.
         enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
+        retention_days: Optional telemetry retention window in days.
+        archive_path: Optional target SQLite database for archived telemetry.
     """
+    if not is_tty_supported():
+        logger.warning(
+            "Terminal environment does not support curses (sys.stdout is not a TTY). Falling back to headless mode."
+        )
+        print(
+            "[WARN] Standard output is not a TTY. Falling back to plain-text stream mode.",
+            file=sys.stderr,
+        )
+        run_plain_stream_mode(
+            demo=demo,
+            reconnect_delay=reconnect_delay,
+            record=record,
+            db_path=db_path,
+            enable_deadband=enable_deadband,
+            retention_days=retention_days,
+            archive_path=archive_path,
+        )
+        return
+
     try:
+        import curses
         from tui.app import run_tui
         from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
         from tui.state import TrainStateStore
         from tui.stream_worker import StreamWorker
     except (ImportError, ModuleNotFoundError) as err:
         if sys.platform == "win32" and "curses" in str(err).lower():
+            logger.warning(
+                "windows-curses is not installed on Windows (%s). Falling back to headless mode.",
+                err,
+            )
             print(
-                "\n[ERROR] The interactive terminal dashboard (--tui) requires 'windows-curses' on Windows.\n"
-                "Please install it with:\n"
-                "    pip install windows-curses\n",
+                "\n[WARN] The interactive terminal dashboard (--tui) requires 'windows-curses' on Windows.\n"
+                "Falling back to plain-text stream mode. To enable TUI, run: pip install windows-curses\n",
                 file=sys.stderr,
+            )
+            run_plain_stream_mode(
+                demo=demo,
+                reconnect_delay=reconnect_delay,
+                record=record,
+                db_path=db_path,
+                enable_deadband=enable_deadband,
+                retention_days=retention_days,
+                archive_path=archive_path,
             )
             return
         raise
@@ -863,7 +921,9 @@ def run_tui_mode(
     # 4. Start background ingestion thread
     worker.start()
 
-    # 5. Execute curses event loop with terminal protection
+    # 5. Execute curses event loop with terminal protection and fallback
+    fallback_needed = False
+    curses_error_cls = getattr(curses, "error", Exception)
     with install_signal_handlers() as stop_event:
         try:
             run_tui(
@@ -874,6 +934,16 @@ def run_tui_mode(
                 target_fps=fps,
                 stop_event=stop_event,
             )
+        except curses_error_cls as exc:
+            logger.warning(
+                "Terminal environment does not support curses (%s). Falling back to headless mode.",
+                exc,
+            )
+            print(
+                f"\n[WARN] Terminal environment does not support curses ({exc}). Falling back to plain-text stream mode.\n",
+                file=sys.stderr,
+            )
+            fallback_needed = True
         finally:
             stop_event.set()
             worker.stop()
@@ -881,6 +951,17 @@ def run_tui_mode(
                 recorder.stop()
             if db:
                 db.close()
+
+    if fallback_needed:
+        run_plain_stream_mode(
+            demo=demo,
+            reconnect_delay=reconnect_delay,
+            record=record,
+            db_path=db_path,
+            enable_deadband=enable_deadband,
+            retention_days=retention_days,
+            archive_path=archive_path,
+        )
 
 
 def run_plain_stream_mode(
@@ -981,6 +1062,8 @@ def run_plain_stream_mode(
             print("\nMonitoring stopped.")
         except KeyboardInterrupt:
             print("\nMonitoring stopped.")
+        except BrokenPipeError:
+            pass
         finally:
             if recorder:
                 recorder.stop()
@@ -1363,7 +1446,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return run_record_mode(**rec_kwargs)
         elif args.mode == "history":
             return run_history_mode(args)
-        elif args.tui:
+        elif args.tui and not (getattr(args, "headless", False) or getattr(args, "daemon", False)):
             is_rec = getattr(args, "record", False)
             if is_rec:
                 enable_deadband = not getattr(args, "no_filter_deadband", False)
@@ -1410,6 +1493,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     except KeyboardInterrupt:
         print("\nProcess interrupted by user.")
+        return 0
+    except BrokenPipeError:
         return 0
 
 

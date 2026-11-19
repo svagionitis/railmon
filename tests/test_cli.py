@@ -134,10 +134,11 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
             self.assertEqual(ret, 0)
             self.assertIn("Process interrupted by user.", mock_stdout.getvalue())
 
+    @patch("train_tracker.is_tty_supported", return_value=True)
     @patch("tui.app.run_tui", side_effect=RuntimeError("Simulated Curses crash"))
     @patch("tui.stream_worker.StreamWorker.start")
     @patch("tui.stream_worker.StreamWorker.stop")
-    def test_tui_worker_cleanup_on_error(self, mock_worker_stop, mock_worker_start, mock_run_tui):
+    def test_tui_worker_cleanup_on_error(self, mock_worker_stop, mock_worker_start, mock_run_tui, mock_is_tty):
         """TC-CLI-12: worker.stop() is guaranteed to execute even if run_tui raises."""
         with self.assertRaises(RuntimeError):
             run_tui_mode(demo=True)
@@ -150,9 +151,11 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
         train_tracker.demo_cli()
         mock_main.assert_called_once()
 
+    @patch("train_tracker.is_tty_supported", return_value=True)
+    @patch("train_tracker.run_plain_stream_mode")
     @patch("sys.platform", "win32")
-    def test_run_tui_mode_windows_missing_curses(self):
-        """Verify friendly error message on Windows when windows-curses is missing."""
+    def test_run_tui_mode_windows_missing_curses(self, mock_plain, mock_is_tty):
+        """Verify friendly error message and fallback on Windows when windows-curses is missing."""
         orig_import = __import__
 
         def fake_import(name, *args, **kwargs):
@@ -164,6 +167,15 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
             with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
                 train_tracker.run_tui_mode(demo=True)
                 self.assertIn("windows-curses", mock_stderr.getvalue())
+                mock_plain.assert_called_once_with(
+                    demo=True,
+                    reconnect_delay=3.0,
+                    record=False,
+                    db_path="railway_history.db",
+                    enable_deadband=True,
+                    retention_days=None,
+                    archive_path=None,
+                )
 
 
 class TestCLISchedulesResilience(unittest.TestCase):
@@ -206,6 +218,146 @@ class TestCLISchedulesResilience(unittest.TestCase):
             with patch("sys.stderr", new_callable=io.StringIO):
                 ret = train_tracker.main(["schedules"])
                 self.assertEqual(ret, 1)
+
+
+class TestCLITTYAndHeadlessFallback(unittest.TestCase):
+    """Test suite for TTY detection, curses.error fallback, and headless CLI flags."""
+
+    def test_is_tty_supported_true_and_false(self):
+        """TC-TTY-01: is_tty_supported reflects sys.stdout.isatty status."""
+        with patch("sys.stdout.isatty", return_value=True):
+            self.assertTrue(train_tracker.is_tty_supported())
+
+        with patch("sys.stdout.isatty", return_value=False):
+            self.assertFalse(train_tracker.is_tty_supported())
+
+        mock_stdout = object()
+        with patch("sys.stdout", mock_stdout):
+            self.assertFalse(train_tracker.is_tty_supported())
+
+    def test_run_tui_raises_curses_error_on_non_tty(self):
+        """TC-TTY-02: tui.app.run_tui raises curses.error when sys.stdout is not a TTY."""
+        try:
+            import curses
+            from tui.app import run_tui
+        except ImportError:
+            self.skipTest("curses not available in environment")
+
+        mock_store = MagicMock()
+        mock_worker = MagicMock()
+        with patch("tui.app.is_tty_supported", return_value=False):
+            with self.assertRaises(curses.error) as ctx:
+                run_tui(store=mock_store, worker=mock_worker)
+            self.assertIn("not an interactive TTY", str(ctx.exception))
+
+    @patch("train_tracker.run_plain_stream_mode")
+    @patch("train_tracker.is_tty_supported", return_value=False)
+    def test_run_tui_mode_falls_back_on_non_tty(self, mock_is_tty, mock_plain):
+        """TC-TTY-03: run_tui_mode falls back to run_plain_stream_mode when stdout is not a TTY."""
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            train_tracker.run_tui_mode(
+                demo=True,
+                reconnect_delay=5.0,
+                record=True,
+                db_path="test_non_tty.db",
+                enable_deadband=False,
+                retention_days=14,
+                archive_path="test_arch.db",
+            )
+            self.assertIn("Standard output is not a TTY", mock_stderr.getvalue())
+            mock_plain.assert_called_once_with(
+                demo=True,
+                reconnect_delay=5.0,
+                record=True,
+                db_path="test_non_tty.db",
+                enable_deadband=False,
+                retention_days=14,
+                archive_path="test_arch.db",
+            )
+
+    @patch("train_tracker.run_plain_stream_mode")
+    @patch("train_tracker.is_tty_supported", return_value=True)
+    def test_run_tui_mode_falls_back_on_curses_error(self, mock_is_tty, mock_plain):
+        """TC-TTY-04: run_tui_mode catches curses.error and falls back to plain stream."""
+        try:
+            import curses
+            curses_err = curses.error("setupterm: could not find terminal")
+        except ImportError:
+            curses_err = Exception("curses error")
+
+        with patch("tui.app.run_tui", side_effect=curses_err):
+            with patch("tui.stream_worker.StreamWorker.start") as mock_start:
+                with patch("tui.stream_worker.StreamWorker.stop") as mock_stop:
+                    with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                        train_tracker.run_tui_mode(
+                            demo=True,
+                            reconnect_delay=4.0,
+                            record=False,
+                        )
+                        self.assertIn("Terminal environment does not support curses", mock_stderr.getvalue())
+                        mock_start.assert_called_once()
+                        mock_stop.assert_called_once()
+                        mock_plain.assert_called_once_with(
+                            demo=True,
+                            reconnect_delay=4.0,
+                            record=False,
+                            db_path="railway_history.db",
+                            enable_deadband=True,
+                            retention_days=None,
+                            archive_path=None,
+                        )
+
+    @patch("train_tracker.run_plain_stream_mode")
+    @patch("train_tracker.run_tui_mode")
+    def test_headless_and_daemon_flags_override_tui(self, mock_tui, mock_plain):
+        """TC-TTY-05: --headless and --daemon bypass TUI and dispatch to plain stream."""
+        # 1. --headless overrides --tui
+        ret = main(["--tui", "--headless", "--demo"])
+        self.assertEqual(ret, 0)
+        mock_tui.assert_not_called()
+        mock_plain.assert_called_once_with(demo=True, reconnect_delay=3.0)
+        mock_plain.reset_mock()
+
+        # 2. --daemon overrides --tui
+        ret = main(["--tui", "--daemon"])
+        self.assertEqual(ret, 0)
+        mock_tui.assert_not_called()
+        mock_plain.assert_called_once_with(demo=False, reconnect_delay=3.0)
+        mock_plain.reset_mock()
+
+        # 3. standalone --headless
+        ret = main(["--headless"])
+        self.assertEqual(ret, 0)
+        mock_tui.assert_not_called()
+        mock_plain.assert_called_once_with(demo=False, reconnect_delay=3.0)
+
+    @patch("train_tracker.run_plain_stream_mode")
+    @patch("train_tracker.run_tui_mode")
+    def test_headless_with_record_forwards_storage_parameters(self, mock_tui, mock_plain):
+        """TC-TTY-06: --headless with --record passes storage options to run_plain_stream_mode."""
+        ret = main([
+            "--tui",
+            "--headless",
+            "--record",
+            "--db",
+            "custom.db",
+            "--no-filter-deadband",
+            "--retention-days",
+            "7",
+            "--archive-db",
+            "my_arch.db",
+        ])
+        self.assertEqual(ret, 0)
+        mock_tui.assert_not_called()
+        mock_plain.assert_called_once_with(
+            demo=False,
+            reconnect_delay=3.0,
+            record=True,
+            db_path="custom.db",
+            enable_deadband=False,
+            retention_days=7,
+            archive_path="my_arch.db",
+        )
 
 
 if __name__ == "__main__":

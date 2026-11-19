@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 4 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 3 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
@@ -19,7 +19,7 @@
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  | 10/10  | P0-5 & P1-2 fixed; user_version & integrity  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
-| Resilience & Stream Handling      |  9/10  | P0-2 & P1-5 fixed; TTY fallback pending      |
+| Resilience & Stream Handling      | 10/10  | P0-2, P1-5 & P1-6 fixed; TTY fallback sound  |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
 | Security & Data Protection        |  9/10  | P1-1 & P1-3 fixed; 0600 umask & path safe    |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `287 passed in 36.5s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `293 passed in 44.3s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -361,9 +361,10 @@ sequenceDiagram
 - **Issue:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L23). `urllib.error.HTTPError` on status 429 is not caught to inspect `err.headers.get("Retry-After")` (with a 30s minimum backoff), and REST subcommands (`railmon schedules`) crash with raw tracebacks on network failure.
 - **Fix:** Introduced `RailwayAPIError` and RFC 7231 / RFC 9110 compliant `parse_retry_after` parser enforcing a $\ge 30.0\text{s}$ minimum backoff. Refactored `RailwayGovClient._get` with automated retries (`max_retries=3`) and bounded exponential backoff with jitter for 5xx/network errors and automatic rate limit pauses on 429. Upgraded `RailwayGovClient.stream_train_positions` and `StreamWorker` with rate limit backoff inspection and updated worker defaults to `base_backoff_sec=3.0` and `max_backoff_sec=60.0`. Hardened `run_schedules_mode()` and `main()` to trap network failures gracefully and return exit code 1 without unhandled stack traces.
 
-### P1-6: Missing TTY Detection & Headless Curses Fallback
-- **Location:** [`run_tui_mode`](../train_tracker.py#L342-L430), [`run_tui`](../tui/app.py#L492-L521)
+### P1-6: Missing TTY Detection & Headless Curses Fallback [RESOLVED]
+- **Location:** [`run_tui_mode`](../train_tracker.py#L796-L955), [`run_tui`](../tui/app.py#L499-L541), [`build_parser`](../train_tracker.py#L624-L640), [`main`](../train_tracker.py#L1445-L1495) | **Plan:** [`./p1-6-tty-detection-headless-curses-fallback-fix-plan.md`](./p1-6-tty-detection-headless-curses-fallback-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L5-L17). `sys.stdout.isatty()` is never checked before initializing curses, and `curses.error` (e.g., `TERM=dumb` or missing terminfo in containers) is not caught to fall back to `run_plain_stream_mode()`.
+- **Fix:** Implemented `is_tty_supported()` in [`../tui/app.py`](../tui/app.py) and [`../train_tracker.py`](../train_tracker.py) validating `sys.stdout.isatty()`. Guarded `run_tui()` to raise `curses.error` when stdout is not a TTY. Added pre-flight TTY verification in `run_tui_mode()` and caught `curses.error` during curses execution to cleanly tear down worker threads, checkpoint SQLite WAL, and close DB connections before seamlessly falling back to `run_plain_stream_mode()`. Added top-level `--headless` and `--daemon` override flags in `build_parser()` and `main()`.
 
 ### P1-7: Missing ASCII Fallback for Non-UTF-8 Terminals & Unsafe `init_pair`
 - **Location:** [`BrailleCanvas.render_rows`](../tui/geo.py#L401-L415), [`TUIRenderer.init_colors`](../tui/renderer.py#L434-L463), [`TUIRenderer.render_map`](../tui/renderer.py#L590-L684)

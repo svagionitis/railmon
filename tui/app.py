@@ -10,6 +10,7 @@ import curses
 from enum import Enum, auto
 import os
 import signal
+import sys
 import threading
 import time
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -495,6 +496,16 @@ class TUIApp:
                 pass
 
 
+def is_tty_supported() -> bool:
+    """Validate whether stdout supports interactive full-screen curses rendering.
+
+    Returns:
+        bool: True if sys.stdout is an interactive terminal with an active TTY;
+              False if redirected to a pipe, regular file, or null device.
+    """
+    return bool(hasattr(sys.stdout, "isatty") and sys.stdout.isatty())
+
+
 def run_tui(
     store: TrainStateStore,
     worker: StreamWorker,
@@ -512,7 +523,13 @@ def run_tui(
         tracks: Optional list of TrackPolyline objects.
         target_fps: Rendering target frames per second.
         stop_event: Optional external shutdown event triggered by OS signals.
+
+    Raises:
+        curses.error: If standard output is not an interactive TTY or curses initialization fails.
     """
+    if not is_tty_supported():
+        raise curses.error("Standard output is not an interactive TTY")
+
     def _curses_main(stdscr: Any) -> None:
         app = TUIApp(
             stdscr=stdscr,
