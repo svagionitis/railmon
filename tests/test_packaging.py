@@ -1,0 +1,84 @@
+"""Tests for package metadata, PEP 621 pyproject.toml, and single-source versioning."""
+
+import re
+import unittest
+from pathlib import Path
+
+import train_tracker
+from storage.recorder import RecorderConfig
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+class TestPackagingAndVersioning(unittest.TestCase):
+    """Test suite validating single-source versioning and pyproject.toml packaging."""
+
+    def test_single_source_version_format(self):
+        """TC-PKG-01: train_tracker.__version__ exists and conforms to SemVer 2.0.0."""
+        self.assertTrue(hasattr(train_tracker, "__version__"))
+        version = train_tracker.__version__
+        self.assertIsInstance(version, str)
+        semver_pattern = r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"
+        self.assertRegex(version, semver_pattern, f"Version {version!r} is not valid SemVer")
+
+    def test_author_metadata_exists(self):
+        """TC-PKG-02: train_tracker.__author__ is defined."""
+        self.assertTrue(hasattr(train_tracker, "__author__"))
+        self.assertIsInstance(train_tracker.__author__, str)
+        self.assertTrue(len(train_tracker.__author__) > 0)
+
+    def test_recorder_config_inherits_version(self):
+        """TC-PKG-03: RecorderConfig.client_version dynamically matches train_tracker.__version__."""
+        config = RecorderConfig()
+        self.assertEqual(config.client_version, train_tracker.__version__)
+
+    def test_pyproject_toml_exists_and_configured(self):
+        """TC-PKG-04: pyproject.toml exists and specifies correct build backend and entrypoint."""
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        self.assertTrue(pyproject_path.exists(), "pyproject.toml not found at repo root")
+        content = pyproject_path.read_text(encoding="utf-8")
+
+        # Verify build-system
+        self.assertIn('build-backend = "setuptools.build_meta"', content)
+        self.assertIn("setuptools>=61.0.0", content)
+
+        # Verify dynamic versioning
+        self.assertIn('dynamic = ["version"]', content)
+        self.assertIn('version = { attr = "train_tracker.__version__" }', content)
+
+        # Verify entry points
+        self.assertIn('railmon = "train_tracker:main"', content)
+
+        # Verify package data
+        self.assertIn('"tui.data" = ["*.json"]', content)
+
+    def test_runtime_dependencies_purity(self):
+        """TC-PKG-05: Runtime dependencies enforce zero PyPI dependencies on Linux/macOS."""
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        content = pyproject_path.read_text(encoding="utf-8")
+
+        # Extract dependencies section
+        dep_match = re.search(r"dependencies\s*=\s*\[(.*?)\]", content, re.DOTALL)
+        self.assertIsNotNone(dep_match, "dependencies table not found in pyproject.toml")
+        deps_block = dep_match.group(1).strip()
+        lines = [line.strip().strip(",").strip("\"'") for line in deps_block.splitlines() if line.strip()]
+
+        for dep in lines:
+            if not dep:
+                continue
+            # The only permitted runtime dependency is windows-curses on win32
+            self.assertTrue(
+                "windows-curses" in dep and "win32" in dep,
+                f"Unexpected runtime dependency in pyproject.toml: {dep}"
+            )
+
+    def test_package_data_files_exist(self):
+        """TC-PKG-06: Package data files referenced in packaging exist on filesystem."""
+        stations_file = REPO_ROOT / "tui" / "data" / "stations.json"
+        tracks_file = REPO_ROOT / "tui" / "data" / "tracks.json"
+        self.assertTrue(stations_file.exists(), "tui/data/stations.json missing")
+        self.assertTrue(tracks_file.exists(), "tui/data/tracks.json missing")
+
+
+if __name__ == "__main__":
+    unittest.main()

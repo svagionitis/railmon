@@ -25,6 +25,9 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Generator, List, Optional
 
+__version__ = "1.0.0"
+__author__ = "Hellenic Train Tracking Contributors"
+
 logging.getLogger("railmon").addHandler(logging.NullHandler())
 logger = logging.getLogger("railmon.train_tracker")
 
@@ -865,7 +868,7 @@ Examples:
         "-v",
         "--version",
         action="version",
-        version="%(prog)s 1.0.0",
+        version=f"%(prog)s {__version__}",
     )
 
     subparsers = parser.add_subparsers(dest="mode")

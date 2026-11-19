@@ -60,6 +60,48 @@ pip install -r requirements.txt
 > It is strongly recommended to run `railmon` inside **[Windows Terminal](https://aka.ms/terminal)**.
 > If running in a standalone PowerShell / Command Prompt window (`conhost`), ensure your console font is set to **Cascadia Mono**, **Cascadia Code**, or a Unicode font with Braille glyph coverage (e.g., right-click window title bar -> *Properties* -> *Font* -> select *Cascadia Mono*). Otherwise, Braille track patterns (`U+2800`–`U+28FF`) and directional glyphs may appear as empty boxes (`□`).
 
+### Package Installation & Build (`pyproject.toml`)
+
+`railmon` conforms to modern Python packaging standards (PEP 517 / PEP 518 / PEP 621) via [`pyproject.toml`](./pyproject.toml). You can install it directly into your environment or build reusable wheel and source distributions.
+
+#### Install from Local Source
+```bash
+# Install railmon as a CLI command into your active Python environment
+pip install .
+
+# Or install in an isolated application environment with pipx
+pipx install .
+
+# Install in editable mode for development (with testing and linting tools)
+pip install -e ".[dev]"
+```
+
+After installation, the `railmon` binary is available directly on your `$PATH`:
+```bash
+railmon --version
+railmon --tui
+```
+
+#### Build Wheel and Source Distribution
+To assemble standalone distribution artifacts (`.whl` and `.tar.gz`) for release or offline deployment:
+
+```bash
+# 1. Install standard build frontend (if not already installed)
+pip install build
+
+# 2. Build the wheel and sdist archives
+python -m build
+
+# 3. Inspect the generated archives in dist/
+ls -lh dist/
+# Output:
+#   dist/railmon-1.0.0-py3-none-any.whl
+#   dist/railmon-1.0.0.tar.gz
+
+# 4. Install the built wheel artifact
+pip install dist/railmon-1.0.0-py3-none-any.whl
+```
+
 ---
 
 ### Launch Interactive Terminal Dashboard (TUI)
@@ -142,6 +184,7 @@ railmon schedules      # Windows
 ## Repository Architecture
 
 - [`railmon`](./railmon): Executable wrapper script.
+- [`pyproject.toml`](./pyproject.toml): PEP 517 / PEP 518 / PEP 621 packaging specification, dynamic versioning, and unified tool configuration.
 - [`train_tracker.py`](./train_tracker.py): Core HTTP/SSE API client, data models, and CLI argument parsing.
 - [`tui/`](./tui/): Modular curses terminal user interface:
   - [`tui/geo.py`](./tui/geo.py): EPSG:4326 to Braille canvas (2x4 dot matrix) projection engine.

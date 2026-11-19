@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Union
 from storage.db import Database
 from storage.filter import DeadbandConfig, DeadbandFilter
 from storage.models import TelemetryHistoryRow
-from train_tracker import TrainPosition
+from train_tracker import TrainPosition, __version__
 
 logger = logging.getLogger("railmon." + __name__)
 
@@ -31,7 +31,7 @@ class RecorderConfig:
     queue_maxsize: int = 10000               # Bounded buffer to avoid memory bloat
     enable_deadband: bool = True             # Enable coordinate deadband filtering
     deadband_config: Optional[DeadbandConfig] = None
-    client_version: str = "1.0.0"
+    client_version: str = __version__
     mode: str = "live"                       # 'live' or 'demo'
     retention_days: Optional[int] = None     # Rolling retention window in days (archives older telemetry)
     archive_path: Optional[str] = None       # Target SQLite archive file path (defaults to <db_stem>_archive.db)
