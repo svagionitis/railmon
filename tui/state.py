@@ -29,6 +29,14 @@ class ConnectionStatus(Enum):
     ERROR = auto()  # Terminal unrecoverable error
 
 
+class InputMode(Enum):
+    """Input handling modes for application event loop."""
+
+    NORMAL = auto()  # General navigation, camera pan/zoom, presets, selection
+    SEARCH = auto()  # Interactive live filter text input in status bar
+    HELP = auto()  # Fullscreen keybinding reference dialog overlay
+
+
 @dataclass(frozen=True)
 class HistoricalBreadcrumb:
     """A historical geographic point recorded during train movement."""

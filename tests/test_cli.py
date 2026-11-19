@@ -5,7 +5,15 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import train_tracker
-from train_tracker import build_parser, main, run_tui_mode
+from train_tracker import (
+    DeadbandFilterMode,
+    GlyphMode,
+    RecordingMode,
+    TelemetrySource,
+    build_parser,
+    main,
+    run_tui_mode,
+)
 
 
 class TestCLIArgumentParser(unittest.TestCase):
@@ -106,20 +114,20 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
 
     @patch("train_tracker.run_tui_mode")
     def test_main_routes_to_tui_live(self, mock_run_tui):
-        """TC-CLI-02b: main() routes --tui to run_tui_mode(demo=False)."""
+        """TC-CLI-02b: main() routes --tui to run_tui_mode(source=TelemetrySource.LIVE)."""
         ret = main(["--tui", "--fps", "25.0"])
         self.assertEqual(ret, 0)
         mock_run_tui.assert_called_once_with(
-            demo=False, fps=25.0, reconnect_delay=3.0
+            source=TelemetrySource.LIVE, fps=25.0, reconnect_delay=3.0, glyph_mode=GlyphMode.AUTO
         )
 
     @patch("train_tracker.run_tui_mode")
     def test_main_routes_to_tui_demo(self, mock_run_tui):
-        """TC-CLI-03b: main() routes --tui --demo to run_tui_mode(demo=True)."""
+        """TC-CLI-03b: main() routes --tui --demo to run_tui_mode(source=TelemetrySource.DEMO)."""
         ret = main(["--tui", "--demo"])
         self.assertEqual(ret, 0)
         mock_run_tui.assert_called_once_with(
-            demo=True, fps=15.0, reconnect_delay=3.0
+            source=TelemetrySource.DEMO, fps=15.0, reconnect_delay=3.0, glyph_mode=GlyphMode.AUTO
         )
 
     @patch("train_tracker.run_plain_stream_mode")
@@ -127,14 +135,14 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
         """TC-CLI-04b: main() routes default to run_plain_stream_mode."""
         ret = main([])
         self.assertEqual(ret, 0)
-        mock_plain.assert_called_once_with(demo=False, reconnect_delay=3.0)
+        mock_plain.assert_called_once_with(source=TelemetrySource.LIVE, reconnect_delay=3.0)
 
     @patch("train_tracker.run_plain_stream_mode")
     def test_main_routes_to_plain_demo(self, mock_plain):
-        """TC-CLI-04c: main() routes --demo to run_plain_stream_mode(demo=True)."""
+        """TC-CLI-04c: main() routes --demo to run_plain_stream_mode(source=TelemetrySource.DEMO)."""
         ret = main(["--demo", "--reconnect-delay", "4.0"])
         self.assertEqual(ret, 0)
-        mock_plain.assert_called_once_with(demo=True, reconnect_delay=4.0)
+        mock_plain.assert_called_once_with(source=TelemetrySource.DEMO, reconnect_delay=4.0)
 
     @patch("train_tracker.run_schedules_mode")
     def test_main_routes_to_schedules(self, mock_schedules):
@@ -185,11 +193,11 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
                 train_tracker.run_tui_mode(demo=True)
                 self.assertIn("windows-curses", mock_stderr.getvalue())
                 mock_plain.assert_called_once_with(
-                    demo=True,
+                    source=TelemetrySource.DEMO,
                     reconnect_delay=3.0,
-                    record=False,
+                    recording=RecordingMode.DISABLED,
                     db_path="railway_history.db",
-                    enable_deadband=True,
+                    deadband=DeadbandFilterMode.ENABLED,
                     retention_days=None,
                     archive_path=None,
                 )
@@ -273,21 +281,21 @@ class TestCLITTYAndHeadlessFallback(unittest.TestCase):
         """TC-TTY-03: run_tui_mode falls back to run_plain_stream_mode when stdout is not a TTY."""
         with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
             train_tracker.run_tui_mode(
-                demo=True,
+                source=TelemetrySource.DEMO,
                 reconnect_delay=5.0,
-                record=True,
+                recording=RecordingMode.ENABLED,
                 db_path="test_non_tty.db",
-                enable_deadband=False,
+                deadband=DeadbandFilterMode.DISABLED,
                 retention_days=14,
                 archive_path="test_arch.db",
             )
             self.assertIn("Standard output is not a TTY", mock_stderr.getvalue())
             mock_plain.assert_called_once_with(
-                demo=True,
+                source=TelemetrySource.DEMO,
                 reconnect_delay=5.0,
-                record=True,
+                recording=RecordingMode.ENABLED,
                 db_path="test_non_tty.db",
-                enable_deadband=False,
+                deadband=DeadbandFilterMode.DISABLED,
                 retention_days=14,
                 archive_path="test_arch.db",
             )
@@ -307,19 +315,19 @@ class TestCLITTYAndHeadlessFallback(unittest.TestCase):
                 with patch("tui.stream_worker.StreamWorker.stop") as mock_stop:
                     with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
                         train_tracker.run_tui_mode(
-                            demo=True,
+                            source=TelemetrySource.DEMO,
                             reconnect_delay=4.0,
-                            record=False,
+                            recording=RecordingMode.DISABLED,
                         )
                         self.assertIn("Terminal environment does not support curses", mock_stderr.getvalue())
                         mock_start.assert_called_once()
                         mock_stop.assert_called_once()
                         mock_plain.assert_called_once_with(
-                            demo=True,
+                            source=TelemetrySource.DEMO,
                             reconnect_delay=4.0,
-                            record=False,
+                            recording=RecordingMode.DISABLED,
                             db_path="railway_history.db",
-                            enable_deadband=True,
+                            deadband=DeadbandFilterMode.ENABLED,
                             retention_days=None,
                             archive_path=None,
                         )
@@ -332,21 +340,21 @@ class TestCLITTYAndHeadlessFallback(unittest.TestCase):
         ret = main(["--tui", "--headless", "--demo"])
         self.assertEqual(ret, 0)
         mock_tui.assert_not_called()
-        mock_plain.assert_called_once_with(demo=True, reconnect_delay=3.0)
+        mock_plain.assert_called_once_with(source=TelemetrySource.DEMO, reconnect_delay=3.0)
         mock_plain.reset_mock()
 
         # 2. --daemon overrides --tui
         ret = main(["--tui", "--daemon"])
         self.assertEqual(ret, 0)
         mock_tui.assert_not_called()
-        mock_plain.assert_called_once_with(demo=False, reconnect_delay=3.0)
+        mock_plain.assert_called_once_with(source=TelemetrySource.LIVE, reconnect_delay=3.0)
         mock_plain.reset_mock()
 
         # 3. standalone --headless
         ret = main(["--headless"])
         self.assertEqual(ret, 0)
         mock_tui.assert_not_called()
-        mock_plain.assert_called_once_with(demo=False, reconnect_delay=3.0)
+        mock_plain.assert_called_once_with(source=TelemetrySource.LIVE, reconnect_delay=3.0)
 
     @patch("train_tracker.run_plain_stream_mode")
     @patch("train_tracker.run_tui_mode")
@@ -367,11 +375,11 @@ class TestCLITTYAndHeadlessFallback(unittest.TestCase):
         self.assertEqual(ret, 0)
         mock_tui.assert_not_called()
         mock_plain.assert_called_once_with(
-            demo=False,
+            source=TelemetrySource.LIVE,
             reconnect_delay=3.0,
-            record=True,
+            recording=RecordingMode.ENABLED,
             db_path="custom.db",
-            enable_deadband=False,
+            deadband=DeadbandFilterMode.DISABLED,
             retention_days=7,
             archive_path="my_arch.db",
         )
@@ -386,10 +394,10 @@ class TestCLIASCIIFallbackRouting(unittest.TestCase):
         ret = main(["--tui", "--ascii"])
         self.assertEqual(ret, 0)
         mock_tui.assert_called_once_with(
-            demo=False,
+            source=TelemetrySource.LIVE,
             fps=15.0,
             reconnect_delay=3.0,
-            ascii_mode=True,
+            glyph_mode=GlyphMode.ASCII,
         )
 
     @patch("train_tracker.run_tui_mode")
@@ -398,9 +406,10 @@ class TestCLIASCIIFallbackRouting(unittest.TestCase):
         ret = main(["--tui"])
         self.assertEqual(ret, 0)
         mock_tui.assert_called_once_with(
-            demo=False,
+            source=TelemetrySource.LIVE,
             fps=15.0,
             reconnect_delay=3.0,
+            glyph_mode=GlyphMode.AUTO,
         )
 
     @patch("train_tracker.is_tty_supported", return_value=True)

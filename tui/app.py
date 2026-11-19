@@ -29,17 +29,16 @@ from tui.geo import (
     Viewport,
 )
 from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_tracks
-from tui.renderer import PaneGeometry, TUIRenderer
-from tui.state import ConnectionStatus, StateSnapshot, TrainStateStore
+from tui.renderer import HelpOverlay, PaneGeometry, PlaybackState, TUIRenderer
+from tui.state import ConnectionStatus, InputMode, StateSnapshot, TrainStateStore
 from tui.stream_worker import StreamWorker
 
 
-class InputMode(Enum):
-    """Input handling modes for application event loop."""
+class CycleDirection(Enum):
+    """Direction for cycling cursor selection through active train roster."""
 
-    NORMAL = auto()  # General navigation, camera pan/zoom, presets, selection
-    SEARCH = auto()  # Interactive live filter text input in status bar
-    HELP = auto()  # Fullscreen keybinding reference dialog overlay
+    FORWARD = auto()
+    BACKWARD = auto()
 
 
 # Greek railway corridor preset definitions: key -> (BoundingBox, corridor_filter, label)
@@ -268,13 +267,24 @@ class TUIApp:
             if not bbox.contains(GeoPoint(lat=pos.lat, lng=pos.lng)):
                 self.store.set_follow_mode(False)
 
-    def cycle_selection(self, forward: bool = True) -> None:
+    def cycle_selection(
+        self,
+        direction: CycleDirection = CycleDirection.FORWARD,
+        *,
+        forward: Optional[bool] = None,
+    ) -> None:
         """Cycle cursor to next or previous train in filtered roster.
 
         Args:
-            forward: True to select next train; False to select previous.
+            direction: Direction to cycle selection (FORWARD or BACKWARD).
+            forward: Optional legacy boolean flag (True -> FORWARD, False -> BACKWARD).
         """
-        if forward:
+        if forward is not None:
+            direction = CycleDirection.FORWARD if forward else CycleDirection.BACKWARD
+        elif isinstance(direction, bool):
+            direction = CycleDirection.FORWARD if direction else CycleDirection.BACKWARD
+
+        if direction == CycleDirection.FORWARD:
             self.store.select_next()
         else:
             self.store.select_prev()
@@ -350,9 +360,9 @@ class TUIApp:
 
         # Train selection cycling
         elif key in (ord("\t"), ord("n")):
-            self.cycle_selection(forward=True)
+            self.cycle_selection(CycleDirection.FORWARD)
         elif key in (curses.KEY_BTAB, ord("p"), ord("P")):
-            self.cycle_selection(forward=False)
+            self.cycle_selection(CycleDirection.BACKWARD)
 
         # Auto-follow camera toggle
         elif key in (ord("f"), ord("F")):
@@ -518,10 +528,10 @@ class TUIApp:
                         snapshot=snapshot,
                         projector=self.projector,
                         msg_rate=self._current_msg_rate,
-                        search_mode=(self.input_mode == InputMode.SEARCH),
+                        input_mode=self.input_mode,
                         search_buffer=self.search_buffer,
-                        show_help=self.show_help,
-                        paused=self.paused,
+                        help_overlay=HelpOverlay.VISIBLE if self.show_help else HelpOverlay.HIDDEN,
+                        playback_state=PlaybackState.PAUSED if self.paused else PlaybackState.RUNNING,
                     )
 
                     # 4b. Flush frame using double buffering (noutrefresh + doupdate)

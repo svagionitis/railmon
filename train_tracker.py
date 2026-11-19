@@ -8,6 +8,7 @@ import argparse
 import contextlib
 from datetime import datetime, timezone
 import email.utils
+from enum import Enum
 import json
 import logging
 import logging.handlers
@@ -27,6 +28,42 @@ from typing import Any, Dict, FrozenSet, Generator, List, Optional
 
 __version__ = "1.0.0"
 __author__ = "Hellenic Train Tracking Contributors"
+
+
+class TelemetrySource(Enum):
+    """Source stream for train positions."""
+
+    LIVE = "live"
+    DEMO = "demo"
+
+
+class RecordingMode(Enum):
+    """SQLite telemetry persistence mode."""
+
+    DISABLED = "disabled"
+    ENABLED = "enabled"
+
+
+class DeadbandFilterMode(Enum):
+    """Deadband filtering mode for stationary coordinate noise suppression."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class OutputVerbosity(Enum):
+    """Console output verbosity level."""
+
+    NORMAL = "normal"
+    QUIET = "quiet"
+
+
+class GlyphMode(Enum):
+    """Terminal character set rendering mode."""
+
+    AUTO = "auto"
+    UTF8 = "utf8"
+    ASCII = "ascii"
 
 logging.getLogger("railmon").addHandler(logging.NullHandler())
 logger = logging.getLogger("railmon.train_tracker")
@@ -987,14 +1024,19 @@ def is_tty_supported() -> bool:
 
 
 def run_tui_mode(
-    demo: bool = False,
+    source: TelemetrySource = TelemetrySource.LIVE,
     fps: float = 15.0,
     reconnect_delay: float = 3.0,
-    record: bool = False,
+    recording: RecordingMode = RecordingMode.DISABLED,
     db_path: str = "railway_history.db",
-    enable_deadband: bool = True,
+    deadband: DeadbandFilterMode = DeadbandFilterMode.ENABLED,
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
+    glyph_mode: GlyphMode = GlyphMode.AUTO,
+    # Backward compatibility shims:
+    demo: Optional[bool] = None,
+    record: Optional[bool] = None,
+    enable_deadband: Optional[bool] = None,
     ascii_mode: Optional[bool] = None,
 ) -> None:
     """Launch the interactive curses terminal map application.
@@ -1004,16 +1046,40 @@ def run_tui_mode(
     falls back to plain-text streaming mode.
 
     Args:
-        demo: If True, run offline mock simulation; otherwise connect to live SSE stream.
+        source: Telemetry source stream (LIVE or DEMO).
         fps: Target frames per second for curses refresh loop.
         reconnect_delay: Initial reconnect delay in seconds for live stream interruptions.
-        record: If True, persist incoming telemetry to SQLite in background.
+        recording: SQLite persistence state (DISABLED or ENABLED).
         db_path: Destination SQLite database file path when recording is active.
-        enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
+        deadband: Deadband filter state (ENABLED or DISABLED).
         retention_days: Optional telemetry retention window in days.
         archive_path: Optional target SQLite database for archived telemetry.
-        ascii_mode: Optional boolean to force 7-bit ASCII fallback or UTF-8 mode (auto-detected if None).
+        glyph_mode: Terminal character set rendering mode (AUTO, UTF8, or ASCII).
+        demo: Legacy boolean flag for mock simulation mode.
+        record: Legacy boolean flag for recording mode.
+        enable_deadband: Legacy boolean flag for deadband filtering.
+        ascii_mode: Legacy boolean flag for ASCII mode.
     """
+    if demo is not None:
+        source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
+    elif isinstance(source, bool):
+        source = TelemetrySource.DEMO if source else TelemetrySource.LIVE
+
+    if record is not None:
+        recording = RecordingMode.ENABLED if record else RecordingMode.DISABLED
+    elif isinstance(recording, bool):
+        recording = RecordingMode.ENABLED if recording else RecordingMode.DISABLED
+
+    if enable_deadband is not None:
+        deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
+    elif isinstance(deadband, bool):
+        deadband = DeadbandFilterMode.ENABLED if deadband else DeadbandFilterMode.DISABLED
+
+    if ascii_mode is not None:
+        glyph_mode = GlyphMode.ASCII if ascii_mode else GlyphMode.UTF8
+    elif isinstance(glyph_mode, bool):
+        glyph_mode = GlyphMode.ASCII if glyph_mode else GlyphMode.UTF8
+
     if not is_tty_supported():
         logger.warning(
             "Terminal environment does not support curses (sys.stdout is not a TTY). Falling back to headless mode."
@@ -1023,11 +1089,11 @@ def run_tui_mode(
             file=sys.stderr,
         )
         run_plain_stream_mode(
-            demo=demo,
+            source=source,
             reconnect_delay=reconnect_delay,
-            record=record,
+            recording=recording,
             db_path=db_path,
-            enable_deadband=enable_deadband,
+            deadband=deadband,
             retention_days=retention_days,
             archive_path=archive_path,
         )
@@ -1052,11 +1118,11 @@ def run_tui_mode(
                 file=sys.stderr,
             )
             run_plain_stream_mode(
-                demo=demo,
+                source=source,
                 reconnect_delay=reconnect_delay,
-                record=record,
+                recording=recording,
                 db_path=db_path,
-                enable_deadband=enable_deadband,
+                deadband=deadband,
                 retention_days=retention_days,
                 archive_path=archive_path,
             )
@@ -1065,7 +1131,7 @@ def run_tui_mode(
 
     db = None
     recorder = None
-    if record:
+    if recording == RecordingMode.ENABLED:
         from storage.db import Database
         from storage.recorder import RecorderConfig, TelemetryRecorder
 
@@ -1074,8 +1140,8 @@ def run_tui_mode(
         recorder = TelemetryRecorder(
             db,
             RecorderConfig(
-                mode="demo" if demo else "live",
-                enable_deadband=enable_deadband,
+                mode="demo" if source == TelemetrySource.DEMO else "live",
+                enable_deadband=(deadband == DeadbandFilterMode.ENABLED),
                 retention_days=retention_days,
                 archive_path=archive_path,
             ),
@@ -1084,7 +1150,7 @@ def run_tui_mode(
 
     # 1. Initialize thread-safe state store
     store = TrainStateStore()
-    if record:
+    if recording == RecordingMode.ENABLED:
         store.set_recording_status(True, db_path)
 
     # 2. Load static rail infrastructure
@@ -1092,7 +1158,7 @@ def run_tui_mode(
     tracks = list(load_tracks().values())
 
     # 3. Configure ingestion worker
-    if demo:
+    if source == TelemetrySource.DEMO:
         engine = MockTelemetryEngine()
         worker = StreamWorker(store=store, mock_engine=engine, recorder=recorder)
     else:
@@ -1108,10 +1174,12 @@ def run_tui_mode(
     worker.start()
 
     # 5. Resolve ASCII fallback mode
-    if ascii_mode is None:
-        use_ascii = not is_utf8_supported(sys.stdout)
+    if glyph_mode == GlyphMode.ASCII:
+        use_ascii = True
+    elif glyph_mode == GlyphMode.UTF8:
+        use_ascii = False
     else:
-        use_ascii = bool(ascii_mode)
+        use_ascii = not is_utf8_supported(sys.stdout)
 
     if use_ascii:
         logger.info("Non-UTF-8 environment or --ascii specified; enabling 7-bit ASCII fallback matrix.")
@@ -1150,42 +1218,64 @@ def run_tui_mode(
 
     if fallback_needed:
         run_plain_stream_mode(
-            demo=demo,
+            source=source,
             reconnect_delay=reconnect_delay,
-            record=record,
+            recording=recording,
             db_path=db_path,
-            enable_deadband=enable_deadband,
+            deadband=deadband,
             retention_days=retention_days,
             archive_path=archive_path,
         )
 
 
 def run_plain_stream_mode(
-    demo: bool = False,
+    source: TelemetrySource = TelemetrySource.LIVE,
     reconnect_delay: float = 3.0,
-    record: bool = False,
+    recording: RecordingMode = RecordingMode.DISABLED,
     db_path: str = "railway_history.db",
-    enable_deadband: bool = True,
+    deadband: DeadbandFilterMode = DeadbandFilterMode.ENABLED,
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    # Backward compatibility shims:
+    demo: Optional[bool] = None,
+    record: Optional[bool] = None,
+    enable_deadband: Optional[bool] = None,
 ) -> None:
     """Stream train positions to stdout in formatted tabular text.
 
     Args:
-        demo: If True, stream from MockTelemetryEngine; otherwise stream from live SSE feed.
+        source: Telemetry source stream (LIVE or DEMO).
         reconnect_delay: Reconnection interval for live SSE feed.
-        record: If True, persist incoming telemetry to SQLite in background.
+        recording: SQLite persistence state (DISABLED or ENABLED).
         db_path: Destination SQLite database file path when recording is active.
-        enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
+        deadband: Deadband filter state (ENABLED or DISABLED).
         retention_days: Optional telemetry retention window in days.
         archive_path: Optional target SQLite database for archived telemetry.
         stop_event: Optional threading.Event to signal shutdown.
+        demo: Legacy boolean flag for mock simulation mode.
+        record: Legacy boolean flag for recording mode.
+        enable_deadband: Legacy boolean flag for deadband filtering.
     """
+    if demo is not None:
+        source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
+    elif isinstance(source, bool):
+        source = TelemetrySource.DEMO if source else TelemetrySource.LIVE
+
+    if record is not None:
+        recording = RecordingMode.ENABLED if record else RecordingMode.DISABLED
+    elif isinstance(recording, bool):
+        recording = RecordingMode.ENABLED if recording else RecordingMode.DISABLED
+
+    if enable_deadband is not None:
+        deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
+    elif isinstance(deadband, bool):
+        deadband = DeadbandFilterMode.ENABLED if deadband else DeadbandFilterMode.DISABLED
+
     with install_signal_handlers(stop_event) as stop_event:
         db = None
         recorder = None
-        if record:
+        if recording == RecordingMode.ENABLED:
             from storage.db import Database
             from storage.recorder import RecorderConfig, TelemetryRecorder
 
@@ -1194,15 +1284,15 @@ def run_plain_stream_mode(
             recorder = TelemetryRecorder(
                 db,
                 RecorderConfig(
-                    mode="demo" if demo else "live",
-                    enable_deadband=enable_deadband,
+                    mode="demo" if source == TelemetrySource.DEMO else "live",
+                    enable_deadband=(deadband == DeadbandFilterMode.ENABLED),
                     retention_days=retention_days,
                     archive_path=archive_path,
                 ),
             )
             recorder.start()
 
-        if demo:
+        if source == TelemetrySource.DEMO:
             from tui.mock_engine import MockTelemetryEngine
 
             engine = MockTelemetryEngine()
@@ -1216,7 +1306,7 @@ def run_plain_stream_mode(
             )
             source_label = "Live SSE Stream (/api/train-stream)"
 
-        rec_label = f" | SQLite Recording: {db_path}" if record else ""
+        rec_label = f" | SQLite Recording: {db_path}" if recording == RecordingMode.ENABLED else ""
         print("=" * 70)
         print("  railway.gov.gr Live Train Tracker - CLI Monitor")
         print(f"  Source: {source_label}{rec_label}")
@@ -1274,33 +1364,55 @@ def run_plain_stream_mode(
 
 def run_record_mode(
     db_path: str = "railway_history.db",
-    demo: bool = False,
-    enable_deadband: bool = True,
+    source: TelemetrySource = TelemetrySource.LIVE,
+    deadband: DeadbandFilterMode = DeadbandFilterMode.ENABLED,
     batch_size: int = 50,
     flush_interval_sec: float = 2.0,
-    quiet: bool = False,
+    verbosity: OutputVerbosity = OutputVerbosity.NORMAL,
     reconnect_delay: float = 3.0,
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    # Backward compatibility shims:
+    demo: Optional[bool] = None,
+    enable_deadband: Optional[bool] = None,
+    quiet: Optional[bool] = None,
 ) -> int:
     """Execute dedicated headless recording daemon with terminal metrics display.
 
     Args:
         db_path: Destination SQLite database file path.
-        demo: If True, stream from MockTelemetryEngine; otherwise stream from live SSE feed.
-        enable_deadband: If True, apply coordinate deadband filtering.
+        source: Telemetry source stream (LIVE or DEMO).
+        deadband: Deadband filter state (ENABLED or DISABLED).
         batch_size: Maximum buffer size before batch commit.
         flush_interval_sec: Maximum latency in seconds before buffer commit.
-        quiet: If True, suppress periodic status row logs.
+        verbosity: Console output verbosity (NORMAL or QUIET).
         reconnect_delay: Reconnection interval for live SSE feed.
         retention_days: Optional telemetry retention window in days.
         archive_path: Optional target SQLite database for archived telemetry.
         stop_event: Optional threading.Event to signal shutdown.
+        demo: Legacy boolean flag for mock simulation mode.
+        enable_deadband: Legacy boolean flag for deadband filtering.
+        quiet: Legacy boolean flag for quiet console output.
 
     Returns:
         Exit code (0 on success).
     """
+    if demo is not None:
+        source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
+    elif isinstance(source, bool):
+        source = TelemetrySource.DEMO if source else TelemetrySource.LIVE
+
+    if enable_deadband is not None:
+        deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
+    elif isinstance(deadband, bool):
+        deadband = DeadbandFilterMode.ENABLED if deadband else DeadbandFilterMode.DISABLED
+
+    if quiet is not None:
+        verbosity = OutputVerbosity.QUIET if quiet else OutputVerbosity.NORMAL
+    elif isinstance(verbosity, bool):
+        verbosity = OutputVerbosity.QUIET if verbosity else OutputVerbosity.NORMAL
+
     from storage.cli_formatters import format_file_size
     from storage.db import Database
     from storage.recorder import RecorderConfig, TelemetryRecorder
@@ -1312,16 +1424,16 @@ def run_record_mode(
         config = RecorderConfig(
             batch_size=batch_size,
             flush_interval_sec=flush_interval_sec,
-            enable_deadband=enable_deadband,
-            mode="demo" if demo else "live",
+            enable_deadband=(deadband == DeadbandFilterMode.ENABLED),
+            mode="demo" if source == TelemetrySource.DEMO else "live",
             retention_days=retention_days,
             archive_path=archive_path,
         )
         recorder = TelemetryRecorder(db, config)
         recorder.start()
 
-        source_label = "Offline Mock Simulation" if demo else "Live SSE Stream (/api/train-stream)"
-        deadband_label = "ENABLED (distance >= 15m, delay delta >= 1m)" if enable_deadband else "DISABLED (recording all raw coordinates)"
+        source_label = "Offline Mock Simulation" if source == TelemetrySource.DEMO else "Live SSE Stream (/api/train-stream)"
+        deadband_label = "ENABLED (distance >= 15m, delay delta >= 1m)" if deadband == DeadbandFilterMode.ENABLED else "DISABLED (recording all raw coordinates)"
 
         print("=" * 70)
         print("  railmon - Hellenic Railways Telemetry Ingestion Daemon")
@@ -1332,7 +1444,7 @@ def run_record_mode(
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{now_str}] Session #{recorder.session_id} initialized. Recording started. Press Ctrl+C to stop.\n")
 
-        if not quiet:
+        if verbosity == OutputVerbosity.NORMAL:
             print(f"  {'Timestamp':<11} | {'Trains':>6} | {'Batch Rows':>10} | {'Total Stored':>12} | {'Compressed':>10} | {'DB Size':>9}")
             print("-" * 75)
 
@@ -1340,7 +1452,7 @@ def run_record_mode(
         last_stat_time = time.time()
 
         try:
-            if demo:
+            if source == TelemetrySource.DEMO:
                 from tui.mock_engine import MockTelemetryEngine
 
                 engine = MockTelemetryEngine()
@@ -1362,7 +1474,7 @@ def run_record_mode(
                     break
 
                 now = time.time()
-                if not quiet and (now - last_stat_time) >= 5.0:
+                if verbosity == OutputVerbosity.NORMAL and (now - last_stat_time) >= 5.0:
                     stats = recorder.get_stats()
                     filter_stats = stats.get("filter") or {}
                     ratio = filter_stats.get("suppression_ratio_pct", 0.0)
@@ -1397,7 +1509,7 @@ def run_record_mode(
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Session #{recorder.session_id} finalized.")
             print(f"  - Duration: {duration:.1f}s")
             print(f"  - Total Telemetry Rows Stored: {stats.get('total_records_written', 0):,d}")
-            if enable_deadband:
+            if deadband == DeadbandFilterMode.ENABLED:
                 print(f"  - Positions Filtered (Deadband): {suppressed:,d} ({ratio:.1f}% compression ratio)")
             print(f"  - Final Database File Size: {format_file_size(db_size)}")
 
@@ -1640,13 +1752,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             return ret if isinstance(ret, int) else 0
         elif args.mode == "record":
             enable_deadband = not getattr(args, "no_filter_deadband", False)
+            source = TelemetrySource.DEMO if getattr(args, "demo", False) else TelemetrySource.LIVE
+            deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
+            verbosity = OutputVerbosity.QUIET if getattr(args, "quiet", False) else OutputVerbosity.NORMAL
             rec_kwargs: Dict[str, Any] = {
                 "db_path": getattr(args, "db", "railway_history.db"),
-                "demo": getattr(args, "demo", False),
-                "enable_deadband": enable_deadband,
+                "source": source,
+                "deadband": deadband,
                 "batch_size": getattr(args, "batch_size", 50),
                 "flush_interval_sec": getattr(args, "flush_interval", 2.0),
-                "quiet": getattr(args, "quiet", False),
+                "verbosity": verbosity,
                 "reconnect_delay": getattr(args, "reconnect_delay", 3.0),
             }
             if getattr(args, "retention_days", None) is not None:
@@ -1658,43 +1773,44 @@ def main(argv: Optional[List[str]] = None) -> int:
             return run_history_mode(args)
         elif args.tui and not (getattr(args, "headless", False) or getattr(args, "daemon", False)):
             is_rec = getattr(args, "record", False)
+            source = TelemetrySource.DEMO if args.demo else TelemetrySource.LIVE
+            glyph_mode = GlyphMode.ASCII if getattr(args, "ascii", False) else GlyphMode.AUTO
             if is_rec:
                 enable_deadband = not getattr(args, "no_filter_deadband", False)
+                deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
                 tui_kwargs: Dict[str, Any] = {
-                    "demo": args.demo,
+                    "source": source,
                     "fps": args.fps,
                     "reconnect_delay": args.reconnect_delay,
-                    "record": True,
+                    "recording": RecordingMode.ENABLED,
                     "db_path": getattr(args, "db", "railway_history.db"),
-                    "enable_deadband": enable_deadband,
+                    "deadband": deadband,
+                    "glyph_mode": glyph_mode,
                 }
                 if getattr(args, "retention_days", None) is not None:
                     tui_kwargs["retention_days"] = args.retention_days
                 if getattr(args, "archive_db", None) is not None:
                     tui_kwargs["archive_path"] = args.archive_db
-                if getattr(args, "ascii", False):
-                    tui_kwargs["ascii_mode"] = True
                 run_tui_mode(**tui_kwargs)
             else:
-                extra_tui_kwargs: Dict[str, Any] = {}
-                if getattr(args, "ascii", False):
-                    extra_tui_kwargs["ascii_mode"] = True
                 run_tui_mode(
-                    demo=args.demo,
+                    source=source,
                     fps=args.fps,
                     reconnect_delay=args.reconnect_delay,
-                    **extra_tui_kwargs,
+                    glyph_mode=glyph_mode,
                 )
         else:
             is_rec = getattr(args, "record", False)
+            source = TelemetrySource.DEMO if args.demo else TelemetrySource.LIVE
             if is_rec:
                 enable_deadband = not getattr(args, "no_filter_deadband", False)
+                deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
                 stream_kwargs: Dict[str, Any] = {
-                    "demo": args.demo,
+                    "source": source,
                     "reconnect_delay": args.reconnect_delay,
-                    "record": True,
+                    "recording": RecordingMode.ENABLED,
                     "db_path": getattr(args, "db", "railway_history.db"),
-                    "enable_deadband": enable_deadband,
+                    "deadband": deadband,
                 }
                 if getattr(args, "retention_days", None) is not None:
                     stream_kwargs["retention_days"] = args.retention_days
@@ -1703,7 +1819,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 run_plain_stream_mode(**stream_kwargs)
             else:
                 run_plain_stream_mode(
-                    demo=args.demo,
+                    source=source,
                     reconnect_delay=args.reconnect_delay,
                 )
         return 0

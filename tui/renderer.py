@@ -7,6 +7,7 @@ telemetry inspection panels.
 """
 
 from dataclasses import dataclass
+from enum import Enum, auto
 import curses
 import math
 import time
@@ -15,7 +16,21 @@ import unicodedata
 
 from tui.geo import BrailleCanvas, GeoPoint, GeoProjector
 from tui.mock_engine import StationNode, TrackPolyline
-from tui.state import ConnectionStatus, StateSnapshot, TrainRecord
+from tui.state import ConnectionStatus, InputMode, StateSnapshot, TrainRecord
+
+
+class HelpOverlay(Enum):
+    """Visibility state of the modal keyboard help overlay."""
+
+    HIDDEN = auto()
+    VISIBLE = auto()
+
+
+class PlaybackState(Enum):
+    """Execution state of the live telemetry ingestion stream."""
+
+    RUNNING = auto()
+    PAUSED = auto()
 
 
 # Minimum terminal geometry requirements
@@ -972,9 +987,12 @@ class TUIRenderer:
         snapshot: StateSnapshot,
         width: int,
         msg_rate: float = 0.0,
-        search_mode: bool = False,
+        input_mode: InputMode = InputMode.NORMAL,
         search_buffer: str = "",
-        paused: bool = False,
+        playback_state: PlaybackState = PlaybackState.RUNNING,
+        *,
+        search_mode: Optional[bool] = None,
+        paused: Optional[bool] = None,
     ) -> None:
         """Render the bottom status bar and keybindings cheat sheet.
 
@@ -983,10 +1001,22 @@ class TUIRenderer:
             snapshot: Current StateSnapshot.
             width: Total window width.
             msg_rate: Telemetry ingestion message rate in msg/sec.
-            search_mode: Whether interactive search input mode is active.
+            input_mode: Current input mode (NORMAL or SEARCH).
             search_buffer: Current search text buffer.
-            paused: Whether ingestion is paused.
+            playback_state: Stream execution state (RUNNING or PAUSED).
+            search_mode: Legacy boolean flag for search input mode.
+            paused: Legacy boolean flag for paused stream state.
         """
+        if search_mode is not None:
+            input_mode = InputMode.SEARCH if search_mode else InputMode.NORMAL
+        elif isinstance(input_mode, bool):
+            input_mode = InputMode.SEARCH if input_mode else InputMode.NORMAL
+
+        if paused is not None:
+            playback_state = PlaybackState.PAUSED if paused else PlaybackState.RUNNING
+        elif isinstance(playback_state, bool):
+            playback_state = PlaybackState.PAUSED if playback_state else PlaybackState.RUNNING
+
         win.erase()
         status_attr = safe_color_pair(PAIR_STATUS_BAR, curses.A_REVERSE)
         connected_attr = safe_color_pair(PAIR_CONNECTED, curses.A_BOLD) | curses.A_BOLD
@@ -997,7 +1027,7 @@ class TUIRenderer:
         # Background bar fill
         safe_addstr(win, 0, 0, " " * width, status_attr, ascii_mode=self.ascii_mode)
 
-        if search_mode:
+        if input_mode == InputMode.SEARCH:
             # Interactive search input prompt
             cursor = self.glyphs.search_cursor
             prompt_text = f" Search filter: {search_buffer}{cursor}"
@@ -1013,7 +1043,7 @@ class TUIRenderer:
         safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         # Connection status badge
-        if paused:
+        if playback_state == PlaybackState.PAUSED:
             badge = self.glyphs.badge_paused
             b_attr = warn_attr
         else:
@@ -1127,10 +1157,14 @@ class TUIRenderer:
         snapshot: StateSnapshot,
         projector: GeoProjector,
         msg_rate: float = 0.0,
-        search_mode: bool = False,
+        input_mode: InputMode = InputMode.NORMAL,
         search_buffer: str = "",
-        show_help: bool = False,
-        paused: bool = False,
+        help_overlay: HelpOverlay = HelpOverlay.HIDDEN,
+        playback_state: PlaybackState = PlaybackState.RUNNING,
+        *,
+        search_mode: Optional[bool] = None,
+        show_help: Optional[bool] = None,
+        paused: Optional[bool] = None,
     ) -> None:
         """Render all dashboard panes to their respective subwindow buffers.
 
@@ -1140,11 +1174,29 @@ class TUIRenderer:
             snapshot: Atomic point-in-time state snapshot from TrainStateStore.
             projector: GeoProjector configured for the map canvas viewport.
             msg_rate: Ingestion frequency in messages per second.
-            search_mode: Whether interactive search input mode is active.
+            input_mode: Current input mode (NORMAL or SEARCH).
             search_buffer: Current search text buffer.
-            show_help: Whether modal help overlay dialog should be rendered.
-            paused: Whether live ingestion is paused.
+            help_overlay: Modal help overlay visibility (HIDDEN or VISIBLE).
+            playback_state: Live telemetry ingestion state (RUNNING or PAUSED).
+            search_mode: Legacy boolean flag for search input mode.
+            show_help: Legacy boolean flag for help dialog visibility.
+            paused: Legacy boolean flag for paused ingestion state.
         """
+        if search_mode is not None:
+            input_mode = InputMode.SEARCH if search_mode else InputMode.NORMAL
+        elif isinstance(input_mode, bool):
+            input_mode = InputMode.SEARCH if input_mode else InputMode.NORMAL
+
+        if show_help is not None:
+            help_overlay = HelpOverlay.VISIBLE if show_help else HelpOverlay.HIDDEN
+        elif isinstance(help_overlay, bool):
+            help_overlay = HelpOverlay.VISIBLE if help_overlay else HelpOverlay.HIDDEN
+
+        if paused is not None:
+            playback_state = PlaybackState.PAUSED if paused else PlaybackState.RUNNING
+        elif isinstance(playback_state, bool):
+            playback_state = PlaybackState.PAUSED if playback_state else PlaybackState.RUNNING
+
         if not geometry.is_valid:
             if "root" in windows:
                 self.render_undersized(windows["root"], geometry.term_height, geometry.term_width)
@@ -1164,10 +1216,10 @@ class TUIRenderer:
                 snapshot,
                 geometry.status_w,
                 msg_rate=msg_rate,
-                search_mode=search_mode,
+                input_mode=input_mode,
                 search_buffer=search_buffer,
-                paused=paused,
+                playback_state=playback_state,
             )
 
-        if show_help and "root" in windows:
+        if help_overlay == HelpOverlay.VISIBLE and "root" in windows:
             self.render_help_modal(windows["root"], geometry.term_height, geometry.term_width)

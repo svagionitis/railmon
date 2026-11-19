@@ -26,7 +26,15 @@ from storage.models import (
     TelemetryHistoryRow,
     TripSummary,
 )
-from train_tracker import build_parser, main
+from train_tracker import (
+    DeadbandFilterMode,
+    GlyphMode,
+    OutputVerbosity,
+    RecordingMode,
+    TelemetrySource,
+    build_parser,
+    main,
+)
 
 
 class TestCLIStorageParsing(unittest.TestCase):
@@ -210,11 +218,11 @@ class TestCLIRouting(unittest.TestCase):
         self.assertEqual(ret, 0)
         mock_rec.assert_called_once_with(
             db_path="test_rec.db",
-            demo=True,
-            enable_deadband=True,
+            source=TelemetrySource.DEMO,
+            deadband=DeadbandFilterMode.ENABLED,
             batch_size=50,
             flush_interval_sec=2.0,
-            quiet=False,
+            verbosity=OutputVerbosity.NORMAL,
             reconnect_delay=3.0,
         )
 
@@ -231,12 +239,13 @@ class TestCLIRouting(unittest.TestCase):
         ret = main(["--tui", "--record", "--db", "tui_hist.db"])
         self.assertEqual(ret, 0)
         mock_tui.assert_called_once_with(
-            demo=False,
+            source=TelemetrySource.LIVE,
             fps=15.0,
             reconnect_delay=3.0,
-            record=True,
+            recording=RecordingMode.ENABLED,
             db_path="tui_hist.db",
-            enable_deadband=True,
+            deadband=DeadbandFilterMode.ENABLED,
+            glyph_mode=GlyphMode.AUTO,
         )
 
     @patch("train_tracker.run_plain_stream_mode")
@@ -245,11 +254,11 @@ class TestCLIRouting(unittest.TestCase):
         ret = main(["--record", "--db", "stream_rec.db"])
         self.assertEqual(ret, 0)
         mock_stream.assert_called_once_with(
-            demo=False,
+            source=TelemetrySource.LIVE,
             reconnect_delay=3.0,
-            record=True,
+            recording=RecordingMode.ENABLED,
             db_path="stream_rec.db",
-            enable_deadband=True,
+            deadband=DeadbandFilterMode.ENABLED,
         )
 
     @patch("train_tracker.run_record_mode", return_value=0)
@@ -265,11 +274,11 @@ class TestCLIRouting(unittest.TestCase):
         self.assertEqual(ret, 0)
         mock_rec.assert_called_once_with(
             db_path="hot.db",
-            demo=True,
-            enable_deadband=True,
+            source=TelemetrySource.DEMO,
+            deadband=DeadbandFilterMode.ENABLED,
             batch_size=50,
             flush_interval_sec=2.0,
-            quiet=False,
+            verbosity=OutputVerbosity.NORMAL,
             reconnect_delay=3.0,
             retention_days=30,
             archive_path="arch.db",

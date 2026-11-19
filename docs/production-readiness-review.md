@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 3 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 0 P1 deficiencies, 2 P2 compliance gaps)
 
 ---
 
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `334 passed in 33.7s` | 100% pass | PASS |
+| Unit & Integration Suite | `362 passed in 67.6s` | 100% pass | PASS |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -412,9 +412,10 @@ sequenceDiagram
 - **Issue:** Used deprecated `datetime.utcnow().isoformat() + "Z"` instead of timezone-aware UTC timestamps.
 - **Fix:** Implemented standardized helper `iso_utc_now() -> str` in [`../storage/models.py`](../storage/models.py) using `datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")` to maintain Python 3.10 through 3.14 compatibility and exact ISO 8601 UTC schema parity. Replaced all deprecated `datetime.utcnow()` invocations across `TelemetryHistoryRow.from_train_position` and `TelemetryRecorder` (`start`, `stop`, `_flush_buffer`). Verified with dedicated unit tests in [`../tests/test_storage_models.py`](../tests/test_storage_models.py) asserting zero `DeprecationWarning` emissions under `PYTHONWARNINGS="error::DeprecationWarning"`.
 
-### P2-4: Boolean Parameters in Function Signatures Instead of Enums
-- **Location:** [`run_tui_mode`](../train_tracker.py#L342-L349), [`run_plain_stream_mode`](../train_tracker.py#L432-L438), [`run_record_mode`](../train_tracker.py#L516-L524), [`TUIApp.cycle_selection`](../tui/app.py#L235), [`TUIRenderer.render_all`](../tui/renderer.py#L1001-L1012)
+### P2-4: Boolean Parameters in Function Signatures Instead of Enums [RESOLVED]
+- **Location:** [`run_tui_mode`](../train_tracker.py#L1026-L1039), [`run_plain_stream_mode`](../train_tracker.py#L1231-L1242), [`run_record_mode`](../train_tracker.py#L1365-L1377), [`TUIApp.cycle_selection`](../tui/app.py#L270), [`TUIRenderer.render_all`](../tui/renderer.py#L1153-L1166) | **Plan:** [`./p2-4-boolean-parameters-to-enums-fix-plan.md`](./p2-4-boolean-parameters-to-enums-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/communication.md`](../.agents/rules/communication.md#L17) ("Use strongly typed `Enum` instead of boolean parameters in function signatures").
+- **Fix:** Introduced strongly typed enums across public APIs: `TelemetrySource`, `RecordingMode`, `DeadbandFilterMode`, `OutputVerbosity`, and `GlyphMode` in [`../train_tracker.py`](../train_tracker.py); `CycleDirection` in [`../tui/app.py`](../tui/app.py); `HelpOverlay` and `PlaybackState` in [`../tui/renderer.py`](../tui/renderer.py); and centralized `InputMode` in [`../tui/state.py`](../tui/state.py). Implemented defensive parameter normalization and backwards-compatibility coercion shims across all modified function signatures. Added 20 automated verification tests in [`../tests/test_enums.py`](../tests/test_enums.py) validating enum definitions, typed call sites, and legacy boolean keyword/positional arguments.
 
 ### P2-5: Function Name Length Violations ($> 30$ Characters)
 - **Location:** [`run_deadband_efficiency_benchmark`](../scripts/benchmark_storage.py#L133) (33 chars), [`run_write_throughput_benchmark`](../scripts/benchmark_storage.py#L68) (30 chars)
