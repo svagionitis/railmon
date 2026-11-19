@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 from train_tracker import TrainPosition
 from tui.app import TUIApp
-from tui.geo import GREECE_PRESET, GeoPoint, GeoProjector, Viewport
-from tui.mock_engine import StationNode, TrackPolyline
+from tui.geo import BrailleCanvas, GREECE_PRESET, GeoPoint, GeoProjector, Viewport
+from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_tracks
 from tui.renderer import (
     MIN_COLS,
     MIN_ROWS,
@@ -737,6 +737,212 @@ class TestRendererSafeColorPairsAndASCIIFallback(unittest.TestCase):
         for _, _, text, _ in win_help.strings:
             for ch in text:
                 self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' (ord {ord(ch)}) in help dialog")
+
+
+class TestHighZoomTrainTrackAlignment(unittest.TestCase):
+    """Test high-zoom train, breadcrumb, and station alignment with Braille track polylines."""
+
+    def setUp(self):
+        self.stations = list(load_stations().values())
+        self.tracks = list(load_tracks().values())
+        self.renderer = TUIRenderer(stations=self.stations, tracks=self.tracks)
+
+    def _build_track_canvas(self, projector: GeoProjector, inner_w: int, inner_h: int) -> BrailleCanvas:
+        canvas = BrailleCanvas(width_cells=inner_w, height_cells=inner_h)
+        for track in self.tracks:
+            sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
+            canvas.draw_polyline(sub_points)
+        return canvas
+
+    def test_zoom_9_3x_eleonas_and_afidnes_train_track_alignment(self):
+        """Verify live trains near Eleonas (Case Study A) and Afidnes (Case Study B) land on active Braille track cells across high zoom scales."""
+        win_h, win_w = 30, 80
+        inner_h, inner_w = win_h - 2, win_w - 2
+
+        # Case Study A: IC 56 near Eleonas (Boeotia loop) with ~95m lateral GPS offset
+        pos_eleonas = create_test_position(
+            train_id="IC56",
+            train_number="56",
+            train_type="InterCity",
+            speed=145.0,
+            course=300.0,
+            track_heading=300.0,
+            lat=38.3755,
+            lng=23.4640,
+            corridor="PATHE",
+        )
+        # Case Study B: Suburban 1520 near Afidnes (Northern Attica curve) with ~75m lateral GPS offset
+        pos_afidnes = create_test_position(
+            train_id="PR1520",
+            train_number="1520",
+            train_type="Proastiakos",
+            speed=105.0,
+            course=340.0,
+            track_heading=340.0,
+            lat=38.1882,
+            lng=23.8452,
+            corridor="PATHE",
+        )
+
+        test_cases = [
+            (9.3, GeoPoint(lat=38.28, lng=23.65), [pos_eleonas, pos_afidnes]),
+            (15.0, GeoPoint(lat=38.3747, lng=23.4635), [pos_eleonas]),
+            (25.0, GeoPoint(lat=38.1877, lng=23.8446), [pos_afidnes]),
+        ]
+
+        for zoom_level, center_pt, active_positions in test_cases:
+            store = TrainStateStore()
+            store.update_positions(active_positions)
+            snapshot = store.get_snapshot()
+
+            viewport = Viewport(
+                center=center_pt,
+                zoom=zoom_level,
+                width_cells=inner_w,
+                height_cells=inner_h,
+                aspect_ratio=2.0,
+            )
+            projector = GeoProjector(viewport)
+            canvas = self._build_track_canvas(projector, inner_w, inner_h)
+
+            win = MockCursesWindow(win_h, win_w)
+            self.renderer.render_map(win, snapshot, projector)
+
+            # Extract all single-character heading glyphs drawn on the map window
+            drawn_train_cells = [
+                (x - 1, y - 1, text)
+                for (y, x, text, _) in win.strings
+                if text in ("▲", "◥", "►", "◢", "▼", "◣", "◄", "◤")
+            ]
+            self.assertEqual(
+                len(drawn_train_cells),
+                len(active_positions),
+                f"Expected {len(active_positions)} train glyphs at zoom {zoom_level}x",
+            )
+
+            for col, row, glyph in drawn_train_cells:
+                self.assertTrue(0 <= col < inner_w and 0 <= row < inner_h)
+                track_mask = canvas.buffer[row * inner_w + col]
+                self.assertNotEqual(
+                    track_mask,
+                    0,
+                    f"Train glyph '{glyph}' at cell (col={col}, row={row}) at zoom {zoom_level}x "
+                    f"landed on an empty cell with 0 Braille track dots!",
+                )
+
+    def test_breadcrumb_trail_snaps_to_active_braille_track_cells(self):
+        """Verify historical breadcrumb trails snap to active Braille track cells at high zoom."""
+        win_h, win_w = 28, 76
+        inner_h, inner_w = win_h - 2, win_w - 2
+
+        store = TrainStateStore()
+        # Simulate train progression along Tanagra -> Eleonas curve with slight lateral GPS jitter
+        steps = [
+            (38.3406, 23.5818),  # Near Tanagra (~75m offset)
+            (38.3536, 23.5484),  # Mid-segment (~75m offset)
+            (38.3672, 23.5085),  # Asopos valley (~85m offset)
+            (38.3753, 23.4639),  # Near Eleonas (~75m offset)
+        ]
+        for lat, lng in steps:
+            store.update_positions(
+                [
+                    create_test_position(
+                        train_id="IC56",
+                        train_number="56",
+                        lat=lat,
+                        lng=lng,
+                        corridor="PATHE",
+                    )
+                ]
+            )
+        snapshot = store.get_snapshot()
+
+        viewport = Viewport(
+            center=GeoPoint(lat=38.36, lng=23.52),
+            zoom=12.0,
+            width_cells=inner_w,
+            height_cells=inner_h,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+        canvas = self._build_track_canvas(projector, inner_w, inner_h)
+
+        win = MockCursesWindow(win_h, win_w)
+        self.renderer.render_map(win, snapshot, projector)
+
+        trail_cells = [
+            (x - 1, y - 1)
+            for (y, x, text, _) in win.strings
+            if text == self.renderer.glyphs.trail_dot
+        ]
+        self.assertGreaterEqual(len(trail_cells), 3)
+        for col, row in trail_cells:
+            self.assertNotEqual(
+                canvas.buffer[row * inner_w + col],
+                0,
+                f"Breadcrumb at (col={col}, row={row}) did not snap to an active Braille track cell",
+            )
+
+    def test_off_corridor_train_beyond_threshold_renders_at_raw_cell_and_store_unmodified(self):
+        """Verify trains >1500m from any corridor render at raw coordinates and TrainStateStore raw coordinates are never mutated."""
+        win_h, win_w = 26, 70
+        inner_h, inner_w = win_h - 2, win_w - 2
+
+        raw_on_corridor_lat = 38.3755
+        raw_on_corridor_lng = 23.4640
+        pos_on_corridor = create_test_position(
+            train_id="ON_TRACK",
+            train_number="56",
+            lat=raw_on_corridor_lat,
+            lng=raw_on_corridor_lng,
+            course=0.0,
+            track_heading=0.0,
+            corridor="PATHE",
+        )
+
+        # Off-corridor point in eastern Attica / Aegean (>25 km away from any track)
+        off_lat = 38.2500
+        off_lng = 24.1000
+        pos_off_corridor = create_test_position(
+            train_id="OFF_TRACK",
+            train_number="9999",
+            lat=off_lat,
+            lng=off_lng,
+            course=90.0,
+            track_heading=90.0,
+            corridor="UNKNOWN",
+        )
+
+        store = TrainStateStore()
+        store.update_positions([pos_on_corridor, pos_off_corridor])
+        snapshot = store.get_snapshot()
+
+        viewport = Viewport(
+            center=GeoPoint(lat=38.30, lng=23.80),
+            zoom=4.0,
+            width_cells=inner_w,
+            height_cells=inner_h,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+
+        win = MockCursesWindow(win_h, win_w)
+        self.renderer.render_map(win, snapshot, projector)
+
+        # 1. Off-corridor train (east arrow '►') must render at exact unsnapped geo_to_cell
+        expected_off_col, expected_off_row = projector.geo_to_cell(
+            GeoPoint(lat=off_lat, lng=off_lng)
+        )
+        east_arrows = [
+            (x - 1, y - 1) for (y, x, text, _) in win.strings if text == "►"
+        ]
+        self.assertIn((expected_off_col, expected_off_row), east_arrows)
+
+        # 2. Domain store raw coordinates for the snapped on-corridor train must remain untouched
+        after_snapshot = store.get_snapshot()
+        stored_pos = after_snapshot.trains["ON_TRACK"].position
+        self.assertEqual(stored_pos.lat, raw_on_corridor_lat)
+        self.assertEqual(stored_pos.lng, raw_on_corridor_lng)
 
 
 if __name__ == "__main__":

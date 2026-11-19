@@ -353,11 +353,15 @@ In [`../tui/geo.py`](../tui/geo.py), add `GeoProjector.resolve_track_cell(point:
 3. Add `snap_to_track_network(point: GeoPoint, tracks: Sequence[TrackPolyline], corridor_hint: Optional[str] = None, max_snap_distance_m: float = 1500.0) -> GeoPoint`.
 
 ### Step 4: Integrate Display Snapping & Cell Resolution in [`../tui/renderer.py`](../tui/renderer.py)
+> **Detailed Sub-Plan:** [Implementation Plan — Step 4: Integrate Display Snapping & Cell Resolution (`tui/renderer.py`)](./tui-step-4-renderer-display-snapping-plan.md)
+
 In [`TUIRenderer.render_map()`](../tui/renderer.py#L721-L807):
 1. For historical breadcrumbs (step 2 of `render_map`):
    ```python
    raw_pt = GeoPoint(lat=crumb.lat, lng=crumb.lng)
-   snapped_pt = snap_to_track_network(raw_pt, self.tracks)
+   snapped_pt = snap_to_track_network(
+       raw_pt, self.tracks, corridor_hint=record.position.corridor
+   )
    col, row = projector.resolve_track_cell(snapped_pt, canvas)
    ```
 2. For station nodes (step 3 of `render_map`):
@@ -367,7 +371,9 @@ In [`TUIRenderer.render_map()`](../tui/renderer.py#L721-L807):
 3. For live trains (step 4 of `render_map`):
    ```python
    raw_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
-   snapped_pt = snap_to_track_network(raw_pt, self.tracks)
+   snapped_pt = snap_to_track_network(
+       raw_pt, self.tracks, corridor_hint=pos.corridor
+   )
    col, row = projector.resolve_track_cell(snapped_pt, canvas)
    ```
    *Note:* Only the map canvas rendering coordinates `(col, row)` use `snapped_pt`. The `TrainRecord.position` object in `TrainStateStore`, the `Selected Train Telemetry` inspector pane, and the `TelemetryRecorder` SQLite persistence pipeline continue using the exact raw GPS coordinates `(pos.lat, pos.lng)`.

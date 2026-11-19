@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import unicodedata
 
 from tui.geo import BrailleCanvas, GeoPoint, GeoProjector
-from tui.mock_engine import StationNode, TrackPolyline
+from tui.mock_engine import StationNode, TrackPolyline, snap_to_track_network
 from tui.state import ConnectionStatus, InputMode, StateSnapshot, TrainRecord
 
 
@@ -721,8 +721,13 @@ class TUIRenderer:
         # 2. Overlay historical breadcrumbs
         trail_glyph = self.glyphs.trail_dot
         for record in snapshot.trains.values():
+            corridor_hint = record.position.corridor
             for crumb in record.trail:
-                col, row = projector.geo_to_cell(GeoPoint(lat=crumb.lat, lng=crumb.lng))
+                raw_pt = GeoPoint(lat=crumb.lat, lng=crumb.lng)
+                snapped_pt = snap_to_track_network(
+                    raw_pt, self.tracks, corridor_hint=corridor_hint
+                )
+                col, row = projector.resolve_track_cell(snapped_pt, canvas)
                 if 0 <= col < inner_w and 0 <= row < inner_h:
                     try:
                         win.addstr(1 + row, 1 + col, trail_glyph, trail_attr)
@@ -735,7 +740,7 @@ class TUIRenderer:
         sorted_stations = sorted(self.stations, key=lambda s: not s.is_hub)
 
         for stn in sorted_stations:
-            col, row = projector.geo_to_cell(stn.point)
+            col, row = projector.resolve_track_cell(stn.point, canvas)
             if not (0 <= col < inner_w and 0 <= row < inner_h):
                 continue
 
@@ -777,7 +782,11 @@ class TUIRenderer:
         selected_record = snapshot.selected_train
         for record in snapshot.filtered_trains:
             pos = record.position
-            col, row = projector.geo_to_cell(GeoPoint(lat=pos.lat, lng=pos.lng))
+            raw_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
+            snapped_pt = snap_to_track_network(
+                raw_pt, self.tracks, corridor_hint=pos.corridor
+            )
+            col, row = projector.resolve_track_cell(snapped_pt, canvas)
             if not (0 <= col < inner_w and 0 <= row < inner_h):
                 continue
 
