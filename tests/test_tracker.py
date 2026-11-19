@@ -1,13 +1,17 @@
 """Unit tests for the Hellenic Railways train tracker client, models, and endpoints."""
 
+from datetime import datetime, timedelta, timezone
+import email.message
+import email.utils
 import io
 import json
 import threading
+from typing import Any, Dict, Optional
 import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
 
-from train_tracker import RailwayGovClient, TrainPosition
+from train_tracker import RailwayAPIError, RailwayGovClient, TrainPosition, parse_retry_after
 
 
 class TestTrainPositionModel(unittest.TestCase):
@@ -491,6 +495,213 @@ class TestRailwayGovClient(unittest.TestCase):
 
         self.assertEqual(len(batch), 1)
         self.assertEqual(batch[0].id, "t_valid")
+
+
+def _mock_http_error(
+    code: int,
+    reason: str = "Error",
+    headers: Optional[dict] = None,
+) -> urllib.error.HTTPError:
+    """Helper creating a real urllib.error.HTTPError instance with headers."""
+    hdrs = email.message.Message()
+    if headers:
+        for k, v in headers.items():
+            hdrs[k] = v
+    return urllib.error.HTTPError(
+        "https://railway.gov.gr/api/test",
+        code,
+        reason,
+        hdrs,
+        io.BytesIO(b""),
+    )
+
+
+class TestRetryAfterParsing(unittest.TestCase):
+    """Test suite for RFC 7231 / RFC 9110 Retry-After header parsing."""
+
+    def test_parse_retry_after_none_or_empty(self):
+        """TC-RES-01: None, empty string, or whitespace returns default 30.0s."""
+        self.assertEqual(parse_retry_after(None), 30.0)
+        self.assertEqual(parse_retry_after(""), 30.0)
+        self.assertEqual(parse_retry_after("   "), 30.0)
+
+    def test_parse_retry_after_delta_seconds(self):
+        """TC-RES-02: Non-negative integer string parses to float seconds."""
+        self.assertEqual(parse_retry_after("120"), 120.0)
+        self.assertEqual(parse_retry_after("60"), 60.0)
+
+    def test_parse_retry_after_enforces_minimum(self):
+        """TC-RES-03: Values below min_delay (30.0s) are clamped to 30.0s."""
+        self.assertEqual(parse_retry_after("0"), 30.0)
+        self.assertEqual(parse_retry_after("5"), 30.0)
+        self.assertEqual(parse_retry_after("29.9"), 30.0)
+
+    def test_parse_retry_after_float_seconds(self):
+        """TC-RES-04: Decimal seconds strings parse accurately."""
+        self.assertEqual(parse_retry_after("45.5"), 45.5)
+
+    def test_parse_retry_after_http_date_future(self):
+        """TC-RES-05: Valid future IMF-fixdate / RFC 2822 HTTP-date parses to relative delta."""
+        future_dt = datetime.now(timezone.utc) + timedelta(seconds=65)
+        imf_date = email.utils.format_datetime(future_dt, usegmt=True)
+        res = parse_retry_after(imf_date)
+        self.assertAlmostEqual(res, 65.0, delta=2.0)
+
+    def test_parse_retry_after_http_date_past(self):
+        """TC-RES-06: Expired or past HTTP-date returns default 30.0s."""
+        past_dt = datetime.now(timezone.utc) - timedelta(seconds=60)
+        imf_date = email.utils.format_datetime(past_dt, usegmt=True)
+        self.assertEqual(parse_retry_after(imf_date), 30.0)
+
+    def test_parse_retry_after_invalid_header(self):
+        """TC-RES-07: Unparseable garbage, negative values, and NaN return default 30.0s."""
+        self.assertEqual(parse_retry_after("invalid_header"), 30.0)
+        self.assertEqual(parse_retry_after("-10"), 30.0)
+        self.assertEqual(parse_retry_after("nan"), 30.0)
+        self.assertEqual(parse_retry_after("inf"), 30.0)
+
+    def test_parse_retry_after_caps_max_delay(self):
+        """TC-RES-08: Excessively large Retry-After values are clamped to max_delay (300.0s)."""
+        self.assertEqual(parse_retry_after("999999"), 300.0)
+
+
+class TestRailwayGovClientResilience(unittest.TestCase):
+    """Test suite for HTTP 429, 5xx, and network error handling in RailwayGovClient."""
+
+    def setUp(self):
+        self.client = RailwayGovClient("https://railway.gov.gr")
+
+    def _mock_http_response(self, data: Any) -> MagicMock:
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        return mock_resp
+
+    @patch("urllib.request.urlopen")
+    def test_get_success_first_attempt(self, mock_urlopen):
+        """TC-RES-09: Successful REST call returns JSON without retries."""
+        mock_urlopen.return_value = self._mock_http_response({"status": "ok"})
+        res = self.client._get("/api/test")
+        self.assertEqual(res, {"status": "ok"})
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_get_http_429_retries_and_succeeds(self, mock_urlopen, mock_sleep):
+        """TC-RES-10: HTTP 429 parses Retry-After, sleeps, and succeeds on second attempt."""
+        err_429 = _mock_http_error(429, "Too Many Requests", {"Retry-After": "35"})
+        mock_urlopen.side_effect = [err_429, self._mock_http_response({"recovered": True})]
+
+        with self.assertLogs("railmon.train_tracker", level="WARNING") as log_ctx:
+            res = self.client._get("/api/test")
+
+        self.assertEqual(res, {"recovered": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(35.0)
+        self.assertTrue(any("HTTP 429 Rate Limited" in msg for msg in log_ctx.output))
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_get_http_429_exhausts_retries(self, mock_urlopen, mock_sleep):
+        """TC-RES-11: HTTP 429 raises RailwayAPIError with status 429 when max retries exceeded."""
+        err_429 = _mock_http_error(429, "Too Many Requests", {"Retry-After": "40"})
+        mock_urlopen.side_effect = err_429
+
+        with self.assertRaises(RailwayAPIError) as cm:
+            self.client._get("/api/test", max_retries=2)
+
+        self.assertEqual(cm.exception.status_code, 429)
+        self.assertEqual(cm.exception.retry_after, 40.0)
+        self.assertEqual(mock_urlopen.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_get_http_503_retries_and_succeeds(self, mock_urlopen, mock_sleep):
+        """TC-RES-12: HTTP 503 Server Error retries with exponential backoff and succeeds."""
+        err_503 = _mock_http_error(503, "Service Unavailable")
+        mock_urlopen.side_effect = [err_503, self._mock_http_response({"success": True})]
+
+        with self.assertLogs("railmon.train_tracker", level="WARNING") as log_ctx:
+            res = self.client._get("/api/test")
+
+        self.assertEqual(res, {"success": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertTrue(any("HTTP 503 Server Error" in msg for msg in log_ctx.output))
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_get_http_500_exhausts_retries(self, mock_urlopen, mock_sleep):
+        """TC-RES-13: HTTP 500 raises RailwayAPIError after exhausting retries."""
+        err_500 = _mock_http_error(500, "Internal Server Error")
+        mock_urlopen.side_effect = err_500
+
+        with self.assertRaises(RailwayAPIError) as cm:
+            self.client._get("/api/test", max_retries=2)
+
+        self.assertEqual(cm.exception.status_code, 500)
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_get_http_404_no_retry(self, mock_urlopen, mock_sleep):
+        """TC-RES-14: HTTP 404 Client Error is not retried and raises RailwayAPIError immediately."""
+        err_404 = _mock_http_error(404, "Not Found")
+        mock_urlopen.side_effect = err_404
+
+        with self.assertRaises(RailwayAPIError) as cm:
+            self.client._get("/api/test", max_retries=3)
+
+        self.assertEqual(cm.exception.status_code, 404)
+        mock_sleep.assert_not_called()
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_get_transient_network_error_retries(self, mock_urlopen, mock_sleep):
+        """TC-RES-15: URLError / connection drops retry with backoff and succeed."""
+        mock_urlopen.side_effect = [
+            urllib.error.URLError("Connection reset by peer"),
+            self._mock_http_response({"recovered": True}),
+        ]
+        res = self.client._get("/api/test")
+        self.assertEqual(res, {"recovered": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    @patch("urllib.request.urlopen")
+    def test_stream_train_positions_handles_429_with_reconnect_delay(self, mock_urlopen):
+        """TC-RES-16: stream_train_positions with reconnect_delay > 0 catches 429, logs Retry-After, and waits."""
+        err_429 = _mock_http_error(429, "Too Many Requests", {"Retry-After": "45"})
+        stop_event = threading.Event()
+
+        def fail_and_stop(*args, **kwargs):
+            threading.Timer(0.02, stop_event.set).start()
+            raise err_429
+
+        mock_urlopen.side_effect = fail_and_stop
+
+        with self.assertLogs("railmon.train_tracker", level="WARNING") as log_ctx:
+            stream = self.client.stream_train_positions(
+                reconnect_delay=3.0,
+                stop_event=stop_event,
+            )
+            batches = list(stream)
+
+        self.assertEqual(batches, [])
+        self.assertTrue(any("HTTP 429" in msg and "45.0s" in msg for msg in log_ctx.output))
+
+    @patch("urllib.request.urlopen")
+    def test_stream_train_positions_raises_429_when_reconnect_zero(self, mock_urlopen):
+        """TC-RES-17: stream_train_positions raises HTTPError(429) directly when reconnect_delay <= 0."""
+        err_429 = _mock_http_error(429, "Too Many Requests", {"Retry-After": "45"})
+        mock_urlopen.side_effect = err_429
+
+        stream = self.client.stream_train_positions(reconnect_delay=0.0)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            next(stream)
+        self.assertEqual(cm.exception.code, 429)
 
 
 if __name__ == "__main__":

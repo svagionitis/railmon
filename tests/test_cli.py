@@ -166,5 +166,47 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
                 self.assertIn("windows-curses", mock_stderr.getvalue())
 
 
+class TestCLISchedulesResilience(unittest.TestCase):
+    """Test suite for railmon schedules CLI resilience and error handling."""
+
+    @patch("train_tracker.RailwayGovClient.get_upcoming_schedules")
+    def test_run_schedules_mode_success(self, mock_schedules):
+        """TC-CLI-13: run_schedules_mode prints upcoming timetables and returns 0."""
+        mock_schedules.return_value = [
+            {
+                "trainNumber": "1597",
+                "origin": {"nameGreek": "Αθήνα"},
+                "destination": {"nameGreek": "Θεσσαλονίκη"},
+                "scheduledDeparture": "07:15",
+            }
+        ]
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            ret = train_tracker.run_schedules_mode()
+            self.assertEqual(ret, 0)
+            out = mock_stdout.getvalue()
+            self.assertIn("Train  1597", out)
+            self.assertIn("Αθήνα -> Θεσσαλονίκη", out)
+
+    @patch("train_tracker.RailwayGovClient.get_upcoming_schedules")
+    def test_run_schedules_mode_network_failure(self, mock_schedules):
+        """TC-CLI-14: Network failure outputs clean error to stderr without traceback and returns 1."""
+        mock_schedules.side_effect = train_tracker.RailwayAPIError("Connection refused by peer")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                ret = train_tracker.run_schedules_mode()
+                self.assertEqual(ret, 1)
+                self.assertIn("[Error] Failed to fetch train timetables", mock_stderr.getvalue())
+                self.assertIn("Connection refused by peer", mock_stderr.getvalue())
+
+    @patch("train_tracker.RailwayGovClient.get_upcoming_schedules")
+    def test_main_schedules_returns_exit_code_1_on_failure(self, mock_schedules):
+        """TC-CLI-15: main(['schedules']) returns 1 when schedule retrieval fails."""
+        mock_schedules.side_effect = train_tracker.RailwayAPIError("HTTP 503 Server Error")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            with patch("sys.stderr", new_callable=io.StringIO):
+                ret = train_tracker.main(["schedules"])
+                self.assertEqual(ret, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

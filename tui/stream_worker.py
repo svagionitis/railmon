@@ -8,8 +8,9 @@ import logging
 import random
 import threading
 from typing import Any, Generator, Iterable, List, Optional, Union
+import urllib.error
 
-from train_tracker import RailwayGovClient, TrainPosition
+from train_tracker import RailwayGovClient, TrainPosition, parse_retry_after
 from tui.mock_engine import MockTelemetryEngine
 from tui.state import ConnectionStatus, TrainStateStore
 
@@ -27,10 +28,12 @@ class StreamWorker:
         store: TrainStateStore,
         client: Optional[RailwayGovClient] = None,
         mock_engine: Optional[MockTelemetryEngine] = None,
-        custom_stream: Optional[Union[Generator[List[TrainPosition], None, None], Iterable[List[TrainPosition]]]] = None,
+        custom_stream: Optional[
+            Union[Generator[List[TrainPosition], None, None], Iterable[List[TrainPosition]]]
+        ] = None,
         recorder: Optional[Any] = None,
-        base_backoff_sec: float = 1.0,
-        max_backoff_sec: float = 30.0,
+        base_backoff_sec: float = 3.0,
+        max_backoff_sec: float = 60.0,
     ):
         self.store = store
         self.client = client
@@ -134,18 +137,31 @@ class StreamWorker:
                     if self._stop_event.is_set():
                         break
 
-                # Apply exponential backoff with jitter
-                jitter = random.uniform(0.8, 1.2)
-                sleep_time = min(backoff * jitter, self.max_backoff_sec)
-                msg = f"Connection error: {exc}. Reconnecting in {sleep_time:.1f}s..."
-                logger.warning(msg)
-                self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
+                # Apply rate limit vs exponential backoff with jitter
+                if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+                    retry_header = exc.headers.get("Retry-After") if exc.headers else None
+                    sleep_time = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
+                    msg = f"HTTP 429 Rate Limited. Backing off for {sleep_time:.1f}s (Retry-After)..."
+                    logger.warning(msg)
+                    self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
+                elif isinstance(exc, urllib.error.HTTPError) and 500 <= exc.code < 600:
+                    jitter = random.uniform(0.8, 1.2)
+                    sleep_time = min(backoff * jitter, self.max_backoff_sec)
+                    msg = f"HTTP {exc.code} Server Error ({exc.reason}). Reconnecting in {sleep_time:.1f}s..."
+                    logger.warning(msg)
+                    self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
+                    backoff = min(backoff * 2.0, self.max_backoff_sec)
+                else:
+                    jitter = random.uniform(0.8, 1.2)
+                    sleep_time = min(backoff * jitter, self.max_backoff_sec)
+                    msg = f"Connection error: {exc}. Reconnecting in {sleep_time:.1f}s..."
+                    logger.warning(msg)
+                    self.store.set_connection_status(ConnectionStatus.RECONNECTING, msg)
+                    backoff = min(backoff * 2.0, self.max_backoff_sec)
 
                 # Interruptible sleep
                 if self._stop_event.wait(timeout=sleep_time):
                     break
-
-                backoff = min(backoff * 2.0, self.max_backoff_sec)
 
         self.store.set_connection_status(ConnectionStatus.DISCONNECTED, "Stream disconnected")
 

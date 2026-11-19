@@ -2,12 +2,13 @@
 Unit and integration tests for thread-safe state store and background stream worker.
 """
 
+import email.message
 import io
 import time
 import threading
 import unittest
 import urllib.error
-from typing import Generator, List
+from typing import Generator, List, Optional
 from unittest.mock import patch
 
 from train_tracker import RailwayGovClient, TrainPosition
@@ -539,6 +540,71 @@ class TestStreamWorker(unittest.TestCase):
             self.assertFalse(worker.is_running)
             self.assertLess(stop_elapsed, 0.4)
             self.assertEqual(mock_stdout.getvalue(), "")
+
+    @patch("urllib.request.urlopen")
+    def test_stream_worker_handles_http_429_rate_limit(self, mock_urlopen):
+        """TC-RES-18: StreamWorker parses Retry-After on 429, sets RECONNECTING, and stop() cleanly interrupts."""
+        hdrs = email.message.Message()
+        hdrs["Retry-After"] = "45"
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://railway.gov.gr/api/train-stream",
+            429,
+            "Too Many Requests",
+            hdrs,
+            io.BytesIO(b""),
+        )
+        client = RailwayGovClient("https://railway.gov.gr")
+        worker = StreamWorker(store=self.store, client=client)
+
+        worker.start()
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                if self.store.get_snapshot().connection_status == ConnectionStatus.RECONNECTING:
+                    break
+                time.sleep(0.01)
+
+            snap = self.store.get_snapshot()
+            self.assertEqual(snap.connection_status, ConnectionStatus.RECONNECTING)
+            self.assertIn("HTTP 429 Rate Limited", snap.status_message)
+            self.assertIn("45.0s", snap.status_message)
+
+            stop_start = time.time()
+            worker.stop(timeout_sec=1.0)
+            stop_elapsed = time.time() - stop_start
+
+            self.assertFalse(worker.is_running)
+            self.assertLess(stop_elapsed, 0.4)
+        finally:
+            if worker.is_running:
+                worker.stop(timeout_sec=1.0)
+
+    @patch("urllib.request.urlopen")
+    def test_stream_worker_handles_http_503_server_error(self, mock_urlopen):
+        """TC-RES-19: StreamWorker detects HTTP 503 Server Error and transitions to RECONNECTING."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://railway.gov.gr/api/train-stream",
+            503,
+            "Service Unavailable",
+            email.message.Message(),
+            io.BytesIO(b""),
+        )
+        client = RailwayGovClient("https://railway.gov.gr")
+        worker = StreamWorker(store=self.store, client=client)
+
+        worker.start()
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                if self.store.get_snapshot().connection_status == ConnectionStatus.RECONNECTING:
+                    break
+                time.sleep(0.01)
+
+            snap = self.store.get_snapshot()
+            self.assertEqual(snap.connection_status, ConnectionStatus.RECONNECTING)
+            self.assertIn("HTTP 503 Server Error", snap.status_message)
+        finally:
+            worker.stop(timeout_sec=1.0)
 
 
 if __name__ == "__main__":

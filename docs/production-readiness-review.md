@@ -2,7 +2,7 @@
 
 > **System:** `railmon` (`railway.gov.gr` Terminal Train Tracker & Telemetry Recorder)  
 > **Date:** 2026-11-18  
-> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 6 P1 deficiencies, 6 P2 compliance gaps)
+> **Verdict:** **NOT READY** for unattended production deployment (0 P0 blockers, 4 P1 deficiencies, 6 P2 compliance gaps)
 
 ---
 
@@ -19,7 +19,7 @@
 | Threading & State Store           |  7/10  | RLock snapshot safe; prune_stale never called|
 | SQLite Connection & Transactions  | 10/10  | P0-5 & P1-2 fixed; user_version & integrity  |
 | Analytical Query Engine           |  9/10  | Dwell query remediated (window islands)      |
-| Resilience & Stream Handling      |  7/10  | P0-2 fixed; HTTP 429 & TTY fallback pending  |
+| Resilience & Stream Handling      |  9/10  | P0-2 & P1-5 fixed; TTY fallback pending      |
 | Daemon Lifecycle & Signals        |  9/10  | P0-3 & P0-4 fixed; SIGTERM & TUI pause wired |
 | Security & Data Protection        |  9/10  | P1-1 & P1-3 fixed; 0600 umask & path safe    |
 | Observability & Logging           |  4/10  | No RotatingFileHandler; wrong logger prefix  |
@@ -32,7 +32,7 @@
 
 | Gate / Benchmark | Result | Reference Target | Status |
 |---|---|---|---|
-| Unit & Integration Suite | `237 passed in 14.3s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
+| Unit & Integration Suite | `287 passed in 36.5s` | 100% pass | PASS (with 3 `DeprecationWarning`s) |
 | Write Throughput (`batch_size=100`) | `31,602.0 rows/sec` (`376.0 B/row`) | $\ge 5,000\text{ rows/sec}$ | PASS |
 | Deadband Compression Ratio | `49.17%` (`600 -> 10` stationary) | $\ge 40\%$ total, $\ge 85\%$ stationary | PASS (`98.3%` stationary suppression) |
 | Read Latency (`get_train_history`) | `mean 5.19 ms`, `p95 8.30 ms` | `mean <= 10 ms`, `p95 <= 20 ms` | PASS |
@@ -356,9 +356,10 @@ sequenceDiagram
   3. `RailwayGovClient.__init__` ([`../train_tracker.py`](../train_tracker.py#L268-L271)) does not restrict `base_url` to `https://railway.gov.gr` (SSRF protection rule in [`../.agents/rules/security-and-data-protection.md`](../.agents/rules/security-and-data-protection.md#L8)).
 - **Fix:** Enforce WGS84 coordinate bounds validation (`-90.0 <= lat <= 90.0`, `-180.0 <= lng <= 180.0`, `not math.isnan`, `not math.isinf`) in `TrainPosition.from_dict`, raising `ValueError` on out-of-bounds, non-numeric, or missing coordinates while preserving valid `(0.0, 0.0)` references. Introduce safe numeric and string coercion helpers (`_safe_float`, `_safe_int`, `_safe_optional_*`) to prevent unhandled `(ValueError, TypeError)` exceptions on malformed upstream values. Implement SSRF domain and scheme allowlisting via `validate_base_url()` in `RailwayGovClient.__init__`, strictly restricting `base_url` to secure HTTPS on `railway.gov.gr` and port 443. Harden `RailwayGovClient.stream_train_positions` with per-record fault isolation to skip malformed items and log at `DEBUG` without terminating the SSE generator.
 
-### P1-5: Unhandled HTTP 429 (`Retry-After`) & 5xx Errors in REST / SSE Client
-- **Location:** [`RailwayGovClient._get`](../train_tracker.py#L95-L105), [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L152)
+### P1-5: Unhandled HTTP 429 (`Retry-After`) & 5xx Errors in REST / SSE Client [RESOLVED]
+- **Location:** [`RailwayGovClient._get`](../train_tracker.py#L338-L415), [`RailwayGovClient.stream_train_positions`](../train_tracker.py#L461-L570), [`StreamWorker`](../tui/stream_worker.py#L90-L165), [`run_schedules_mode`](../train_tracker.py#L1310-L1335) | **Plan:** [`./p1-5-http-429-retry-after-5xx-resilience-fix-plan.md`](./p1-5-http-429-retry-after-5xx-resilience-fix-plan.md)
 - **Issue:** Violates [`../.agents/rules/resilience-and-fallbacks.md`](../.agents/rules/resilience-and-fallbacks.md#L23). `urllib.error.HTTPError` on status 429 is not caught to inspect `err.headers.get("Retry-After")` (with a 30s minimum backoff), and REST subcommands (`railmon schedules`) crash with raw tracebacks on network failure.
+- **Fix:** Introduced `RailwayAPIError` and RFC 7231 / RFC 9110 compliant `parse_retry_after` parser enforcing a $\ge 30.0\text{s}$ minimum backoff. Refactored `RailwayGovClient._get` with automated retries (`max_retries=3`) and bounded exponential backoff with jitter for 5xx/network errors and automatic rate limit pauses on 429. Upgraded `RailwayGovClient.stream_train_positions` and `StreamWorker` with rate limit backoff inspection and updated worker defaults to `base_backoff_sec=3.0` and `max_backoff_sec=60.0`. Hardened `run_schedules_mode()` and `main()` to trap network failures gracefully and return exit code 1 without unhandled stack traces.
 
 ### P1-6: Missing TTY Detection & Headless Curses Fallback
 - **Location:** [`run_tui_mode`](../train_tracker.py#L342-L430), [`run_tui`](../tui/app.py#L492-L521)

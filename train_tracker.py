@@ -6,10 +6,13 @@ Python Client, Real-time SSE Monitor, and Curses TUI.
 
 import argparse
 import contextlib
+from datetime import datetime, timezone
+import email.utils
 import json
 import logging
 import math
 import os
+import random
 import signal
 import ssl
 import sys
@@ -107,6 +110,69 @@ def validate_base_url(url: str) -> str:
         raise ValueError(f"Untrusted port '{parsed.port}'. Only standard HTTPS (443) is permitted.")
 
     return url.strip().rstrip("/")
+
+
+class RailwayAPIError(IOError):
+    """Base exception raised when a RailwayGovClient API operation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        retry_after: Optional[float] = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+def parse_retry_after(
+    header_val: Optional[str],
+    default_delay: float = 30.0,
+    min_delay: float = 30.0,
+    max_delay: float = 300.0,
+) -> float:
+    """Parse HTTP Retry-After header adhering to RFC 7231 / RFC 9110.
+
+    Supports both delta-seconds and IMF-fixdate / RFC 2822 HTTP-date formats.
+    Enforces repository minimum backoff rules and caps maximum delay.
+
+    Args:
+        header_val: Raw Retry-After header string, or None.
+        default_delay: Fallback delay in seconds if header is missing or unparseable.
+        min_delay: Minimum allowable backoff (mandated >= 30.0s for rate limiting).
+        max_delay: Maximum allowable backoff cap (default: 300.0s / 5 minutes).
+
+    Returns:
+        Backoff duration in seconds, clamped between min_delay and max_delay.
+    """
+    if not header_val or not str(header_val).strip():
+        return max(default_delay, min_delay)
+
+    clean_val = str(header_val).strip()
+
+    # 1. Attempt delta-seconds integer or float
+    try:
+        seconds = float(clean_val)
+        if math.isnan(seconds) or math.isinf(seconds) or seconds < 0:
+            return max(default_delay, min_delay)
+        return min(max(seconds, min_delay), max_delay)
+    except (ValueError, TypeError):
+        pass
+
+    # 2. Attempt HTTP-date timestamp (IMF-fixdate / RFC 2822 / RFC 850)
+    try:
+        target_dt = email.utils.parsedate_to_datetime(clean_val)
+        if target_dt is not None:
+            now_dt = datetime.now(timezone.utc)
+            delta_sec = (target_dt - now_dt).total_seconds()
+            if delta_sec <= 0:
+                return max(default_delay, min_delay)
+            return min(max(delta_sec, min_delay), max_delay)
+    except Exception as exc:
+        logger.debug("Failed to parse HTTP-date in Retry-After header %r: %s", clean_val, exc)
+
+    return max(default_delay, min_delay)
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -269,16 +335,84 @@ class RailwayGovClient:
         self.base_url = validate_base_url(base_url)
         self.ssl_ctx = ssl.create_default_context()
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def _get(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+        base_backoff_sec: float = 1.0,
+        max_backoff_sec: float = 30.0,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         if params:
             query = urllib.parse.urlencode(params)
             url = f"{url}?{query}"
 
-        req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
-        with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=15) as resp:
-            content = resp.read().decode("utf-8")
-            return json.loads(content)
+        for attempt in range(max_retries + 1):
+            req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
+            try:
+                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=15) as resp:
+                    content = resp.read().decode("utf-8")
+                    return json.loads(content)
+            except urllib.error.HTTPError as err:
+                if err.code == 429:
+                    retry_header = err.headers.get("Retry-After") if err.headers else None
+                    retry_after = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
+                    if attempt < max_retries:
+                        logger.warning(
+                            "HTTP 429 Rate Limited on %s. Retrying after %.1fs (attempt %d/%d)...",
+                            url,
+                            retry_after,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        time.sleep(retry_after)
+                        continue
+                    raise RailwayAPIError(
+                        f"HTTP 429 Rate Limited on {path}: upstream limit exceeded (Retry-After: {retry_after:.1f}s)",
+                        status_code=429,
+                        retry_after=retry_after,
+                    ) from err
+                elif 500 <= err.code < 600:
+                    if attempt < max_retries:
+                        jitter = random.uniform(0.8, 1.2)
+                        sleep_time = min(base_backoff_sec * (2 ** attempt) * jitter, max_backoff_sec)
+                        logger.warning(
+                            "HTTP %d Server Error on %s. Retrying in %.1fs (attempt %d/%d)...",
+                            err.code,
+                            url,
+                            sleep_time,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        time.sleep(sleep_time)
+                        continue
+                    raise RailwayAPIError(
+                        f"HTTP {err.code} Server Error on {path}: {err.reason}",
+                        status_code=err.code,
+                    ) from err
+                else:
+                    raise RailwayAPIError(
+                        f"HTTP {err.code} Client Error on {path}: {err.reason}",
+                        status_code=err.code,
+                    ) from err
+            except (urllib.error.URLError, TimeoutError, OSError) as err:
+                if attempt < max_retries:
+                    jitter = random.uniform(0.8, 1.2)
+                    sleep_time = min(base_backoff_sec * (2 ** attempt) * jitter, max_backoff_sec)
+                    logger.warning(
+                        "Network error connecting to %s (%s). Retrying in %.1fs (attempt %d/%d)...",
+                        url,
+                        err,
+                        sleep_time,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(sleep_time)
+                    continue
+                raise RailwayAPIError(
+                    f"Network error connecting to {path}: {err}",
+                ) from err
 
     def get_upcoming_schedules(self) -> List[Dict[str, Any]]:
         """Fetch today's upcoming scheduled train trips."""
@@ -344,6 +478,7 @@ class RailwayGovClient:
         """
         stream_url = f"{self.base_url}/api/train-stream"
         headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
+        attempt = 0
 
         while stop_event is None or not stop_event.is_set():
             try:
@@ -397,6 +532,7 @@ class RailwayGovClient:
                                             logger.debug("Skipping invalid train position record: %s", exc)
 
                                     yield trains
+                                    attempt = 0
                             current_event = "message"
                             continue
 
@@ -414,16 +550,44 @@ class RailwayGovClient:
                     return
                 if reconnect_delay <= 0:
                     raise
-                logger.warning(
-                    "SSE connection interrupted: %s. Reconnecting in %.1fs...",
-                    e,
-                    reconnect_delay,
-                )
+
+                if isinstance(e, urllib.error.HTTPError) and e.code == 429:
+                    retry_header = e.headers.get("Retry-After") if e.headers else None
+                    wait_time = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
+                    logger.warning(
+                        "SSE connection rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
+                        e,
+                        wait_time,
+                    )
+                    attempt = 0
+                elif isinstance(e, urllib.error.HTTPError) and 500 <= e.code < 600:
+                    jitter = random.uniform(0.8, 1.2)
+                    wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
+                    logger.warning(
+                        "SSE connection server error (HTTP %d %s): %s. Reconnecting in %.1fs (attempt %d)...",
+                        e.code,
+                        e.reason,
+                        e,
+                        wait_time,
+                        attempt + 1,
+                    )
+                    attempt += 1
+                else:
+                    jitter = random.uniform(0.8, 1.2)
+                    wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
+                    logger.warning(
+                        "SSE connection interrupted: %s. Reconnecting in %.1fs (attempt %d)...",
+                        e,
+                        wait_time,
+                        attempt + 1,
+                    )
+                    attempt += 1
+
                 if stop_event is not None:
-                    if stop_event.wait(timeout=reconnect_delay):
+                    if stop_event.wait(timeout=wait_time):
                         return
                 else:
-                    time.sleep(reconnect_delay)
+                    time.sleep(wait_time)
 
 
 def _positive_int(val: str) -> int:
@@ -1119,11 +1283,24 @@ def run_history_mode(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_schedules_mode() -> None:
-    """Fetch and display today's upcoming train schedules."""
+def run_schedules_mode() -> int:
+    """Fetch and display today's upcoming train timetables.
+
+    Returns:
+        Exit code (0 on success, 1 on failure).
+    """
     client = RailwayGovClient()
-    print("Fetching today's upcoming train schedules...\n")
-    schedules = client.get_upcoming_schedules()
+    print("Fetching today's upcoming train schedules from railway.gov.gr...\n")
+    try:
+        schedules = client.get_upcoming_schedules()
+    except (RailwayAPIError, urllib.error.URLError, TimeoutError, OSError) as err:
+        print(f"[Error] Failed to fetch train timetables: {err}", file=sys.stderr)
+        return 1
+
+    if not schedules:
+        print("No upcoming train timetables returned for today.")
+        return 0
+
     print(f"Total upcoming schedules: {len(schedules)}")
     for s in schedules[:15]:
         orig = s.get("origin")
@@ -1133,6 +1310,7 @@ def run_schedules_mode() -> None:
         print(
             f"• Train {str(s.get('trainNumber')):>5} | {orig_name} -> {dest_name} | Dep: {s.get('scheduledDeparture', 'N/A')}"
         )
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1165,7 +1343,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         if args.mode == "schedules":
-            run_schedules_mode()
+            ret = run_schedules_mode()
+            return ret if isinstance(ret, int) else 0
         elif args.mode == "record":
             enable_deadband = not getattr(args, "no_filter_deadband", False)
             rec_kwargs: Dict[str, Any] = {
