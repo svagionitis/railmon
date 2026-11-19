@@ -31,7 +31,14 @@ from tui.renderer import (
     safe_color_pair,
     truncate_to_display_width,
 )
-from tui.state import ConnectionStatus, RosterSortMode, StateSnapshot, TrainRecord, TrainStateStore
+from tui.state import (
+    BreadcrumbMode,
+    ConnectionStatus,
+    RosterSortMode,
+    StateSnapshot,
+    TrainRecord,
+    TrainStateStore,
+)
 from tui.stream_worker import StreamWorker
 
 
@@ -985,6 +992,95 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
         ascii_renderer.render_roster(win_ascii, snap_dly)
         self.assertTrue(any("DLY▼" in text for (_, _, text, _) in win_utf8.strings))
         self.assertTrue(any("DLYv" in text for (_, _, text, _) in win_ascii.strings))
+
+    def test_render_map_breadcrumb_modes_all_selected_off_and_filter_exclusion(self):
+        """Verify render_map honors BreadcrumbMode (ALL, SELECTED, OFF) and excludes filtered-out trains."""
+        win_h, win_w = 24, 80
+        inner_h, inner_w = win_h - 2, win_w - 2
+
+        renderer = TUIRenderer(stations=[], tracks=[])
+        viewport = Viewport(
+            center=GeoPoint(lat=38.0, lng=23.7),
+            zoom=4.0,
+            width_cells=inner_w,
+            height_cells=inner_h,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+
+        # Two trains at well-separated coordinates inside the viewport
+        t1_pos = create_test_position("t1", "IC50", lat=37.90, lng=23.60, corridor="PATHE")
+        t2_pos = create_test_position("t2", "2232", lat=38.10, lng=23.80, corridor="PROASTIAKOS")
+
+        store = TrainStateStore()
+        store.update_positions([t1_pos, t2_pos])
+
+        t1_col, t1_row = projector.geo_to_cell(GeoPoint(lat=37.90, lng=23.60))
+        t2_col, t2_row = projector.geo_to_cell(GeoPoint(lat=38.10, lng=23.80))
+        self.assertNotEqual((t1_col, t1_row), (t2_col, t2_row))
+
+        # 1. BreadcrumbMode.ALL: both train trail dots are rendered and title shows Trails: ALL
+        win_all = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_all, store.get_snapshot(), projector)
+        all_texts = " ".join(text for (_, _, text, _) in win_all.strings)
+        self.assertIn("Trails: ALL", all_texts)
+        all_trail_cells = {
+            (x - 1, y - 1)
+            for (y, x, text, _) in win_all.strings
+            if text == renderer.glyphs.trail_dot
+        }
+        self.assertIn((t1_col, t1_row), all_trail_cells)
+        self.assertIn((t2_col, t2_row), all_trail_cells)
+
+        # 2. BreadcrumbMode.ALL with corridor filter excluding t2: only t1 trail is rendered
+        store.set_corridor_filter("PATHE")
+        win_filtered = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_filtered, store.get_snapshot(), projector)
+        filtered_trail_cells = {
+            (x - 1, y - 1)
+            for (y, x, text, _) in win_filtered.strings
+            if text == renderer.glyphs.trail_dot
+        }
+        self.assertIn((t1_col, t1_row), filtered_trail_cells)
+        self.assertNotIn((t2_col, t2_row), filtered_trail_cells)
+        store.set_corridor_filter(None)
+
+        # 3. BreadcrumbMode.SELECTED with no train selected: zero trail dots rendered
+        store.set_breadcrumb_mode(BreadcrumbMode.SELECTED)
+        win_sel_none = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_sel_none, store.get_snapshot(), projector)
+        sel_none_texts = " ".join(text for (_, _, text, _) in win_sel_none.strings)
+        self.assertIn("Trails: SEL", sel_none_texts)
+        sel_none_trail_cells = {
+            (x - 1, y - 1)
+            for (y, x, text, _) in win_sel_none.strings
+            if text == renderer.glyphs.trail_dot
+        }
+        self.assertEqual(len(sel_none_trail_cells), 0)
+
+        # 4. BreadcrumbMode.SELECTED with t1 selected: only t1 trail dot rendered
+        store.select_by_id("t1")
+        win_sel_t1 = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_sel_t1, store.get_snapshot(), projector)
+        sel_t1_trail_cells = {
+            (x - 1, y - 1)
+            for (y, x, text, _) in win_sel_t1.strings
+            if text == renderer.glyphs.trail_dot
+        }
+        self.assertEqual(sel_t1_trail_cells, {(t1_col, t1_row)})
+
+        # 5. BreadcrumbMode.OFF: zero trail dots rendered and title shows Trails: OFF
+        store.set_breadcrumb_mode(BreadcrumbMode.OFF)
+        win_off = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_off, store.get_snapshot(), projector)
+        off_texts = " ".join(text for (_, _, text, _) in win_off.strings)
+        self.assertIn("Trails: OFF", off_texts)
+        off_trail_cells = {
+            (x - 1, y - 1)
+            for (y, x, text, _) in win_off.strings
+            if text == renderer.glyphs.trail_dot
+        }
+        self.assertEqual(len(off_trail_cells), 0)
 
 
 if __name__ == "__main__":

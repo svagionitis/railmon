@@ -16,7 +16,14 @@ import unicodedata
 
 from tui.geo import BrailleCanvas, GeoPoint, GeoProjector
 from tui.mock_engine import StationNode, TrackPolyline, snap_to_track_network
-from tui.state import ConnectionStatus, InputMode, RosterSortMode, StateSnapshot, TrainRecord
+from tui.state import (
+    BreadcrumbMode,
+    ConnectionStatus,
+    InputMode,
+    RosterSortMode,
+    StateSnapshot,
+    TrainRecord,
+)
 
 
 class HelpOverlay(Enum):
@@ -706,8 +713,18 @@ class TUIRenderer:
         if snapshot.follow_mode and snapshot.selected_train:
             tn = snapshot.selected_train.position.train_number or snapshot.selected_train.position.id
             follow_str = f" | Follow: #{tn}"
+        breadcrumb_mode = getattr(snapshot, "breadcrumb_mode", BreadcrumbMode.ALL)
+        if breadcrumb_mode == BreadcrumbMode.SELECTED:
+            trails_label = "SEL"
+        elif breadcrumb_mode == BreadcrumbMode.OFF:
+            trails_label = "OFF"
+        else:
+            trails_label = "ALL"
         d_sym = self.glyphs.degree_sym
-        title = f" Map Viewport: {center.lat:.2f}{d_sym}N, {center.lng:.2f}{d_sym}E | Zoom: {projector.viewport.zoom:.1f}x{follow_str} "
+        title = (
+            f" Map Viewport: {center.lat:.2f}{d_sym}N, {center.lng:.2f}{d_sym}E"
+            f" | Zoom: {projector.viewport.zoom:.1f}x | Trails: {trails_label}{follow_str} "
+        )
         safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
         inner_h = max_y - 2
@@ -725,8 +742,21 @@ class TUIRenderer:
             safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
 
         # 2. Overlay historical breadcrumbs
+        if breadcrumb_mode == BreadcrumbMode.OFF:
+            trail_records: Sequence[TrainRecord] = ()
+        elif breadcrumb_mode == BreadcrumbMode.SELECTED:
+            if snapshot.selected_train is not None and any(
+                r.position.id == snapshot.selected_train.position.id
+                for r in snapshot.filtered_trains
+            ):
+                trail_records = (snapshot.selected_train,)
+            else:
+                trail_records = ()
+        else:
+            trail_records = snapshot.filtered_trains
+
         trail_glyph = self.glyphs.trail_dot
-        for record in snapshot.trains.values():
+        for record in trail_records:
             corridor_hint = record.position.corridor
             for crumb in tuple(record.trail):
                 raw_pt = GeoPoint(lat=crumb.lat, lng=crumb.lng)
@@ -1060,7 +1090,7 @@ class TUIRenderer:
 
         # Keybindings cheat sheet
         follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
-        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
         safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         # Connection status badge
@@ -1097,7 +1127,7 @@ class TUIRenderer:
             height: Total terminal screen height.
             width: Total terminal screen width.
         """
-        box_h = min(23, max(17, height - 2))
+        box_h = min(24, max(17, height - 2))
         box_w = min(74, max(46, width - 4))
         start_y = max(1, (height - box_h) // 2)
         start_x = max(1, (width - box_w) // 2)
@@ -1135,6 +1165,7 @@ class TUIRenderer:
             ("TRAIN SELECTION & TRACKING", [
                 ("Tab, n / p", "Select Next / Previous train in active roster"),
                 ("s / S", "Cycle train roster sorting (Train ID, Speed, Delay)"),
+                ("b / B", "Cycle breadcrumb trails (All, Selected, Off)"),
                 ("f / F", "Toggle real-time auto-follow camera lock"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),

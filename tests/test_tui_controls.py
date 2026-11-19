@@ -22,7 +22,7 @@ from tui.geo import (
     Viewport,
 )
 from tui.renderer import PaneGeometry, TUIRenderer
-from tui.state import ConnectionStatus, RosterSortMode, TrainStateStore
+from tui.state import BreadcrumbMode, ConnectionStatus, RosterSortMode, TrainStateStore
 from tui.stream_worker import StreamWorker
 
 
@@ -715,6 +715,28 @@ class TestTUIControls(unittest.TestCase):
         self.app.process_input(ord("s"))
         self.assertEqual(self.app.search_buffer, "s")
         self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.TRAIN_ID)
+
+    def test_key_b_cycles_breadcrumb_mode_in_normal_mode(self):
+        """Verify pressing 'b' or 'B' in NORMAL mode cycles breadcrumb mode (ALL -> SELECTED -> OFF -> ALL)."""
+        self.assertEqual(self.store.get_snapshot().breadcrumb_mode, BreadcrumbMode.ALL)
+
+        self.assertTrue(self.app.process_input(ord("b")))
+        self.assertEqual(self.store.get_snapshot().breadcrumb_mode, BreadcrumbMode.SELECTED)
+
+        self.assertTrue(self.app.process_input(ord("B")))
+        self.assertEqual(self.store.get_snapshot().breadcrumb_mode, BreadcrumbMode.OFF)
+
+        self.assertTrue(self.app.process_input(ord("b")))
+        self.assertEqual(self.store.get_snapshot().breadcrumb_mode, BreadcrumbMode.ALL)
+
+    def test_key_b_in_search_mode_appends_character_without_toggling_breadcrumbs(self):
+        """Verify pressing 'b' while in SEARCH mode edits the search query rather than toggling breadcrumbs."""
+        self.app.process_input(ord("/"))
+        self.assertEqual(self.app.input_mode, InputMode.SEARCH)
+
+        self.app.process_input(ord("b"))
+        self.assertEqual(self.app.search_buffer, "b")
+        self.assertEqual(self.store.get_snapshot().breadcrumb_mode, BreadcrumbMode.ALL)
 
 
 if __name__ == "__main__":

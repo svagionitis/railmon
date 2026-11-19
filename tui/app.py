@@ -30,7 +30,14 @@ from tui.geo import (
 )
 from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_tracks
 from tui.renderer import HelpOverlay, PaneGeometry, PlaybackState, TUIRenderer
-from tui.state import ConnectionStatus, InputMode, RosterSortMode, StateSnapshot, TrainStateStore
+from tui.state import (
+    BreadcrumbMode,
+    ConnectionStatus,
+    InputMode,
+    RosterSortMode,
+    StateSnapshot,
+    TrainStateStore,
+)
 from tui.stream_worker import StreamWorker
 
 
@@ -371,6 +378,10 @@ class TUIApp:
         """Cycle active train roster sorting criterion (Train ID -> Speed -> Delay)."""
         return self.store.cycle_sort_mode()
 
+    def cycle_breadcrumbs(self) -> BreadcrumbMode:
+        """Cycle historical breadcrumb trail visibility mode (ALL -> SELECTED -> OFF)."""
+        return self.store.cycle_breadcrumb_mode()
+
     def toggle_pause(self) -> None:
         """Toggle paused state for telemetry ingestion."""
         self.paused = not self.paused
@@ -438,6 +449,10 @@ class TUIApp:
         # Cycle train roster sorting (Train ID, Speed, Delay)
         elif key in (ord("s"), ord("S")):
             self.cycle_sort()
+
+        # Cycle historical breadcrumb trail mode (All, Selected, Off)
+        elif key in (ord("b"), ord("B")):
+            self.cycle_breadcrumbs()
 
         # Search filter prompt activation
         elif key in SEARCH_OPEN_KEYS:

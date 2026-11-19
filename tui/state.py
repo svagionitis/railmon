@@ -45,6 +45,14 @@ class RosterSortMode(Enum):
     DELAY = auto()  # Descending delay in minutes (most delayed first), tie-broken by TRAIN_ID
 
 
+class BreadcrumbMode(Enum):
+    """Visibility policy for historical breadcrumb trails on the map canvas."""
+
+    ALL = auto()  # Draw breadcrumb dots for all active filtered trains
+    SELECTED = auto()  # Draw breadcrumb dots only for snapshot.selected_train
+    OFF = auto()  # Hide all historical breadcrumb trails
+
+
 @dataclass(frozen=True)
 class HistoricalBreadcrumb:
     """A historical geographic point recorded during train movement."""
@@ -118,6 +126,7 @@ class StateSnapshot:
     is_recording: bool = False
     recording_db: Optional[str] = None
     sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
+    breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL
 
 
 def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
@@ -256,6 +265,7 @@ class TrainStateStore:
         self._filter_query: str = ""
         self._corridor_filter: Optional[str] = None
         self._sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
+        self._breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
         self._is_recording: bool = False
@@ -377,6 +387,7 @@ class TrainStateStore:
                 is_recording=self._is_recording,
                 recording_db=self._recording_db,
                 sort_mode=self._sort_mode,
+                breadcrumb_mode=self._breadcrumb_mode,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -492,6 +503,28 @@ class TrainStateStore:
             self._sort_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
             self._version += 1
             return self._sort_mode
+
+    def set_breadcrumb_mode(self, mode: BreadcrumbMode) -> None:
+        """Explicitly set the active historical breadcrumb trail visibility mode."""
+        if not isinstance(mode, BreadcrumbMode):
+            raise TypeError(f"Expected BreadcrumbMode, got {type(mode).__name__}")
+        with self._lock:
+            if self._breadcrumb_mode != mode:
+                self._breadcrumb_mode = mode
+                self._version += 1
+
+    def cycle_breadcrumb_mode(self) -> BreadcrumbMode:
+        """Cycle historical breadcrumb trail visibility: ALL -> SELECTED -> OFF -> ALL."""
+        cycle_order = (
+            BreadcrumbMode.ALL,
+            BreadcrumbMode.SELECTED,
+            BreadcrumbMode.OFF,
+        )
+        with self._lock:
+            curr_idx = cycle_order.index(self._breadcrumb_mode)
+            self._breadcrumb_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
+            self._version += 1
+            return self._breadcrumb_mode
 
     def clear(self) -> None:
         """Reset state store completely."""

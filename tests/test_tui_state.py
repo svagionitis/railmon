@@ -14,6 +14,7 @@ from unittest.mock import patch
 from train_tracker import RailwayGovClient, TrainPosition
 from tui.mock_engine import MockTelemetryEngine
 from tui.state import (
+    BreadcrumbMode,
     ConnectionStatus,
     HistoricalBreadcrumb,
     RosterSortMode,
@@ -396,6 +397,48 @@ class TestTrainStateStore(unittest.TestCase):
         self.assertEqual(self.store.get_snapshot().sort_mode, RosterSortMode.SPEED)
         with self.assertRaises(TypeError):
             self.store.set_sort_mode("SPEED")  # type: ignore[arg-type]
+
+    def test_breadcrumb_mode_cycling_and_explicit_set(self):
+        """Verify BreadcrumbMode cycles ALL -> SELECTED -> OFF -> ALL and supports explicit setting."""
+        snap_initial = self.store.get_snapshot()
+        self.assertEqual(snap_initial.breadcrumb_mode, BreadcrumbMode.ALL)
+        v0 = snap_initial.version
+
+        # 1. Cycle ALL -> SELECTED
+        mode1 = self.store.cycle_breadcrumb_mode()
+        self.assertEqual(mode1, BreadcrumbMode.SELECTED)
+        snap1 = self.store.get_snapshot()
+        self.assertEqual(snap1.breadcrumb_mode, BreadcrumbMode.SELECTED)
+        self.assertGreater(snap1.version, v0)
+
+        # 2. Cycle SELECTED -> OFF
+        v1 = snap1.version
+        mode2 = self.store.cycle_breadcrumb_mode()
+        self.assertEqual(mode2, BreadcrumbMode.OFF)
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(snap2.breadcrumb_mode, BreadcrumbMode.OFF)
+        self.assertGreater(snap2.version, v1)
+
+        # 3. Cycle OFF -> ALL
+        v2 = snap2.version
+        mode3 = self.store.cycle_breadcrumb_mode()
+        self.assertEqual(mode3, BreadcrumbMode.ALL)
+        snap3 = self.store.get_snapshot()
+        self.assertEqual(snap3.breadcrumb_mode, BreadcrumbMode.ALL)
+        self.assertGreater(snap3.version, v2)
+
+        # 4. Explicit set_breadcrumb_mode and idempotency on version
+        v3 = snap3.version
+        self.store.set_breadcrumb_mode(BreadcrumbMode.ALL)
+        self.assertEqual(self.store.get_snapshot().version, v3)
+
+        self.store.set_breadcrumb_mode(BreadcrumbMode.SELECTED)
+        snap4 = self.store.get_snapshot()
+        self.assertEqual(snap4.breadcrumb_mode, BreadcrumbMode.SELECTED)
+        self.assertGreater(snap4.version, v3)
+
+        with self.assertRaises(TypeError):
+            self.store.set_breadcrumb_mode("OFF")  # type: ignore[arg-type]
 
     def test_snapshot_thread_isolation(self):
         """Verify mutating the store does not corrupt an existing snapshot or its trail deques."""

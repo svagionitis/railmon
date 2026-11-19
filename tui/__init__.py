@@ -22,8 +22,10 @@ from tui.renderer import (
     get_heading_glyph,
 )
 from tui.state import (
+    BreadcrumbMode,
     ConnectionStatus,
     HistoricalBreadcrumb,
+    RosterSortMode,
     StateSnapshot,
     TrainRecord,
     TrainStateStore,
@@ -45,6 +47,8 @@ __all__ = [
     "haversine_distance",
     "calculate_bearing",
     "ConnectionStatus",
+    "RosterSortMode",
+    "BreadcrumbMode",
     "HistoricalBreadcrumb",
     "TrainRecord",
     "StateSnapshot",
