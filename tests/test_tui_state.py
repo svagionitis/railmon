@@ -339,26 +339,31 @@ class TestTrainStateStore(unittest.TestCase):
         self.assertFalse(self.store.get_snapshot().follow_mode)
 
     def test_snapshot_thread_isolation(self):
-        """Verify mutating the store does not corrupt an existing snapshot."""
-        t1 = _create_sample_train("ic-50", "IC 50")
+        """Verify mutating the store does not corrupt an existing snapshot or its trail deques."""
+        t1 = _create_sample_train("ic-50", "IC 50", lat=38.0, lng=23.7)
         self.store.update_positions([t1])
         snapshot1 = self.store.get_snapshot()
+        self.assertEqual(len(snapshot1.trains["ic-50"].trail), 1)
 
-        # Update position in store
-        t1_updated = _create_sample_train("ic-50", "IC 50", speed=160.0)
+        # Update position in store with moved coordinates (appends breadcrumb to live store)
+        t1_updated = _create_sample_train("ic-50", "IC 50", lat=38.1, lng=23.8, speed=160.0)
         t2 = _create_sample_train("ic-51", "IC 51")
         self.store.update_positions([t1_updated, t2])
 
-        # snapshot1 must still reflect original state
+        # snapshot1 must still reflect original state AND original trail deque without mutation
         self.assertEqual(len(snapshot1.trains), 1)
         self.assertNotIn("ic-51", snapshot1.trains)
         self.assertEqual(snapshot1.version, 1)
+        self.assertEqual(len(snapshot1.trains["ic-50"].trail), 1)
+        self.assertEqual(snapshot1.trains["ic-50"].position.speed, 120.0)
 
         # New snapshot reflects changes
         snapshot2 = self.store.get_snapshot()
         self.assertEqual(len(snapshot2.trains), 2)
         self.assertIn("ic-51", snapshot2.trains)
         self.assertEqual(snapshot2.version, 2)
+        self.assertEqual(len(snapshot2.trains["ic-50"].trail), 2)
+        self.assertEqual(snapshot2.trains["ic-50"].position.speed, 160.0)
 
     def test_concurrent_multithreaded_stress(self):
         """Stress test: concurrent writers and readers under high frequency."""
@@ -387,9 +392,12 @@ class TestTrainStateStore(unittest.TestCase):
             while not stop_event.is_set():
                 try:
                     snap = self.store.get_snapshot()
-                    # Access collections in snapshot to verify thread safety
+                    # Access collections and iterate trail deques to verify thread safety
                     _ = len(snap.trains)
                     _ = len(snap.filtered_trains)
+                    for rec in snap.trains.values():
+                        for crumb in rec.trail:
+                            _ = crumb.lat
                     if snap.selected_train:
                         _ = snap.selected_train.position.speed
                     time.sleep(0.002)

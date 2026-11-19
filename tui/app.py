@@ -49,6 +49,65 @@ PRESET_CONFIGS: Dict[int, Tuple[BoundingBox, Optional[str], str]] = {
     ord("3"): (NORTHERN_GREECE_PRESET, "NORTHERN", "Northern Greece"),
 }
 
+# Platform-agnostic curses key sets (supporting standard ASCII and PDCurses/Windows numpad codes)
+ZOOM_IN_KEYS = tuple(
+    k
+    for k in (
+        ord("+"),
+        ord("="),
+        getattr(curses, "PADPLUS", None),
+        getattr(curses, "SHF_PADPLUS", None),
+        getattr(curses, "CTL_PADPLUS", None),
+    )
+    if k is not None
+)
+
+ZOOM_OUT_KEYS = tuple(
+    k
+    for k in (
+        ord("-"),
+        ord("_"),
+        getattr(curses, "PADMINUS", None),
+        getattr(curses, "SHF_PADMINUS", None),
+        getattr(curses, "CTL_PADMINUS", None),
+    )
+    if k is not None
+)
+
+SEARCH_OPEN_KEYS = tuple(
+    k
+    for k in (
+        ord("/"),
+        getattr(curses, "PADSLASH", None),
+    )
+    if k is not None
+)
+
+ENTER_KEYS = tuple(
+    k
+    for k in (
+        10,
+        13,
+        curses.KEY_ENTER,
+        getattr(curses, "PADENTER", None),
+    )
+    if k is not None
+)
+
+# Map Windows/PDCurses numpad key codes to their ASCII characters for search input
+NUMPAD_CHAR_MAP: Dict[int, str] = {
+    k: ch
+    for k, ch in (
+        (getattr(curses, "PAD0", None), "0"),
+        (getattr(curses, "PADPLUS", None), "+"),
+        (getattr(curses, "PADMINUS", None), "-"),
+        (getattr(curses, "PADSLASH", None), "/"),
+        (getattr(curses, "PADSTAR", None), "*"),
+        (getattr(curses, "PADSTOP", None), "."),
+    )
+    if k is not None
+}
+
 
 class TUIApp:
     """Application coordinator managing curses lifecycle, modal input, and rendering."""
@@ -348,10 +407,10 @@ class TUIApp:
         elif key in (ord("j"), curses.KEY_DOWN):
             self.pan(0, step_y)
 
-        # Zoom scaling
-        elif key in (ord("+"), ord("=")):
+        # Zoom scaling (supports top-row +/- and Windows/PDCurses numpad +/-)
+        elif key in ZOOM_IN_KEYS:
             self.zoom(1.25)
-        elif key in (ord("-"), ord("_")):
+        elif key in ZOOM_OUT_KEYS:
             self.zoom(1.0 / 1.25)
 
         # Preset shortcuts (0, 1, 2, 3)
@@ -373,7 +432,7 @@ class TUIApp:
             self.clear_all()
 
         # Search filter prompt activation
-        elif key == ord("/"):
+        elif key in SEARCH_OPEN_KEYS:
             self._pre_search_query = self.store.get_snapshot().filter_query
             self.search_buffer = self._pre_search_query
             self.input_mode = InputMode.SEARCH
@@ -399,7 +458,7 @@ class TUIApp:
             True to continue application loop; False to exit.
         """
         # Commit query and return to NORMAL mode
-        if key in (10, 13, curses.KEY_ENTER):
+        if key in ENTER_KEYS:
             self.store.set_filter_query(self.search_buffer)
             self.input_mode = InputMode.NORMAL
             return True
@@ -418,8 +477,13 @@ class TUIApp:
                 self.store.set_filter_query(self.search_buffer)
             return True
 
-        # Printable character insertion (ASCII and Unicode)
-        if key >= 32:
+        # Printable character insertion (ASCII, Unicode, and numpad keys; ignore curses special keys >= 256)
+        if key in NUMPAD_CHAR_MAP:
+            self.search_buffer += NUMPAD_CHAR_MAP[key]
+            self.store.set_filter_query(self.search_buffer)
+            return True
+
+        if 32 <= key < 256 or (key > getattr(curses, "KEY_MAX", 548)):
             try:
                 ch = chr(key)
                 if ch.isprintable():

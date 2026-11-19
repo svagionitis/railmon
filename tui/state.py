@@ -57,6 +57,16 @@ class TrainRecord:
     last_updated: float = field(default_factory=time.time)
     update_count: int = 1
 
+    def clone(self) -> "TrainRecord":
+        """Create a thread-isolated shallow copy with an independent trail deque."""
+        return TrainRecord(
+            position=self.position,
+            trail=deque(self.trail, maxlen=self.trail.maxlen),
+            first_seen=self.first_seen,
+            last_updated=self.last_updated,
+            update_count=self.update_count,
+        )
+
     def append_breadcrumb(self, pos: TrainPosition, threshold_deg: float = 1e-5) -> None:
         """Record a historical coordinate if position has shifted significantly."""
         now = time.time()
@@ -317,7 +327,7 @@ class TrainStateStore:
         Operates with minimal lock hold duration.
         """
         with self._lock:
-            trains_copy = dict(self._trains)
+            trains_copy = {tid: rec.clone() for tid, rec in self._trains.items()}
             filtered = self._compute_filtered_list(trains_copy)
 
             sel_idx = -1

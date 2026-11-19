@@ -722,7 +722,7 @@ class TUIRenderer:
         trail_glyph = self.glyphs.trail_dot
         for record in snapshot.trains.values():
             corridor_hint = record.position.corridor
-            for crumb in record.trail:
+            for crumb in tuple(record.trail):
                 raw_pt = GeoPoint(lat=crumb.lat, lng=crumb.lng)
                 snapped_pt = snap_to_track_network(
                     raw_pt, self.tracks, corridor_hint=corridor_hint

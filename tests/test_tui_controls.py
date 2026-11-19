@@ -249,6 +249,15 @@ class TestTUIControls(unittest.TestCase):
         self.app.process_input(ord("_"))
         self.assertAlmostEqual(self.app.projector.viewport.zoom, z0, places=4)
 
+        # Zoom in/out via Windows PDCurses numpad keys (PADPLUS / PADMINUS) if defined
+        pad_plus = getattr(curses, "PADPLUS", None)
+        pad_minus = getattr(curses, "PADMINUS", None)
+        if pad_plus is not None and pad_minus is not None:
+            self.app.process_input(pad_plus)
+            self.assertAlmostEqual(self.app.projector.viewport.zoom, z0 * 1.25, places=4)
+            self.app.process_input(pad_minus)
+            self.assertAlmostEqual(self.app.projector.viewport.zoom, z0, places=4)
+
     def test_zoom_clamping(self):
         """Verify zoom scales clamp between 0.2 and 25.0."""
         # Zoom in beyond max
