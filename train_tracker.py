@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import json
 import logging
+import math
 import os
 import signal
 import ssl
@@ -18,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, FrozenSet, Generator, List, Optional
 
 logger = logging.getLogger("railmon." + __name__)
 
@@ -66,11 +67,112 @@ def install_signal_handlers(
 
 
 BASE_URL = "https://railway.gov.gr"
+ALLOWED_BASE_SCHEMES: FrozenSet[str] = frozenset({"https"})
+ALLOWED_BASE_HOSTS: FrozenSet[str] = frozenset({"railway.gov.gr"})
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
     "Accept": "application/json, text/plain, */*",
     "Referer": "https://railway.gov.gr/train-tracker",
 }
+
+
+def validate_base_url(url: str) -> str:
+    """Validate and sanitize base URL against SSRF and insecure transport rules.
+
+    Enforces:
+    - Non-empty string
+    - Scheme must be HTTPS (no unencrypted plaintext HTTP or local protocols)
+    - Hostname must be in ALLOWED_BASE_HOSTS (strictly 'railway.gov.gr')
+    - Port must be omitted or 443
+
+    Raises:
+        ValueError: If base_url violates security policies.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("base_url must be a non-empty string")
+
+    parsed = urllib.parse.urlsplit(url.strip())
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+
+    if scheme not in ALLOWED_BASE_SCHEMES:
+        raise ValueError(
+            f"Untrusted URL scheme '{scheme}'. Only secure HTTPS is permitted ({sorted(ALLOWED_BASE_SCHEMES)})."
+        )
+    if host not in ALLOWED_BASE_HOSTS:
+        raise ValueError(
+            f"Untrusted host '{host}'. Only verified domain endpoints are permitted ({sorted(ALLOWED_BASE_HOSTS)})."
+        )
+    if parsed.port not in (None, 443):
+        raise ValueError(f"Untrusted port '{parsed.port}'. Only standard HTTPS (443) is permitted.")
+
+    return url.strip().rstrip("/")
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely coerce any value to a finite float, returning default on failure."""
+    if val is None:
+        return default
+    try:
+        num = float(val)
+        if math.isnan(num) or math.isinf(num):
+            return default
+        return num
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_optional_float(val: Any) -> Optional[float]:
+    """Safely coerce a value to an optional finite float, returning None on failure."""
+    if val is None:
+        return None
+    try:
+        num = float(val)
+        if math.isnan(num) or math.isinf(num):
+            return None
+        return num
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    """Safely coerce a value to an int (including float strings like '5.0'), returning default on failure."""
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        try:
+            num = float(val)
+            if math.isnan(num) or math.isinf(num):
+                return default
+            return int(num)
+        except (ValueError, TypeError):
+            return default
+
+
+def _safe_optional_int(val: Any) -> Optional[int]:
+    """Safely coerce a value to an optional int, returning None on failure."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        try:
+            num = float(val)
+            if math.isnan(num) or math.isinf(num):
+                return None
+            return int(num)
+        except (ValueError, TypeError):
+            return None
+
+
+def _safe_optional_str(val: Any) -> Optional[str]:
+    """Safely coerce a value to an optional trimmed string, returning None if empty."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
 
 
 @dataclass
@@ -101,34 +203,62 @@ class TrainPosition:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TrainPosition":
-        speed = float(data.get("speed") or 0.0)
-        # Determine human-readable status matching frontend logic
+        if not isinstance(data, dict):
+            raise TypeError(f"TrainPosition payload must be a dict, got {type(data).__name__}")
+
+        # Coordinate Bounds Validation
+        lat_raw = data.get("lat")
+        lng_raw = data.get("lng")
+        if lat_raw is None or lng_raw is None:
+            raise ValueError("TrainPosition payload missing required coordinates ('lat' and 'lng' must not be None)")
+
+        try:
+            lat = float(lat_raw)
+            lng = float(lng_raw)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Non-numeric coordinates: lat={lat_raw!r}, lng={lng_raw!r}") from exc
+
+        if math.isnan(lat) or math.isinf(lat) or not (-90.0 <= lat <= 90.0):
+            raise ValueError(f"Latitude out of bounds [-90.0, 90.0]: {lat}")
+        if math.isnan(lng) or math.isinf(lng) or not (-180.0 <= lng <= 180.0):
+            raise ValueError(f"Longitude out of bounds [-180.0, 180.0]: {lng}")
+
+        # Defensive Numeric Coercion
+        speed = max(0.0, _safe_float(data.get("speed"), default=0.0))
         status = "Κανονική" if speed > 5.0 else "Στάση"
-        
+        raw_course = data.get("course") if data.get("course") is not None else data.get("bearing")
+        course = _safe_float(raw_course, default=0.0) % 360.0
+        track_heading = _safe_float(data.get("trackHeading"), default=0.0) % 360.0
+        delay = _safe_int(data.get("delay"), default=0)
+
+        # Defensive String & Identifier Coercion
+        train_id = str(data.get("id") or data.get("_id") or "").strip()
+        train_num = str(data.get("trainNumber") or data.get("name") or "Unknown").strip() or "Unknown"
+
         return cls(
-            id=str(data.get("id") or data.get("_id") or ""),
-            train_number=str(data.get("trainNumber") or data.get("name") or "Unknown"),
-            locomotive_number=data.get("locomotiveNumber"),
-            name=data.get("name"),
-            train_type=data.get("trainType"),
-            service_type=data.get("serviceType"),
+            id=train_id,
+            train_number=train_num,
+            locomotive_number=_safe_optional_str(data.get("locomotiveNumber")),
+            name=_safe_optional_str(data.get("name")),
+            train_type=_safe_optional_str(data.get("trainType")),
+            service_type=_safe_optional_str(data.get("serviceType")),
             status=status,
-            origin=data.get("origin"),
-            destination=data.get("destination"),
-            next_station=data.get("nextStation"),
+            origin=_safe_optional_str(data.get("origin")),
+            destination=_safe_optional_str(data.get("destination")),
+            next_station=_safe_optional_str(data.get("nextStation")),
             speed=speed,
-            course=float(data.get("course") or data.get("bearing") or 0.0),
-            track_heading=float(data.get("trackHeading") or 0.0),
-            lat=float(data.get("lat") or 0.0),
-            lng=float(data.get("lng") or 0.0),
-            altitude=data.get("altitude"),
-            delay=int(data.get("delay") or 0),
-            progress=data.get("progress"),
-            chainage_m=data.get("chainage_m"),
-            corridor=data.get("corridor"),
-            distance_to_destination_m=data.get("distanceToDestination_m"),
-            timestamp=data.get("timestamp"),
-            schedule_id=data.get("scheduleId")
+            course=course,
+            track_heading=track_heading,
+            lat=lat,
+            lng=lng,
+            altitude=_safe_optional_float(data.get("altitude")),
+            delay=delay,
+            progress=_safe_optional_float(data.get("progress")),
+            chainage_m=_safe_optional_int(data.get("chainage_m")),
+            corridor=_safe_optional_str(data.get("corridor")),
+            distance_to_destination_m=_safe_optional_int(data.get("distanceToDestination_m")),
+            timestamp=_safe_optional_str(data.get("timestamp")),
+            schedule_id=_safe_optional_str(data.get("scheduleId")),
         )
 
 
@@ -136,7 +266,7 @@ class RailwayGovClient:
     """Client for the Hellenic Railways train-tracker APIs."""
 
     def __init__(self, base_url: str = BASE_URL):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_base_url(base_url)
         self.ssl_ctx = ssl.create_default_context()
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -153,33 +283,46 @@ class RailwayGovClient:
     def get_upcoming_schedules(self) -> List[Dict[str, Any]]:
         """Fetch today's upcoming scheduled train trips."""
         res = self._get("/api/public/schedules/upcoming")
-        return res.get("schedules", [])
+        if isinstance(res, dict):
+            schedules = res.get("schedules", [])
+            return schedules if isinstance(schedules, list) else []
+        return []
 
     def get_schedule_by_id(self, schedule_id: str) -> Dict[str, Any]:
         """Fetch full itinerary for a schedule."""
-        return self._get(f"/api/public/schedules/{schedule_id}")
+        res = self._get(f"/api/public/schedules/{schedule_id}")
+        return res if isinstance(res, dict) else {}
 
     def get_schedule_by_train_number(self, train_number: str) -> Dict[str, Any]:
         """Fetch schedule by commercial train number (e.g. '1597')."""
-        return self._get(f"/api/public/train-schedules/by-train-number/{train_number}")
+        res = self._get(f"/api/public/train-schedules/by-train-number/{train_number}")
+        return res if isinstance(res, dict) else {}
 
     def get_station(self, station_id: str) -> Dict[str, Any]:
         """Fetch station metadata."""
-        return self._get(f"/api/public/stations/{station_id}")
+        res = self._get(f"/api/public/stations/{station_id}")
+        return res if isinstance(res, dict) else {}
 
     def get_station_departures(self, station_id: str, limit: int = 15) -> List[Dict[str, Any]]:
         """Fetch departure board for a station."""
         res = self._get(f"/api/public/stations/{station_id}/departures", {"limit": limit})
-        return res.get("departures", [])
+        if isinstance(res, dict):
+            deps = res.get("departures", [])
+            return deps if isinstance(deps, list) else []
+        return []
 
     def get_station_arrivals(self, station_id: str, limit: int = 15) -> List[Dict[str, Any]]:
         """Fetch arrival board for a station."""
         res = self._get(f"/api/public/stations/{station_id}/arrivals", {"limit": limit})
-        return res.get("arrivals", [])
+        if isinstance(res, dict):
+            arrs = res.get("arrivals", [])
+            return arrs if isinstance(arrs, list) else []
+        return []
 
     def get_rail_infrastructure(self, types: str = "station,track", limit: int = 1000) -> Dict[str, Any]:
         """Fetch GeoJSON rail network features (stations, tracks, signals)."""
-        return self._get("/api/msd/geo", {"mode": "public", "types": types, "limit": limit})
+        res = self._get("/api/msd/geo", {"mode": "public", "types": types, "limit": limit})
+        return res if isinstance(res, dict) else {}
 
     def stream_train_positions(
         self,
@@ -224,15 +367,36 @@ class RailwayGovClient:
                                 if current_event == event_filter:
                                     try:
                                         payload = json.loads(payload_str)
-                                        raw_positions = payload.get("positions", [])
-                                        trains = [
-                                            TrainPosition.from_dict(p)
-                                            for p in raw_positions
-                                            if p.get("lat") is not None and p.get("lng") is not None
-                                        ]
-                                        yield trains
                                     except json.JSONDecodeError as exc:
                                         logger.debug("Skipping malformed SSE JSON payload: %s", exc)
+                                        current_event = "message"
+                                        continue
+
+                                    if not isinstance(payload, dict):
+                                        logger.debug("Skipping non-dict SSE JSON payload: %r", payload)
+                                        current_event = "message"
+                                        continue
+
+                                    raw_positions = payload.get("positions", [])
+                                    if not isinstance(raw_positions, list):
+                                        logger.debug(
+                                            "Expected 'positions' list in payload, got %s",
+                                            type(raw_positions).__name__,
+                                        )
+                                        current_event = "message"
+                                        continue
+
+                                    trains: List[TrainPosition] = []
+                                    for p in raw_positions:
+                                        if not isinstance(p, dict):
+                                            logger.debug("Skipping non-dict position item: %r", p)
+                                            continue
+                                        try:
+                                            trains.append(TrainPosition.from_dict(p))
+                                        except (ValueError, TypeError) as exc:
+                                            logger.debug("Skipping invalid train position record: %s", exc)
+
+                                    yield trains
                             current_event = "message"
                             continue
 
@@ -563,6 +727,7 @@ def run_plain_stream_mode(
     enable_deadband: bool = True,
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Stream train positions to stdout in formatted tabular text.
 
@@ -572,27 +737,30 @@ def run_plain_stream_mode(
         record: If True, persist incoming telemetry to SQLite in background.
         db_path: Destination SQLite database file path when recording is active.
         enable_deadband: If True, apply deadband filter to eliminate stationary coordinate noise.
+        retention_days: Optional telemetry retention window in days.
+        archive_path: Optional target SQLite database for archived telemetry.
+        stop_event: Optional threading.Event to signal shutdown.
     """
-    db = None
-    recorder = None
-    if record:
-        from storage.db import Database
-        from storage.recorder import RecorderConfig, TelemetryRecorder
+    with install_signal_handlers(stop_event) as stop_event:
+        db = None
+        recorder = None
+        if record:
+            from storage.db import Database
+            from storage.recorder import RecorderConfig, TelemetryRecorder
 
-        db = Database(db_path)
-        db.init_schema()
-        recorder = TelemetryRecorder(
-            db,
-            RecorderConfig(
-                mode="demo" if demo else "live",
-                enable_deadband=enable_deadband,
-                retention_days=retention_days,
-                archive_path=archive_path,
-            ),
-        )
-        recorder.start()
+            db = Database(db_path)
+            db.init_schema()
+            recorder = TelemetryRecorder(
+                db,
+                RecorderConfig(
+                    mode="demo" if demo else "live",
+                    enable_deadband=enable_deadband,
+                    retention_days=retention_days,
+                    archive_path=archive_path,
+                ),
+            )
+            recorder.start()
 
-    with install_signal_handlers() as stop_event:
         if demo:
             from tui.mock_engine import MockTelemetryEngine
 
@@ -620,6 +788,8 @@ def run_plain_stream_mode(
                     break
                 if recorder:
                     recorder.enqueue_batch(batch)
+                if stop_event.is_set():
+                    break
 
                 print(f"\n[{time.strftime('%H:%M:%S')}] Live Trains on Network: {len(batch)}")
                 print(
@@ -664,6 +834,7 @@ def run_record_mode(
     reconnect_delay: float = 3.0,
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> int:
     """Execute dedicated headless recording daemon with terminal metrics display.
 
@@ -675,6 +846,9 @@ def run_record_mode(
         flush_interval_sec: Maximum latency in seconds before buffer commit.
         quiet: If True, suppress periodic status row logs.
         reconnect_delay: Reconnection interval for live SSE feed.
+        retention_days: Optional telemetry retention window in days.
+        archive_path: Optional target SQLite database for archived telemetry.
+        stop_event: Optional threading.Event to signal shutdown.
 
     Returns:
         Exit code (0 on success).
@@ -683,40 +857,40 @@ def run_record_mode(
     from storage.db import Database
     from storage.recorder import RecorderConfig, TelemetryRecorder
 
-    db = Database(db_path)
-    db.init_schema()
+    with install_signal_handlers(stop_event) as stop_event:
+        db = Database(db_path)
+        db.init_schema()
 
-    config = RecorderConfig(
-        batch_size=batch_size,
-        flush_interval_sec=flush_interval_sec,
-        enable_deadband=enable_deadband,
-        mode="demo" if demo else "live",
-        retention_days=retention_days,
-        archive_path=archive_path,
-    )
-    recorder = TelemetryRecorder(db, config)
-    recorder.start()
+        config = RecorderConfig(
+            batch_size=batch_size,
+            flush_interval_sec=flush_interval_sec,
+            enable_deadband=enable_deadband,
+            mode="demo" if demo else "live",
+            retention_days=retention_days,
+            archive_path=archive_path,
+        )
+        recorder = TelemetryRecorder(db, config)
+        recorder.start()
 
-    source_label = "Offline Mock Simulation" if demo else "Live SSE Stream (/api/train-stream)"
-    deadband_label = "ENABLED (distance >= 15m, delay delta >= 1m)" if enable_deadband else "DISABLED (recording all raw coordinates)"
+        source_label = "Offline Mock Simulation" if demo else "Live SSE Stream (/api/train-stream)"
+        deadband_label = "ENABLED (distance >= 15m, delay delta >= 1m)" if enable_deadband else "DISABLED (recording all raw coordinates)"
 
-    print("=" * 70)
-    print("  railmon - Hellenic Railways Telemetry Ingestion Daemon")
-    print(f"  Source: {source_label}")
-    print(f"  Database: {db_path} (WAL mode)")
-    print(f"  Deadband Compression: {deadband_label}")
-    print("=" * 70)
-    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now_str}] Session #{recorder.session_id} initialized. Recording started. Press Ctrl+C to stop.\n")
+        print("=" * 70)
+        print("  railmon - Hellenic Railways Telemetry Ingestion Daemon")
+        print(f"  Source: {source_label}")
+        print(f"  Database: {db_path} (WAL mode)")
+        print(f"  Deadband Compression: {deadband_label}")
+        print("=" * 70)
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{now_str}] Session #{recorder.session_id} initialized. Recording started. Press Ctrl+C to stop.\n")
 
-    if not quiet:
-        print(f"  {'Timestamp':<11} | {'Trains':>6} | {'Batch Rows':>10} | {'Total Stored':>12} | {'Compressed':>10} | {'DB Size':>9}")
-        print("-" * 75)
+        if not quiet:
+            print(f"  {'Timestamp':<11} | {'Trains':>6} | {'Batch Rows':>10} | {'Total Stored':>12} | {'Compressed':>10} | {'DB Size':>9}")
+            print("-" * 75)
 
-    start_time = time.time()
-    last_stat_time = time.time()
+        start_time = time.time()
+        last_stat_time = time.time()
 
-    with install_signal_handlers() as stop_event:
         try:
             if demo:
                 from tui.mock_engine import MockTelemetryEngine
@@ -735,7 +909,7 @@ def run_record_mode(
                     stop_event.set()
                     break
                 recorder.enqueue_batch(batch)
-                if recorder.disk_full_tripped:
+                if stop_event.is_set() or recorder.disk_full_tripped:
                     stop_event.set()
                     break
 

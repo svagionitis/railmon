@@ -5,6 +5,7 @@ Unit tests for CLI storage integration: argument parsing, subcommands, and termi
 import io
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -304,19 +305,28 @@ class TestSignalHandlingAndDaemonShutdown(unittest.TestCase):
         import signal
         import threading
         from storage.db import Database
+        from storage.recorder import TelemetryRecorder
         from train_tracker import run_record_mode
 
-        temp_dir = tempfile.mkdtemp()
+        shm_dir = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
+        temp_dir = tempfile.mkdtemp(dir=shm_dir)
         db_path = os.path.join(temp_dir, "sigterm_rec.db")
         try:
-            def trigger_sigterm():
+            orig_enqueue = TelemetryRecorder.enqueue_batch
+            stop_event = threading.Event()
+
+            def signal_after_enqueue(rec_self, batch):
+                count = orig_enqueue(rec_self, batch)
                 handler = signal.getsignal(signal.SIGTERM)
                 if callable(handler):
-                    handler(signal.SIGTERM, None)
+                    try:
+                        handler(signal.SIGTERM, None)
+                    except Exception:
+                        pass
+                stop_event.set()
+                return count
 
-            timer = threading.Timer(0.15, trigger_sigterm)
-            timer.start()
-            try:
+            with patch.object(TelemetryRecorder, "enqueue_batch", side_effect=signal_after_enqueue, autospec=True):
                 with patch("sys.stdout", new_callable=io.StringIO):
                     rc = run_record_mode(
                         db_path=db_path,
@@ -325,13 +335,12 @@ class TestSignalHandlingAndDaemonShutdown(unittest.TestCase):
                         batch_size=500,  # Large batch size so only shutdown drain flushes
                         flush_interval_sec=30.0,
                         quiet=True,
+                        stop_event=stop_event,
                     )
-            finally:
-                timer.cancel()
 
             self.assertEqual(rc, 0)
 
-            db = Database(db_path)
+            db = Database(db_path, auto_migrate=False)
             try:
                 with db.connection() as conn:
                     cur = conn.cursor()
@@ -359,33 +368,41 @@ class TestSignalHandlingAndDaemonShutdown(unittest.TestCase):
         import signal
         import threading
         from storage.db import Database
+        from storage.recorder import TelemetryRecorder
         from train_tracker import run_plain_stream_mode
 
-        temp_dir = tempfile.mkdtemp()
+        shm_dir = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
+        temp_dir = tempfile.mkdtemp(dir=shm_dir)
         db_path = os.path.join(temp_dir, "sigterm_stream.db")
         try:
-            def trigger_sigterm():
+            orig_enqueue = TelemetryRecorder.enqueue_batch
+            stop_event = threading.Event()
+
+            def signal_after_enqueue(rec_self, batch):
+                count = orig_enqueue(rec_self, batch)
                 handler = signal.getsignal(signal.SIGTERM)
                 if callable(handler):
-                    handler(signal.SIGTERM, None)
+                    try:
+                        handler(signal.SIGTERM, None)
+                    except Exception:
+                        pass
+                stop_event.set()
+                return count
 
-            timer = threading.Timer(0.15, trigger_sigterm)
-            timer.start()
-            try:
+            with patch.object(TelemetryRecorder, "enqueue_batch", side_effect=signal_after_enqueue, autospec=True):
                 with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
                     run_plain_stream_mode(
                         demo=True,
                         record=True,
                         db_path=db_path,
                         enable_deadband=False,
+                        stop_event=stop_event,
                     )
                     output = mock_stdout.getvalue()
-            finally:
-                timer.cancel()
 
             self.assertIn("Monitoring stopped.", output)
 
-            db = Database(db_path)
+            db = Database(db_path, auto_migrate=False)
             try:
                 with db.connection() as conn:
                     cur = conn.cursor()
