@@ -1843,6 +1843,73 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
         self.assertIn("Search filter: 1597", search_texts)
         self.assertNotIn("Exported railmon_train_1597", search_texts)
 
+    def test_render_header_inspector_and_status_bar_in_replay_mode_utf8_and_ascii(self):
+        """TC-F42-07: Verify DVR header badge, virtual UTC clock, virtual telemetry age, and status bar progress."""
+        from storage.repository import parse_iso_to_epoch
+
+        renderer_utf8 = TUIRenderer(stations=[], tracks=[], ascii_mode=False)
+        renderer_ascii = TUIRenderer(stations=[], tracks=[], ascii_mode=True)
+
+        t_start = parse_iso_to_epoch("2026-11-20T14:00:00Z")
+        t_cur = parse_iso_to_epoch("2026-11-20T14:15:00Z")
+        t_end = parse_iso_to_epoch("2026-11-20T14:30:00Z")
+
+        store = TrainStateStore()
+        store.set_replay_status(
+            is_replay=True,
+            db_path="railway_history.db",
+            virtual_time=t_cur,
+            start_time=t_start,
+            end_time=t_end,
+            speed=15.0,
+        )
+        store.set_connection_status(ConnectionStatus.CONNECTED, "DVR Replay (15x)")
+        pos = create_test_position("1597", "1597", lat=38.05, lng=23.72, speed=130.0, delay=4)
+        # Observation occurred 5 seconds before current virtual replay clock t_cur
+        store.replace_replay_state([(pos, t_cur - 5.0)], virtual_now=t_cur)
+        store.select_by_id("1597")
+        snapshot = store.get_snapshot()
+
+        # 1. Header in UTF-8 mode shows '[▶ DVR 15x]' and virtual UTC clock '2026-11-20 14:15:00 UTC'
+        win_hdr_utf8 = MockCursesWindow(1, 145)
+        renderer_utf8.render_header(win_hdr_utf8, snapshot, 145)
+        hdr_utf8_str = " ".join(text for (_, _, text, _) in win_hdr_utf8.strings)
+        self.assertIn("[▶ DVR 15x]", hdr_utf8_str)
+        self.assertIn("2026-11-20 14:15:00 UTC", hdr_utf8_str)
+
+        # 2. Inspector in Replay mode computes telemetry age relative to virtual_time (5s ago, NOT [STALE])
+        win_insp = MockCursesWindow(15, 36)
+        renderer_utf8.render_inspector(win_insp, snapshot)
+        insp_str = " ".join(text for (_, _, text, _) in win_insp.strings)
+        self.assertIn("5s ago (#1)", insp_str)
+        self.assertNotIn("[STALE]", insp_str)
+
+        # 3. Status bar in UTF-8 mode shows '[[/]] Scrub', '[</>] Speed', and '▶ DVR 15x (14:15:00 | 50%)'
+        win_sbar_utf8 = MockCursesWindow(1, 140)
+        renderer_utf8.render_status_bar(win_sbar_utf8, snapshot, 140)
+        sbar_utf8_str = " ".join(text for (_, _, text, _) in win_sbar_utf8.strings)
+        self.assertIn("[[/]] Scrub", sbar_utf8_str)
+        self.assertIn("[</>] Speed", sbar_utf8_str)
+        self.assertIn("▶ DVR 15x (14:15:00 | 50%)", sbar_utf8_str)
+
+        # 4. Paused Replay mode in --ascii mode is strictly 7-bit ASCII ('[|| DVR 15x]' and '|| DVR 15x (14:15:00 | 50%)')
+        store.set_connection_status(ConnectionStatus.PAUSED, "Replay paused")
+        snap_paused = store.get_snapshot()
+        win_hdr_ascii = MockCursesWindow(1, 120)
+        win_sbar_ascii = MockCursesWindow(1, 140)
+        renderer_ascii.render_header(win_hdr_ascii, snap_paused, 120)
+        renderer_ascii.render_status_bar(win_sbar_ascii, snap_paused, 140, paused=True)
+
+        hdr_ascii_str = " ".join(text for (_, _, text, _) in win_hdr_ascii.strings)
+        sbar_ascii_str = " ".join(text for (_, _, text, _) in win_sbar_ascii.strings)
+        self.assertIn("[|| DVR 15x]", hdr_ascii_str)
+        self.assertIn("|| DVR 15x (14:15:00 | 50%)", sbar_ascii_str)
+
+        for win in (win_hdr_ascii, win_sbar_ascii):
+            for _, _, text, _ in win.strings:
+                for ch in text:
+                    self.assertLess(ord(ch), 128)
+
 
 if __name__ == "__main__":
     unittest.main()

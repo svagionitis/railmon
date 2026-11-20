@@ -43,6 +43,7 @@ from tui.state import (
     ConnectionStatus,
     HistoricalBreadcrumb,
     InspectorMode,
+    REPLAY_SPEED_MULTIPLIERS,
     RosterSortMode,
     StateSnapshot,
     StationLabelMode,
@@ -50,7 +51,7 @@ from tui.state import (
     TrainRecord,
     TrainStateStore,
 )
-from tui.stream_worker import StreamWorker
+from tui.stream_worker import ReplayWorker, StreamWorker
 
 __all__ = [
     "GeoPoint",
@@ -75,11 +76,13 @@ __all__ = [
     "InspectorMode",
     "StationLabelMode",
     "TrackColorMode",
+    "REPLAY_SPEED_MULTIPLIERS",
     "HistoricalBreadcrumb",
     "TrainRecord",
     "StateSnapshot",
     "TrainStateStore",
     "StreamWorker",
+    "ReplayWorker",
     "PaneGeometry",
     "StationBoardEntry",
     "TUIRenderer",

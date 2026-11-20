@@ -1300,6 +1300,121 @@ class TestTUIControls(unittest.TestCase):
         self.assertFalse(err_expired)
         self.assertIsNone(self.app.toast_message)
 
+    # ------------------------------------------------------------------
+    # SQLite Historical DVR Playback & Timeline Scrubbing Tests (F-4.2)
+    # ------------------------------------------------------------------
+
+    def test_dvr_replay_keys_scrub_speed_pause_and_export_in_normal_and_search_modes(self):
+        """TC-F42-05 & TC-F42-06: Verify '[', ']', '<', '>' control ReplayWorker in NORMAL mode and append in SEARCH mode."""
+        from tui.stream_worker import ReplayWorker
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(temp_dir, "replay_controls.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO trains (train_number, default_name, first_observed_at, last_observed_at)
+                        VALUES ('1597', 'IC 1597', '2026-11-20T14:00:00Z', '2026-11-20T14:20:00Z');
+                        """
+                    )
+                    cur.executemany(
+                        """
+                        INSERT INTO telemetry_history (
+                            train_number, recorded_at, lat, lng, speed, course, delay_min, status, next_station, corridor
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        [
+                            ("1597", "2026-11-20T14:00:00Z", 38.00, 23.70, 90.0, 0.0, 0, "Normal", "SKA", "PATHE"),
+                            ("1597", "2026-11-20T14:05:00Z", 38.06, 23.72, 115.0, 0.0, 2, "Normal", "OINOI", "PATHE"),
+                            ("1597", "2026-11-20T14:10:00Z", 38.14, 23.68, 140.0, 0.0, 3, "Normal", "THIVA", "PATHE"),
+                            ("1597", "2026-11-20T14:20:00Z", 38.32, 23.31, 155.0, 0.0, 5, "Normal", "LEVADIA", "PATHE"),
+                        ],
+                    )
+            finally:
+                db.close()
+
+            replay_store = TrainStateStore()
+            replay_worker = ReplayWorker(store=replay_store, db_path=db_path, speed_multiplier=5.0)
+            replay_worker.initialize_timeline()
+
+            dvr_app = TUIApp(
+                stdscr=self.stdscr,
+                store=replay_store,
+                worker=replay_worker,
+                stations=[],
+                tracks=[],
+                export_dir=temp_dir,
+            )
+            dvr_app.rebuild_windows()
+
+            # 1. Press ']' to scrub forward +5 minutes (+300s -> 14:05:00 UTC, 25% of 20m span)
+            self.assertTrue(dvr_app.process_input(ord("]")))
+            snap1 = replay_store.get_snapshot()
+            self.assertEqual(snap1.trains["1597"].position.speed, 115.0)
+            self.assertIn("[⏩ Scrubbed +5m -> 14:05:00 UTC (25%)]", dvr_app.toast_message)
+
+            # 2. Press ']' again in ASCII mode -> '[>> Scrubbed +5m -> 14:10:00 UTC (50%)]'
+            dvr_app.ascii_mode = True
+            self.assertTrue(dvr_app.process_input(ord("]")))
+            snap2 = replay_store.get_snapshot()
+            self.assertEqual(snap2.trains["1597"].position.speed, 140.0)
+            self.assertIn("[>> Scrubbed +5m -> 14:10:00 UTC (50%)]", dvr_app.toast_message)
+
+            # 3. Press '[' to scrub backward -5 minutes (-300s -> 14:05:00 UTC, 25%)
+            self.assertTrue(dvr_app.process_input(ord("[")))
+            snap3 = replay_store.get_snapshot()
+            self.assertEqual(snap3.trains["1597"].position.speed, 115.0)
+            self.assertIn("[<< Scrubbed -5m -> 14:05:00 UTC (25%)]", dvr_app.toast_message)
+
+            # 4. Press '>' and '.' to increase replay speed (5x -> 15x -> 60x)
+            dvr_app.ascii_mode = False
+            self.assertTrue(dvr_app.process_input(ord(">")))
+            self.assertEqual(replay_store.get_snapshot().replay_speed, 15.0)
+            self.assertEqual(dvr_app.toast_message, "[▶ Replay speed: 15x]")
+
+            self.assertTrue(dvr_app.process_input(ord(".")))
+            self.assertEqual(replay_store.get_snapshot().replay_speed, 60.0)
+
+            # 5. Press '<' and ',' to decrease replay speed (60x -> 15x -> 5x)
+            self.assertTrue(dvr_app.process_input(ord("<")))
+            self.assertEqual(replay_store.get_snapshot().replay_speed, 15.0)
+            self.assertTrue(dvr_app.process_input(ord(",")))
+            self.assertEqual(replay_store.get_snapshot().replay_speed, 5.0)
+
+            # 6. Press Space to pause and resume DVR playback
+            self.assertTrue(dvr_app.process_input(ord(" ")))
+            self.assertTrue(dvr_app.paused)
+            self.assertEqual(replay_store.get_snapshot().connection_status, ConnectionStatus.PAUSED)
+            self.assertTrue(dvr_app.process_input(ord(" ")))
+            self.assertFalse(dvr_app.paused)
+            self.assertEqual(replay_store.get_snapshot().connection_status, ConnectionStatus.CONNECTED)
+
+            # 7. Press 'e' during replay exports full 4-point trajectory from replay_db
+            replay_store.select_by_id("1597")
+            exported_path = dvr_app.export_selected_train_snapshot(fmt="geojson")
+            self.assertIsNotNone(exported_path)
+            with open(exported_path, "r", encoding="utf-8") as f:
+                geo = json.load(f)
+            self.assertEqual(geo["features"][0]["properties"]["total_points"], 4)
+
+            # 8. In SEARCH mode, '[', ']', '<', '>' append to search_buffer without scrubbing or changing speed
+            v_time_before = replay_store.get_snapshot().replay_virtual_time
+            dvr_app.process_input(ord("/"))
+            for ch in "[]<>":
+                dvr_app.process_input(ord(ch))
+            self.assertEqual(dvr_app.search_buffer, "[]<>")
+            self.assertEqual(replay_store.get_snapshot().replay_virtual_time, v_time_before)
+            self.assertEqual(replay_store.get_snapshot().replay_speed, 5.0)
+
+            # 9. In non-replay mode (self.app), pressing '[', ']', '<', '>' is a safe no-op
+            self.assertIsNone(self.app.scrub_replay(300.0))
+            self.assertIsNone(self.app.change_replay_speed(faster=True))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

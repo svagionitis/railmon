@@ -75,6 +75,10 @@ class TrackColorMode(Enum):
     CORRIDOR = auto()  # Corridor-colored tracks (PATHE=White, PROASTIAKOS=Cyan, Regional=Yellow)
 
 
+# Supported playback speed multipliers for SQLite Historical DVR Mode (F-4.2)
+REPLAY_SPEED_MULTIPLIERS: Tuple[float, ...] = (1.0, 5.0, 15.0, 60.0)
+
+
 @dataclass(frozen=True)
 class HistoricalBreadcrumb:
     """A historical geographic point recorded during train movement."""
@@ -105,9 +109,14 @@ class TrainRecord:
             update_count=self.update_count,
         )
 
-    def append_breadcrumb(self, pos: TrainPosition, threshold_deg: float = 1e-5) -> None:
+    def append_breadcrumb(
+        self,
+        pos: TrainPosition,
+        threshold_deg: float = 1e-5,
+        now: Optional[float] = None,
+    ) -> None:
         """Record a historical coordinate if position has shifted significantly."""
-        now = time.time()
+        ts = float(now) if now is not None else time.time()
         speed_val = float(pos.speed) if pos.speed is not None else 0.0
         if not self.trail or (
             abs(self.trail[-1].lat - pos.lat) > threshold_deg
@@ -117,12 +126,12 @@ class TrainRecord:
                 HistoricalBreadcrumb(
                     lat=pos.lat,
                     lng=pos.lng,
-                    timestamp=now,
+                    timestamp=ts,
                     speed=speed_val,
                 )
             )
         self.position = pos
-        self.last_updated = now
+        self.last_updated = ts
         self.update_count += 1
 
     def get_speed_history(self, max_samples: int = 15) -> List[float]:
@@ -180,6 +189,12 @@ class StateSnapshot:
     selected_station_id: Optional[str] = None
     station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
     track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
+    is_replay: bool = False
+    replay_db: Optional[str] = None
+    replay_virtual_time: Optional[float] = None
+    replay_start_time: Optional[float] = None
+    replay_end_time: Optional[float] = None
+    replay_speed: float = 1.0
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -329,57 +344,124 @@ class TrainStateStore:
         self._status_message: str = "Ready"
         self._is_recording: bool = False
         self._recording_db: Optional[str] = None
+        self._is_replay: bool = False
+        self._replay_db: Optional[str] = None
+        self._replay_virtual_time: Optional[float] = None
+        self._replay_start_time: Optional[float] = None
+        self._replay_end_time: Optional[float] = None
+        self._replay_speed: float = 1.0
 
     # ------------------------------------------------------------------
-    # Telemetry Ingestion (Called by StreamWorker Thread)
+    # Telemetry Ingestion (Called by StreamWorker / ReplayWorker Thread)
     # ------------------------------------------------------------------
 
-    def update_positions(self, positions: List[TrainPosition]) -> None:
+    def _upsert_train_position(self, pos: TrainPosition, ts: float) -> None:
+        """Insert or update a single TrainPosition at timestamp ts (caller must hold self._lock)."""
+        if not pos.id:
+            return
+        if pos.id in self._trains:
+            self._trains[pos.id].append_breadcrumb(pos, now=ts)
+        else:
+            record = TrainRecord(
+                position=pos,
+                trail=deque(maxlen=self._max_trail_len),
+                first_seen=ts,
+                last_updated=ts,
+                update_count=1,
+            )
+            record.trail.append(
+                HistoricalBreadcrumb(
+                    lat=pos.lat,
+                    lng=pos.lng,
+                    timestamp=ts,
+                    speed=float(pos.speed) if pos.speed is not None else 0.0,
+                )
+            )
+            self._trains[pos.id] = record
+
+    def update_positions(
+        self,
+        positions: List[TrainPosition],
+        virtual_now: Optional[float] = None,
+    ) -> None:
         """
         Ingest a batch of train positions with mutex protection.
         Updates existing records, creates new records, appends breadcrumbs,
         and increments the store version counter.
         """
         with self._lock:
-            now = time.time()
+            now = float(virtual_now) if virtual_now is not None else time.time()
             for pos in positions:
-                if not pos.id:
-                    continue
-                if pos.id in self._trains:
-                    self._trains[pos.id].append_breadcrumb(pos)
-                else:
-                    record = TrainRecord(
-                        position=pos,
-                        trail=deque(maxlen=self._max_trail_len),
-                        first_seen=now,
-                        last_updated=now,
-                        update_count=1,
-                    )
-                    record.trail.append(
-                        HistoricalBreadcrumb(
-                            lat=pos.lat,
-                            lng=pos.lng,
-                            timestamp=now,
-                            speed=float(pos.speed) if pos.speed is not None else 0.0,
-                        )
-                    )
-                    self._trains[pos.id] = record
+                self._upsert_train_position(pos, now)
 
+            if virtual_now is not None:
+                self._replay_virtual_time = now
             self._total_messages += 1
             self._last_update_ts = now
             self._version += 1
 
-    def prune_stale_trains(self, max_age_sec: Optional[float] = None) -> int:
+    def ingest_replay_observations(
+        self,
+        observations: Sequence[Tuple[TrainPosition, float]],
+        virtual_now: float,
+    ) -> None:
+        """
+        Ingest a chronological batch of (TrainPosition, recorded_epoch) observations
+        during historical DVR playback and advance replay_virtual_time.
+        """
+        with self._lock:
+            for pos, obs_epoch in observations:
+                self._upsert_train_position(pos, float(obs_epoch))
+            self._replay_virtual_time = float(virtual_now)
+            if observations:
+                self._total_messages += 1
+                self._last_update_ts = float(virtual_now)
+            self._version += 1
+
+    def replace_replay_state(
+        self,
+        observations: Sequence[Tuple[TrainPosition, float]],
+        virtual_now: float,
+    ) -> None:
+        """
+        Atomically rebuild the active train roster and breadcrumb trails from a point-in-time
+        lookback window (used when initializing DVR replay or scrubbing with '[' / ']').
+        Preserves active UI filters and preserves train selection if the train remains active.
+        """
+        with self._lock:
+            self._trains.clear()
+            for pos, obs_epoch in observations:
+                self._upsert_train_position(pos, float(obs_epoch))
+
+            if self._selected_id and self._selected_id not in self._trains:
+                self._selected_id = None
+                self._follow_mode = False
+
+            self._replay_virtual_time = float(virtual_now)
+            self._last_update_ts = float(virtual_now)
+            self._total_messages += 1
+            self._version += 1
+
+    def prune_stale_trains(
+        self,
+        max_age_sec: Optional[float] = None,
+        now: Optional[float] = None,
+    ) -> int:
         """
         Remove trains that have not received telemetry updates within max_age_sec.
         Returns the number of pruned trains.
         """
         cutoff = max_age_sec if max_age_sec is not None else self._stale_timeout_sec
         with self._lock:
-            now = time.time()
+            if now is not None:
+                ref_now = float(now)
+            elif self._is_replay and self._replay_virtual_time is not None:
+                ref_now = self._replay_virtual_time
+            else:
+                ref_now = time.time()
             stale_ids = [
                 tid for tid, rec in self._trains.items()
-                if (now - rec.last_updated) > cutoff
+                if (ref_now - rec.last_updated) > cutoff
             ]
             for tid in stale_ids:
                 del self._trains[tid]
@@ -390,7 +472,7 @@ class TrainStateStore:
             if stale_ids:
                 self._version += 1
                 self._total_trains_pruned += len(stale_ids)
-            self._last_prune_ts = now
+            self._last_prune_ts = ref_now
             return len(stale_ids)
 
     def set_connection_status(self, status: ConnectionStatus, message: str = "") -> None:
@@ -406,6 +488,32 @@ class TrainStateStore:
         with self._lock:
             self._is_recording = is_recording
             self._recording_db = db_path
+            self._version += 1
+
+    def set_replay_status(
+        self,
+        is_replay: bool,
+        db_path: Optional[str] = None,
+        virtual_time: Optional[float] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        speed: Optional[float] = None,
+    ) -> None:
+        """Update SQLite historical DVR replay metadata and virtual clock state."""
+        with self._lock:
+            self._is_replay = bool(is_replay)
+            if db_path is not None or not is_replay:
+                self._replay_db = db_path
+            if virtual_time is not None or not is_replay:
+                self._replay_virtual_time = float(virtual_time) if virtual_time is not None else None
+            if start_time is not None or not is_replay:
+                self._replay_start_time = float(start_time) if start_time is not None else None
+            if end_time is not None or not is_replay:
+                self._replay_end_time = float(end_time) if end_time is not None else None
+            if speed is not None:
+                self._replay_speed = max(0.1, float(speed))
+            elif not is_replay:
+                self._replay_speed = 1.0
             self._version += 1
 
     # ------------------------------------------------------------------
@@ -451,6 +559,12 @@ class TrainStateStore:
                 selected_station_id=self._selected_station_id,
                 station_label_mode=self._station_label_mode,
                 track_color_mode=self._track_color_mode,
+                is_replay=self._is_replay,
+                replay_db=self._replay_db,
+                replay_virtual_time=self._replay_virtual_time,
+                replay_start_time=self._replay_start_time,
+                replay_end_time=self._replay_end_time,
+                replay_speed=self._replay_speed,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:

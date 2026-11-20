@@ -7,7 +7,7 @@ scale-aware camera kinematics, dynamic resizing, frame-rate synchronization
 """
 
 import curses
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum, auto
 import json
 import logging
@@ -16,7 +16,7 @@ import signal
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger("railmon." + __name__)
 
@@ -66,7 +66,7 @@ from tui.state import (
     TrackColorMode,
     TrainStateStore,
 )
-from tui.stream_worker import StreamWorker
+from tui.stream_worker import ReplayWorker, StreamWorker
 
 
 class CycleDirection(Enum):
@@ -166,7 +166,7 @@ class TUIApp:
         self,
         stdscr: Any,
         store: TrainStateStore,
-        worker: StreamWorker,
+        worker: Union[StreamWorker, ReplayWorker],
         stations: Optional[Sequence[StationNode]] = None,
         tracks: Optional[Sequence[TrackPolyline]] = None,
         target_fps: float = 15.0,
@@ -526,14 +526,63 @@ class TUIApp:
         return self.store.cycle_station_board(candidate_ids, initial_station_id=initial_id)
 
     def toggle_pause(self) -> None:
-        """Toggle paused state for telemetry ingestion."""
+        """Toggle paused state for telemetry ingestion or historical DVR playback."""
         self.paused = not self.paused
+        snapshot = self.store.get_snapshot()
         if self.paused:
             self.worker.pause()
-            self.store.set_connection_status(ConnectionStatus.PAUSED, "Paused by user")
+            msg = "Replay paused" if snapshot.is_replay else "Paused by user"
+            self.store.set_connection_status(ConnectionStatus.PAUSED, msg)
         else:
             self.worker.resume()
-            self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
+            msg = (
+                f"DVR Replay ({int(snapshot.replay_speed)}x)"
+                if snapshot.is_replay
+                else "Live stream active"
+            )
+            self.store.set_connection_status(ConnectionStatus.CONNECTED, msg)
+
+    # ------------------------------------------------------------------
+    # Historical DVR Timeline Scrubbing & Speed Controls (F-4.2)
+    # ------------------------------------------------------------------
+
+    def scrub_replay(self, delta_sec: float) -> Optional[float]:
+        """Scrub historical DVR timeline by delta_sec (e.g. -300.0s for '[' or +300.0s for ']')."""
+        snapshot = self.store.get_snapshot()
+        if not snapshot.is_replay or not hasattr(self.worker, "seek_relative"):
+            return None
+
+        seek_fn = getattr(self.worker, "seek_relative")
+        new_epoch = float(seek_fn(delta_sec))
+        updated_snap = self.store.get_snapshot()
+        start_t = updated_snap.replay_start_time or new_epoch
+        end_t = updated_snap.replay_end_time or new_epoch
+        span = max(0.0, end_t - start_t)
+        pct = int(round(((new_epoch - start_t) / span) * 100)) if span > 1e-6 else 100
+        pct = max(0, min(100, pct))
+
+        ts_str = datetime.fromtimestamp(new_epoch, tz=timezone.utc).strftime("%H:%M:%S UTC")
+        mins = int(round(delta_sec / 60.0))
+        dir_str = f"+{mins}m" if mins > 0 else f"{mins}m"
+        if delta_sec < 0.0:
+            icon = "<<" if self.ascii_mode else "⏪"
+        else:
+            icon = ">>" if self.ascii_mode else "⏩"
+
+        self._set_toast(f"[{icon} Scrubbed {dir_str} -> {ts_str} ({pct}%)]", is_error=False)
+        return new_epoch
+
+    def change_replay_speed(self, faster: bool = True) -> Optional[float]:
+        """Step historical DVR playback speed multiplier up ('>') or down ('<') across 1x..60x."""
+        snapshot = self.store.get_snapshot()
+        if not snapshot.is_replay or not hasattr(self.worker, "cycle_speed"):
+            return None
+
+        cycle_fn = getattr(self.worker, "cycle_speed")
+        new_speed = float(cycle_fn(faster=faster))
+        icon = ">" if self.ascii_mode else "▶"
+        self._set_toast(f"[{icon} Replay speed: {int(new_speed)}x]", is_error=False)
+        return new_speed
 
     # ------------------------------------------------------------------
     # In-TUI Trajectory Snapshot Export & Toast Notifications (F-4.1)
@@ -633,9 +682,14 @@ class TUIApp:
             clean_path = validate_export_path(raw_target, base_dir=self.export_dir)
             exported_from_db = False
 
-            if snapshot.is_recording and snapshot.recording_db:
+            active_db = (
+                snapshot.recording_db
+                if (snapshot.is_recording and snapshot.recording_db)
+                else (snapshot.replay_db if snapshot.is_replay else None)
+            )
+            if active_db:
                 exported_from_db = self._try_export_from_sqlite(
-                    db_path=snapshot.recording_db,
+                    db_path=active_db,
                     train_no=train_no,
                     norm_fmt=norm_fmt,
                     clean_path=clean_path,
@@ -663,6 +717,28 @@ class TUIApp:
     # ------------------------------------------------------------------
     # Modal Event Dispatch Handlers
     # ------------------------------------------------------------------
+
+    def _handle_dvr_and_export_input(self, key: int) -> bool:
+        """Dispatch Tier 4 trajectory snapshot export ('e'/'E') and DVR controls ('[', ']', '<', '>')."""
+        if key == ord("e"):
+            self.export_selected_train_snapshot(fmt="geojson")
+            return True
+        if key == ord("E"):
+            self.export_selected_train_snapshot(fmt="csv")
+            return True
+        if key == ord("["):
+            self.scrub_replay(-300.0)
+            return True
+        if key == ord("]"):
+            self.scrub_replay(300.0)
+            return True
+        if key in (ord("<"), ord(",")):
+            self.change_replay_speed(faster=False)
+            return True
+        if key in (ord(">"), ord(".")):
+            self.change_replay_speed(faster=True)
+            return True
+        return False
 
     def _handle_normal_input(self, key: int) -> bool:
         """Handle input event in NORMAL navigation mode.
@@ -736,11 +812,9 @@ class TUIApp:
         elif key == ord("M"):
             self.cycle_station_inspector(exit_if_active=True)
 
-        # Instant In-TUI GeoJSON ('e') / CSV ('E') Trajectory Snapshot Export (F-4.1)
-        elif key == ord("e"):
-            self.export_selected_train_snapshot(fmt="geojson")
-        elif key == ord("E"):
-            self.export_selected_train_snapshot(fmt="csv")
+        # Tier 4 export ('e'/'E') & DVR timeline scrubbing / speed ('[', ']', '<', '>')
+        elif self._handle_dvr_and_export_input(key):
+            pass
 
         # Search filter prompt activation
         elif key in SEARCH_OPEN_KEYS:
@@ -1132,6 +1206,8 @@ class TUIApp:
 
                 # 2. Extract atomic snapshot without lock contention
                 snapshot = self.store.get_snapshot()
+                if snapshot.is_replay and isinstance(self.worker, ReplayWorker):
+                    self.paused = self.worker.is_paused
                 self._update_message_rate(snapshot.total_messages_received)
 
                 # 3. Synchronize auto-follow mode center coordinates
@@ -1140,7 +1216,11 @@ class TUIApp:
                     self.projector.viewport.center = GeoPoint(lat=pos.lat, lng=pos.lng)
 
                 # 4. Extract current signatures for dirty check
-                current_sec = int(time.time())
+                current_sec = (
+                    int(snapshot.replay_virtual_time)
+                    if (snapshot.is_replay and snapshot.replay_virtual_time is not None)
+                    else int(time.time())
+                )
                 vp = self.projector.viewport
                 current_vp = (
                     round(vp.center.lat, 6),
@@ -1242,7 +1322,7 @@ def is_tty_supported() -> bool:
 
 def run_tui(
     store: TrainStateStore,
-    worker: StreamWorker,
+    worker: Union[StreamWorker, ReplayWorker],
     stations: Optional[Sequence[StationNode]] = None,
     tracks: Optional[Sequence[TrackPolyline]] = None,
     target_fps: float = 15.0,

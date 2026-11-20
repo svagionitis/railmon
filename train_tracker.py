@@ -35,6 +35,7 @@ class TelemetrySource(Enum):
 
     LIVE = "live"
     DEMO = "demo"
+    REPLAY = "replay"
 
 
 class RecordingMode(Enum):
@@ -860,6 +861,19 @@ Examples:
         help="Path to SQLite historical database (default: railway_history.db).",
     )
     parser.add_argument(
+        "--replay",
+        type=str,
+        default=None,
+        metavar="DB_PATH",
+        help="Replay recorded historical telemetry from a SQLite database file in the TUI DVR.",
+    )
+    parser.add_argument(
+        "--replay-speed",
+        type=float,
+        default=1.0,
+        help="Initial playback speed multiplier for --replay mode (1, 5, 15, or 60; default: 1.0).",
+    )
+    parser.add_argument(
         "--record",
         action="store_true",
         help="Enable background telemetry recording to SQLite in stream and --tui modes.",
@@ -1120,6 +1134,34 @@ def _format_plain_train_line(t: TrainPosition) -> str:
     )
 
 
+def _build_tui_worker(
+    source: TelemetrySource,
+    store: Any,
+    db_path: str,
+    reconnect_delay: float,
+    recorder: Optional[Any],
+    replay_speed: float = 1.0,
+) -> Any:
+    """Instantiate the appropriate background ingestion or DVR replay worker for run_tui_mode."""
+    from tui.mock_engine import MockTelemetryEngine
+    from tui.stream_worker import ReplayWorker, StreamWorker
+
+    if source == TelemetrySource.REPLAY:
+        return ReplayWorker(
+            store=store,
+            db_path=db_path,
+            speed_multiplier=replay_speed,
+        )
+    if source == TelemetrySource.DEMO:
+        return StreamWorker(store=store, mock_engine=MockTelemetryEngine(), recorder=recorder)
+    return StreamWorker(
+        store=store,
+        client=RailwayGovClient(),
+        base_backoff_sec=reconnect_delay,
+        recorder=recorder,
+    )
+
+
 def run_tui_mode(
     source: TelemetrySource = TelemetrySource.LIVE,
     fps: float = 15.0,
@@ -1130,6 +1172,7 @@ def run_tui_mode(
     retention_days: Optional[int] = None,
     archive_path: Optional[str] = None,
     glyph_mode: GlyphMode = GlyphMode.AUTO,
+    replay_speed: float = 1.0,
     # Backward compatibility shims:
     demo: Optional[bool] = None,
     record: Optional[bool] = None,
@@ -1152,6 +1195,8 @@ def run_tui_mode(
         enable_deadband=enable_deadband,
         ascii_mode=ascii_mode,
     )
+    if source == TelemetrySource.REPLAY:
+        recording = RecordingMode.DISABLED
 
     if not is_tty_supported():
         logger.warning(
@@ -1176,9 +1221,8 @@ def run_tui_mode(
         import curses
         from tui.app import run_tui
         from tui.geo import is_utf8_supported
-        from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
+        from tui.mock_engine import load_stations, load_tracks
         from tui.state import TrainStateStore
-        from tui.stream_worker import StreamWorker
     except (ImportError, ModuleNotFoundError) as err:
         if sys.platform == "win32" and "curses" in str(err).lower():
             logger.warning(
@@ -1215,16 +1259,15 @@ def run_tui_mode(
     stations = list(load_stations().values())
     tracks = list(load_tracks().values())
 
-    # 3. Configure ingestion worker
-    if source == TelemetrySource.DEMO:
-        worker = StreamWorker(store=store, mock_engine=MockTelemetryEngine(), recorder=recorder)
-    else:
-        worker = StreamWorker(
-            store=store,
-            client=RailwayGovClient(),
-            base_backoff_sec=reconnect_delay,
-            recorder=recorder,
-        )
+    # 3. Configure ingestion or DVR replay worker
+    worker = _build_tui_worker(
+        source=source,
+        store=store,
+        db_path=db_path,
+        reconnect_delay=reconnect_delay,
+        recorder=recorder,
+        replay_speed=replay_speed,
+    )
 
     # 4. Start background ingestion thread
     worker.start()
@@ -1282,6 +1325,54 @@ def run_tui_mode(
         )
 
 
+def _iter_replay_plain_batches(db_path: str) -> Generator[List[TrainPosition], None, None]:
+    """Yield chronological batches of recorded TrainPositions from SQLite for headless replay."""
+    from storage.db import Database
+    from storage.repository import HistoricalRepository
+
+    if not os.path.exists(db_path):
+        return
+    db = Database(db_path, auto_migrate=False)
+    try:
+        repo = HistoricalRepository(db)
+        bounds = repo.get_replay_bounds()
+        if bounds is None:
+            return
+        observations = repo.get_replay_observations(
+            bounds.min_recorded_at,
+            bounds.max_recorded_at,
+            include_start=True,
+        )
+        by_ts: Dict[str, List[TrainPosition]] = {}
+        for obs in observations:
+            by_ts.setdefault(obs.recorded_at, []).append(obs.position)
+        for batch in by_ts.values():
+            yield batch
+    finally:
+        db.close()
+
+
+def _resolve_plain_stream_source(
+    source: TelemetrySource,
+    db_path: str,
+    reconnect_delay: float,
+    stop_event: threading.Event,
+) -> Tuple[Generator[List[TrainPosition], None, None], str]:
+    """Resolve the generator and display label for run_plain_stream_mode."""
+    if source == TelemetrySource.REPLAY:
+        return _iter_replay_plain_batches(db_path), f"SQLite Historical Replay ({db_path})"
+    if source == TelemetrySource.DEMO:
+        from tui.mock_engine import MockTelemetryEngine
+
+        stream = MockTelemetryEngine().stream_positions(interval_sec=1.0, stop_event=stop_event)
+        return stream, "Offline Mock Simulation"
+    stream = RailwayGovClient().stream_train_positions(
+        reconnect_delay=reconnect_delay,
+        stop_event=stop_event,
+    )
+    return stream, "Live SSE Stream (/api/train-stream)"
+
+
 def run_plain_stream_mode(
     source: TelemetrySource = TelemetrySource.LIVE,
     reconnect_delay: float = 3.0,
@@ -1305,23 +1396,16 @@ def run_plain_stream_mode(
         record=record,
         enable_deadband=enable_deadband,
     )
+    if source == TelemetrySource.REPLAY:
+        recording = RecordingMode.DISABLED
 
     with install_signal_handlers(stop_event) as stop_event:
         db, recorder = _start_optional_recorder(
             recording, db_path, source, deadband, retention_days, archive_path
         )
-
-        if source == TelemetrySource.DEMO:
-            from tui.mock_engine import MockTelemetryEngine
-
-            stream = MockTelemetryEngine().stream_positions(interval_sec=1.0, stop_event=stop_event)
-            source_label = "Offline Mock Simulation"
-        else:
-            stream = RailwayGovClient().stream_train_positions(
-                reconnect_delay=reconnect_delay,
-                stop_event=stop_event,
-            )
-            source_label = "Live SSE Stream (/api/train-stream)"
+        stream, source_label = _resolve_plain_stream_source(
+            source, db_path, reconnect_delay, stop_event
+        )
 
         rec_label = f" | SQLite Recording: {db_path}" if recording == RecordingMode.ENABLED else ""
         print("=" * 70)
@@ -1711,6 +1795,41 @@ def _attach_optional_retention_kwargs(args: argparse.Namespace, target_kwargs: D
         target_kwargs["archive_path"] = args.archive_db
 
 
+def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str) -> int:
+    """Validate SQLite replay database path and launch TUI DVR or headless plain stream."""
+    if not os.path.exists(replay_db):
+        print(
+            f"[Error] SQLite replay database file '{replay_db}' not found.\n"
+            f"Record telemetry first with:\n"
+            f"    railmon record --db {replay_db}\n"
+            f"    railmon --tui --record --db {replay_db}",
+            file=sys.stderr,
+        )
+        return 1
+
+    glyph_mode = GlyphMode.ASCII if getattr(args, "ascii", False) else GlyphMode.AUTO
+    replay_speed = float(getattr(args, "replay_speed", 1.0) or 1.0)
+    if is_tui:
+        run_tui_mode(
+            source=TelemetrySource.REPLAY,
+            fps=args.fps,
+            reconnect_delay=args.reconnect_delay,
+            recording=RecordingMode.DISABLED,
+            db_path=replay_db,
+            glyph_mode=glyph_mode,
+            replay_speed=replay_speed,
+        )
+        return 0
+
+    run_plain_stream_mode(
+        source=TelemetrySource.REPLAY,
+        reconnect_delay=args.reconnect_delay,
+        recording=RecordingMode.DISABLED,
+        db_path=replay_db,
+    )
+    return 0
+
+
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
     if args.mode == "schedules":
@@ -1719,6 +1838,10 @@ def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
 
     if args.mode == "history":
         return run_history_mode(args)
+
+    replay_db = getattr(args, "replay", None)
+    if replay_db is not None and str(replay_db).strip():
+        return _dispatch_replay_mode(args, is_tui, str(replay_db).strip())
 
     enable_deadband = not getattr(args, "no_filter_deadband", False)
     deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
@@ -1796,8 +1919,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     log_level = "DEBUG" if getattr(args, "debug", False) else getattr(args, "log_level", "INFO")
+    has_replay = bool(getattr(args, "replay", None) and str(getattr(args, "replay", "")).strip())
     is_tui = bool(
-        getattr(args, "tui", False)
+        (getattr(args, "tui", False) or has_replay)
         and not (getattr(args, "headless", False) or getattr(args, "daemon", False))
     )
     setup_logging(

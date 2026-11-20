@@ -21,7 +21,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` / `E` | **Implemented** | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py), [`storage/repository.py`](../storage/repository.py) |
-| **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
+| **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | **Implemented** | [`tui/app.py`](../tui/app.py), [`tui/stream_worker.py`](../tui/stream_worker.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
 
 ---
 
@@ -475,7 +475,9 @@ When observing an interesting delay event or anomaly in the TUI, pressing `e` im
 
 ---
 
-### F-4.2: SQLite Historical DVR Playback & Timeline Scrubbing (`--replay <db>`)
+### F-4.2: SQLite Historical DVR Playback & Timeline Scrubbing (`--replay <db>`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`docs/f-4-2-sqlite-historical-dvr-playback-plan.md`](./f-4-2-sqlite-historical-dvr-playback-plan.md)
 
 #### Overview
 Allow `railmon --tui --replay railway_history.db` to replay recorded historical telemetry through the exact same Curses TUI dashboard, complete with pause, fast-forward (`1x`, `5x`, `15x`, `60x`), and timeline scrubbing (`[` / `]` to jump $\pm 5\text{ minutes}$).
@@ -543,8 +545,8 @@ sequenceDiagram
 | **`m` / `M`** | **Normal** | **Cycle Station Departure Board / Return to Train Telemetry** | **Implemented (Tier 3)** |
 | **Mouse Click / Wheel** | **Normal** | **Click-to-select train or station, double-click follow/recenter, wheel zoom/scroll** | **Implemented (Tier 3)** |
 | **`e` / `E`** | **Normal** | **Export selected train trajectory to GeoJSON (`e`) / CSV (`E`) file** | **Implemented (Tier 4)** |
-| **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Proposed (Tier 4)** |
-| **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Proposed (Tier 4)** |
+| **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Implemented (Tier 4)** |
+| **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Implemented (Tier 4)** |
 
 ---
 
@@ -584,6 +586,6 @@ sequenceDiagram
 1. Enabled `curses.mousemask` and coordinate hit-testing in [`tui/app.py`](../tui/app.py) (`F-3.1`).
 2. Added dynamic scale bar calculation (`F-3.4`), station label mode `v` & corridor track colors `t` (`F-3.3`), and station proximity board `m` (`F-3.2`) in [`tui/renderer.py`](../tui/renderer.py) and [`tui/geo.py`](../tui/geo.py).
 
-### Phase 4: Tier 4 Storage Export & Historical Replay
+### Phase 4: Tier 4 Storage Export & Historical Replay — *Completed*
 1. **F-4.1 (*Completed*):** Wired `e` (GeoJSON) and `E` (CSV) in [`tui/app.py`](../tui/app.py) to export dual-source trajectory snapshots (SQLite [`HistoricalRepository`](../storage/repository.py) when `--record` is active, or in-memory [`TrainRecord.trail`](../tui/state.py) via [`export_in_memory_geojson`](../storage/repository.py) / [`export_in_memory_csv`](../storage/repository.py)) with 4-second status bar toast notifications in [`tui/renderer.py`](../tui/renderer.py).
-2. **F-4.2 (*Proposed*):** Implement `ReplayWorker` and `--replay <db>` CLI option in [`train_tracker.py`](../train_tracker.py) and [`tui/stream_worker.py`](../tui/stream_worker.py).
+2. **F-4.2 (*Completed*):** Implemented [`ReplayWorker`](../tui/stream_worker.py) virtual clock DVR engine, [`HistoricalRepository`](../storage/repository.py) indexed time-window and point-in-time seek reconstruction queries (`get_replay_bounds`, `get_replay_observations`, `get_replay_snapshot_at`), `--replay <db>` and `--replay-speed` CLI options in [`train_tracker.py`](../train_tracker.py), and interactive timeline scrubbing (`[` / `]`) and speed multiplier (`<` / `>`) controls in [`tui/app.py`](../tui/app.py) and [`tui/renderer.py`](../tui/renderer.py).

@@ -17,11 +17,14 @@ from storage.models import (
     CorridorPunctualitySummary,
     DatabaseStats,
     RecordingSessionDB,
+    ReplayBounds,
+    ReplayObservation,
     SpeedProfilePoint,
     StationDwellRecord,
     TelemetryHistoryRow,
     TripSummary,
 )
+from train_tracker import TrainPosition
 
 
 def validate_export_path(
@@ -122,6 +125,83 @@ def _epoch_to_iso_utc(epoch_sec: float) -> str:
         return datetime.fromtimestamp(float(epoch_sec), tz=timezone.utc).isoformat().replace("+00:00", "Z")
     except (ValueError, TypeError, OSError, OverflowError):
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso_to_epoch(val: Any) -> float:
+    """Convert an ISO-8601 timestamp string or datetime object to a UTC POSIX epoch float."""
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, datetime):
+        dt = val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    elif " " in s and "T" not in s:
+        s = s.replace(" ", "T")
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _build_replay_observation(row: Any) -> ReplayObservation:
+    """Construct a ReplayObservation and enriched TrainPosition from a joined SQLite row."""
+    rec_raw = row["recorded_at"]
+    if hasattr(rec_raw, "isoformat"):
+        rec_iso = rec_raw.isoformat().replace("+00:00", "Z")
+    else:
+        rec_iso = str(rec_raw).replace("+00:00", "Z")
+    rec_epoch = parse_iso_to_epoch(rec_raw)
+
+    train_no = str(row["train_number"]).strip() or "Unknown"
+    spd = max(0.0, float(row["speed"] if row["speed"] is not None else 0.0))
+    crs = float(row["course"] if row["course"] is not None else 0.0)
+    trk_hdg = float(row["track_heading"]) if row["track_heading"] is not None else crs
+    alt = float(row["altitude"]) if row["altitude"] is not None else None
+    dly = int(row["delay_min"]) if row["delay_min"] is not None else 0
+    st = str(row["status"]) if row["status"] is not None else ("Κανονική" if spd > 5.0 else "Στάση")
+    prog = float(row["progress"]) if row["progress"] is not None else None
+    ch_m = int(row["chainage_m"]) if row["chainage_m"] is not None else None
+    dist_m = int(row["dist_to_dest_m"]) if row["dist_to_dest_m"] is not None else None
+
+    pos = TrainPosition(
+        id=train_no,
+        train_number=train_no,
+        locomotive_number=str(row["locomotive_number"]) if row["locomotive_number"] is not None else None,
+        name=str(row["default_name"]) if row["default_name"] is not None else train_no,
+        train_type=str(row["train_type"]) if row["train_type"] is not None else None,
+        service_type=str(row["service_type"]) if row["service_type"] is not None else None,
+        status=st,
+        origin=str(row["origin"]) if row["origin"] is not None else None,
+        destination=str(row["destination"]) if row["destination"] is not None else None,
+        next_station=str(row["next_station"]) if row["next_station"] is not None else None,
+        speed=spd,
+        course=crs,
+        track_heading=trk_hdg,
+        lat=float(row["lat"]),
+        lng=float(row["lng"]),
+        altitude=alt,
+        delay=dly,
+        progress=prog,
+        chainage_m=ch_m,
+        corridor=str(row["corridor"]) if row["corridor"] is not None else None,
+        distance_to_destination_m=dist_m,
+        timestamp=rec_iso,
+        schedule_id=str(row["schedule_id"]) if row["schedule_id"] is not None else None,
+    )
+    return ReplayObservation(
+        position=pos,
+        recorded_at=rec_iso,
+        recorded_epoch=rec_epoch,
+    )
 
 
 def _extract_in_memory_trajectory_points(record: Any) -> List[Dict[str, Any]]:
@@ -517,6 +597,118 @@ class HistoricalRepository:
                         yield TelemetryHistoryRow.from_db_row(row)
             finally:
                 cur.close()
+
+    def get_replay_bounds(
+        self,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> Optional[ReplayBounds]:
+        """
+        Resolve earliest and latest telemetry timestamps and observation counts for DVR replay.
+
+        Args:
+            start_time: Optional ISO-8601 lower bound filter.
+            end_time: Optional ISO-8601 upper bound filter.
+
+        Returns:
+            ReplayBounds if the database contains matching telemetry rows, else None.
+        """
+        sql = """
+        SELECT
+            MIN(recorded_at) AS min_ts,
+            MAX(recorded_at) AS max_ts,
+            COUNT(*) AS total_rows,
+            COUNT(DISTINCT train_number) AS total_trains
+        FROM telemetry_history
+        WHERE (? IS NULL OR recorded_at >= ?)
+          AND (? IS NULL OR recorded_at <= ?);
+        """
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (start_time, start_time, end_time, end_time))
+                row = cur.fetchone()
+            finally:
+                cur.close()
+
+        if row is None or not row["total_rows"] or row["min_ts"] is None or row["max_ts"] is None:
+            return None
+
+        min_iso = self._iso_or_str(row["min_ts"])
+        max_iso = self._iso_or_str(row["max_ts"])
+        min_ep = parse_iso_to_epoch(row["min_ts"])
+        max_ep = max(min_ep, parse_iso_to_epoch(row["max_ts"]))
+
+        return ReplayBounds(
+            min_recorded_at=min_iso,
+            max_recorded_at=max_iso,
+            min_epoch=min_ep,
+            max_epoch=max_ep,
+            total_rows=int(row["total_rows"]),
+            total_trains=int(row["total_trains"] or 0),
+        )
+
+    def get_replay_observations(
+        self,
+        start_time: str,
+        end_time: str,
+        include_start: bool = False,
+    ) -> List[ReplayObservation]:
+        """
+        Retrieve chronologically ordered telemetry observations within a replay time window,
+        enriched with vehicle metadata from `trains` and route endpoints from `scheduled_trips`.
+
+        Args:
+            start_time: Window start ISO-8601 UTC timestamp.
+            end_time: Window end ISO-8601 UTC timestamp (inclusive).
+            include_start: If True, uses `recorded_at >= start_time`; else `recorded_at > start_time`.
+
+        Returns:
+            List of ReplayObservation objects ordered by (recorded_at ASC, id ASC).
+        """
+        op = ">=" if include_start else ">"
+        sql = (
+            "SELECT "
+            "th.id, th.train_number, th.schedule_id, th.recorded_at, th.lat, th.lng, "
+            "th.speed, th.course, th.track_heading, th.altitude, th.delay_min, th.status, "
+            "th.progress, th.chainage_m, th.dist_to_dest_m, th.next_station, "
+            "COALESCE(th.corridor, st.corridor) AS corridor, "
+            "t.locomotive_number, t.default_name, t.train_type, t.service_type, "
+            "st.origin, st.destination "
+            "FROM telemetry_history th "
+            "LEFT JOIN trains t ON th.train_number = t.train_number "
+            "LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id "
+            f"WHERE th.recorded_at {op} ? AND th.recorded_at <= ? "
+            "ORDER BY th.recorded_at ASC, th.id ASC;"
+        )
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (start_time, end_time))
+                return [_build_replay_observation(r) for r in cur.fetchall()]
+            finally:
+                cur.close()
+
+    def get_replay_snapshot_at(
+        self,
+        target_epoch: float,
+        lookback_sec: float = 900.0,
+    ) -> List[ReplayObservation]:
+        """
+        Retrieve all telemetry observations within [target_epoch - lookback_sec, target_epoch]
+        to reconstruct point-in-time train positions and breadcrumb trails after a timeline seek.
+
+        Args:
+            target_epoch: Target virtual clock UTC epoch timestamp in seconds.
+            lookback_sec: Lookback window in seconds (default: 900.0s / 15m to cover deadband heartbeats).
+
+        Returns:
+            Chronological list of ReplayObservation instances up to target_epoch.
+        """
+        safe_lookback = max(1.0, float(lookback_sec))
+        start_iso = _epoch_to_iso_utc(float(target_epoch) - safe_lookback)
+        end_iso = _epoch_to_iso_utc(float(target_epoch))
+        return self.get_replay_observations(start_iso, end_iso, include_start=True)
 
     # -------------------------------------------------------------------------
     # 2. Trip & Service Discovery

@@ -16,6 +16,8 @@ from storage.models import (
     CorridorPunctualitySummary,
     DatabaseStats,
     RecordingSessionDB,
+    ReplayBounds,
+    ReplayObservation,
     SpeedProfilePoint,
     StationDwellRecord,
     TelemetryHistoryRow,
@@ -26,6 +28,7 @@ from storage.repository import (
     HistoricalRepository,
     export_in_memory_csv,
     export_in_memory_geojson,
+    parse_iso_to_epoch,
     sanitize_train_identifier,
     validate_export_path,
 )
@@ -803,6 +806,72 @@ class TestHistoricalRepository(unittest.TestCase):
         self.assertEqual(export_in_memory_csv(record, csv_file), 3)
         self.assertTrue(os.path.exists(csv_file))
         self.assertEqual(export_in_memory_csv(None, io.StringIO()), 0)
+
+    def test_get_replay_bounds_and_observations_and_snapshot_at(self):
+        """TC-F42-01 & TC-F42-02: Verify get_replay_bounds, get_replay_observations, and get_replay_snapshot_at."""
+        from datetime import datetime, timezone
+
+        # 1. parse_iso_to_epoch handles ISO strings, space-separated strings, datetime objects, floats, and invalid values
+        ep_z = parse_iso_to_epoch("2026-11-18T10:00:00Z")
+        ep_space = parse_iso_to_epoch("2026-11-18 10:00:00")
+        ep_dt = parse_iso_to_epoch(datetime(2026, 11, 18, 10, 0, 0, tzinfo=timezone.utc))
+        self.assertAlmostEqual(ep_z, ep_space, places=3)
+        self.assertAlmostEqual(ep_z, ep_dt, places=3)
+        self.assertEqual(parse_iso_to_epoch(12345.5), 12345.5)
+        self.assertEqual(parse_iso_to_epoch(""), 0.0)
+        self.assertEqual(parse_iso_to_epoch(None), 0.0)
+        self.assertEqual(parse_iso_to_epoch("not-a-timestamp"), 0.0)
+
+        # 2. get_replay_bounds on seeded DB (earliest: 10:00:00Z, latest: 10:12:00Z, 8 rows, 2 trains)
+        bounds = self.repo.get_replay_bounds()
+        self.assertIsNotNone(bounds)
+        self.assertIsInstance(bounds, ReplayBounds)
+        self.assertEqual(bounds.min_recorded_at, "2026-11-18T10:00:00Z")
+        self.assertEqual(bounds.max_recorded_at, "2026-11-18T10:12:00Z")
+        self.assertEqual(bounds.total_rows, 8)
+        self.assertEqual(bounds.total_trains, 2)
+        self.assertAlmostEqual(bounds.duration_sec, 720.0, places=2)
+
+        # 3. get_replay_observations with include_start=False vs include_start=True
+        obs_excl = self.repo.get_replay_observations(
+            "2026-11-18T10:00:00Z",
+            "2026-11-18T10:02:00Z",
+            include_start=False,
+        )
+        self.assertEqual(len(obs_excl), 2)
+        self.assertEqual(obs_excl[0].recorded_at, "2026-11-18T10:01:00Z")
+        self.assertEqual(obs_excl[1].recorded_at, "2026-11-18T10:02:00Z")
+        # Enriched from trains and scheduled_trips tables
+        self.assertEqual(obs_excl[0].position.name, "Intercity 50")
+        self.assertEqual(obs_excl[0].position.origin, "ATH")
+        self.assertEqual(obs_excl[0].position.destination, "SKG")
+        self.assertEqual(obs_excl[0].position.corridor, "ATH-SKG")
+
+        obs_incl = self.repo.get_replay_observations(
+            "2026-11-18T10:00:00Z",
+            "2026-11-18T10:02:00Z",
+            include_start=True,
+        )
+        self.assertEqual(len(obs_incl), 3)
+        self.assertEqual(obs_incl[0].recorded_at, "2026-11-18T10:00:00Z")
+
+        # 4. get_replay_snapshot_at reconstructs lookback window up to target_epoch
+        target_ep = parse_iso_to_epoch("2026-11-18T10:10:00Z")
+        snap_obs = self.repo.get_replay_snapshot_at(target_ep, lookback_sec=900.0)
+        # Should include all 4 rows of 1597 (10:00..10:03) and first 2 rows of 2232 (10:09..10:10) = 6 rows
+        self.assertEqual(len(snap_obs), 6)
+        self.assertIsInstance(snap_obs[0], ReplayObservation)
+        self.assertEqual(snap_obs[-1].position.train_number, "2232")
+        self.assertEqual(snap_obs[-1].recorded_at, "2026-11-18T10:10:00Z")
+
+        # 5. Empty DB returns None for get_replay_bounds
+        empty_db_path = os.path.join(self.temp_dir, "empty_replay.db")
+        empty_db = Database(empty_db_path)
+        try:
+            empty_repo = HistoricalRepository(empty_db)
+            self.assertIsNone(empty_repo.get_replay_bounds())
+        finally:
+            empty_db.close()
 
 
 if __name__ == "__main__":

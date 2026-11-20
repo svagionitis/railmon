@@ -26,6 +26,7 @@ class TestEnumDefinitions(unittest.TestCase):
     def test_telemetry_source_members(self):
         self.assertEqual(TelemetrySource.LIVE.value, "live")
         self.assertEqual(TelemetrySource.DEMO.value, "demo")
+        self.assertEqual(TelemetrySource.REPLAY.value, "replay")
 
     def test_recording_mode_members(self):
         self.assertEqual(RecordingMode.DISABLED.value, "disabled")

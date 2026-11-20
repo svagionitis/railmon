@@ -7,6 +7,7 @@ telemetry inspection panels.
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum, auto
 import curses
 import math
@@ -1156,6 +1157,48 @@ class TUIRenderer:
                 x = max(1, (width - text_w) // 2)
                 safe_addstr(win, y, x, text, attr, ascii_mode=self.ascii_mode)
 
+    def _render_header_mode_badge(
+        self,
+        win: Any,
+        snapshot: StateSnapshot,
+        left_w: int,
+        width: int,
+    ) -> int:
+        """Draw the recording or historical DVR mode badge in the top header strip."""
+        if getattr(snapshot, "is_replay", False) and width > left_w + 14:
+            spd_int = int(round(getattr(snapshot, "replay_speed", 1.0) or 1.0))
+            is_paused = snapshot.connection_status == ConnectionStatus.PAUSED
+            if is_paused:
+                icon = "||" if self.ascii_mode else "❚❚"
+                b_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+            else:
+                icon = ">" if self.ascii_mode else "▶"
+                b_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_BOLD) | curses.A_BOLD
+            dvr_text = f" [{icon} DVR {spd_int}x]"
+            safe_addstr(win, 0, left_w, dvr_text, b_attr, ascii_mode=self.ascii_mode)
+            return left_w + get_string_display_width(dvr_text)
+
+        if snapshot.is_recording and width > left_w + 12:
+            rec_text = self.glyphs.badge_rec
+            rec_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            safe_addstr(win, 0, left_w, rec_text, rec_attr, ascii_mode=self.ascii_mode)
+            return left_w + get_string_display_width(rec_text)
+
+        return left_w
+
+    @staticmethod
+    def _format_header_clock(snapshot: StateSnapshot, available_w: int) -> str:
+        """Format the right-aligned header clock (virtual UTC clock in replay mode, else wall-clock)."""
+        if getattr(snapshot, "is_replay", False) and getattr(snapshot, "replay_virtual_time", None) is not None:
+            v_epoch = float(snapshot.replay_virtual_time or 0.0)
+            dt_utc = datetime.fromtimestamp(v_epoch, tz=timezone.utc)
+            if available_w >= 26:
+                return dt_utc.strftime(" %Y-%m-%d %H:%M:%S UTC ")
+            if available_w >= 15:
+                return dt_utc.strftime(" %H:%M:%S UTC ")
+            return dt_utc.strftime(" %H:%M:%S ")
+        return time.strftime(" %H:%M:%S ")
+
     def render_header(self, win: Any, snapshot: StateSnapshot, width: int) -> None:
         """Render the top full-width header strip.
 
@@ -1183,9 +1226,6 @@ class TUIRenderer:
 
         counts_text = f" | Active: {total_active} | Delayed: {delayed_count} ({delay_pct}%)"
 
-        # System time clock
-        time_str = time.strftime(" %H:%M:%S ")
-
         # Draw left header elements
         safe_addstr(win, 0, 0, left_text, header_attr, ascii_mode=self.ascii_mode)
         left_w = get_string_display_width(left_text)
@@ -1194,14 +1234,11 @@ class TUIRenderer:
         safe_addstr(win, 0, left_w, counts_text, cnt_attr, ascii_mode=self.ascii_mode)
         left_w += get_string_display_width(counts_text)
 
-        # Draw recording status badge if recording is active
-        if snapshot.is_recording and width > left_w + 12:
-            rec_text = self.glyphs.badge_rec
-            rec_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
-            safe_addstr(win, 0, left_w, rec_text, rec_attr, ascii_mode=self.ascii_mode)
-            left_w += get_string_display_width(rec_text)
+        # Draw recording or DVR replay status badge
+        left_w = self._render_header_mode_badge(win, snapshot, left_w, width)
 
-        # Draw right-aligned clock
+        # Draw right-aligned clock (virtual UTC clock in DVR mode, else wall-clock)
+        time_str = self._format_header_clock(snapshot, width - left_w)
         time_x = width - get_string_display_width(time_str)
         if time_x > left_w:
             safe_addstr(win, 0, time_x, time_str, dim_attr, ascii_mode=self.ascii_mode)
@@ -1866,7 +1903,16 @@ class TUIRenderer:
 
         speed_history = record.get_speed_history(max_samples=10)
         sparkline_str = format_speed_sparkline(speed_history, max_bars=10, ascii_mode=self.ascii_mode)
-        telemetry_str, telemetry_pair = format_telemetry_age(record.last_updated, record.update_count)
+        ref_now = (
+            getattr(snapshot, "replay_virtual_time", None)
+            if getattr(snapshot, "is_replay", False)
+            else None
+        )
+        telemetry_str, telemetry_pair = format_telemetry_age(
+            record.last_updated,
+            record.update_count,
+            now=ref_now,
+        )
         telemetry_attr = safe_color_pair(telemetry_pair, curses.A_BOLD if telemetry_pair != PAIR_DEFAULT else curses.A_NORMAL)
         if telemetry_pair != PAIR_DEFAULT:
             telemetry_attr |= curses.A_BOLD
@@ -1904,6 +1950,88 @@ class TUIRenderer:
             y = 1 + r_idx
             safe_addstr(win, y, 2, f"{label:<13}", title_attr, max_w=13, ascii_mode=self.ascii_mode)
             safe_addstr(win, y, 16, value, attr, max_w=max_x - 17, ascii_mode=self.ascii_mode)
+
+    def _resolve_replay_status_badge(
+        self,
+        snapshot: StateSnapshot,
+        playback_state: PlaybackState,
+        connected_attr: int,
+        warn_attr: int,
+        alert_attr: int,
+    ) -> Tuple[str, int]:
+        """Format the right-aligned status bar badge when SQLite historical DVR replay is active."""
+        if snapshot.connection_status == ConnectionStatus.ERROR:
+            return self.glyphs.badge_conn_error, alert_attr
+
+        v_now = float(getattr(snapshot, "replay_virtual_time", None) or 0.0)
+        v_start = float(getattr(snapshot, "replay_start_time", None) or v_now)
+        v_end = float(getattr(snapshot, "replay_end_time", None) or v_now)
+        span = max(0.0, v_end - v_start)
+        pct = int(round(((v_now - v_start) / span) * 100)) if span > 1e-6 else 100
+        pct = max(0, min(100, pct))
+
+        hh_mm_ss = (
+            datetime.fromtimestamp(v_now, tz=timezone.utc).strftime("%H:%M:%S")
+            if v_now > 1e-6
+            else "--:--:--"
+        )
+        spd_int = int(round(getattr(snapshot, "replay_speed", 1.0) or 1.0))
+        is_paused = (
+            playback_state == PlaybackState.PAUSED
+            or snapshot.connection_status == ConnectionStatus.PAUSED
+        )
+        if is_paused:
+            icon = "||" if self.ascii_mode else "❚❚"
+            return f" {icon} DVR {spd_int}x ({hh_mm_ss} | {pct}%) ", warn_attr
+        icon = ">" if self.ascii_mode else "▶"
+        return f" {icon} DVR {spd_int}x ({hh_mm_ss} | {pct}%) ", connected_attr
+
+    def _resolve_status_badge(
+        self,
+        snapshot: StateSnapshot,
+        playback_state: PlaybackState,
+        msg_rate: float,
+        connected_attr: int,
+        status_attr: int,
+        warn_attr: int,
+        alert_attr: int,
+    ) -> Tuple[str, int]:
+        """Determine the right-hand status bar connectivity or DVR replay badge and color attribute."""
+        if getattr(snapshot, "is_replay", False):
+            return self._resolve_replay_status_badge(
+                snapshot, playback_state, connected_attr, warn_attr, alert_attr
+            )
+        if playback_state == PlaybackState.PAUSED:
+            return self.glyphs.badge_paused, warn_attr
+
+        status = snapshot.connection_status
+        if status == ConnectionStatus.CONNECTED:
+            return f"{self.glyphs.badge_live}({msg_rate:3.1f} msg/s) ", connected_attr
+        if status == ConnectionStatus.CONNECTING:
+            return self.glyphs.badge_connecting, status_attr
+        if status == ConnectionStatus.RECONNECTING:
+            return self.glyphs.badge_reconnecting, warn_attr
+        if status == ConnectionStatus.ERROR:
+            return self.glyphs.badge_conn_error, alert_attr
+        return self.glyphs.badge_demo, connected_attr
+
+    @staticmethod
+    def _format_status_shortcuts(snapshot: StateSnapshot) -> str:
+        """Build the bottom status bar keybindings cheat sheet string."""
+        follow_str = (
+            "[f] Unfollow"
+            if (snapshot.follow_mode and snapshot.selected_train)
+            else "[f] Follow"
+        )
+        if getattr(snapshot, "is_replay", False):
+            return (
+                f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [[/]] Scrub  [</>] Speed  [Space] Pause  "
+                f"[Tab] Select  [s] Sort  [b] Trails  [e] Export  [m] Stations  {follow_str}  [/] Filter  [?] Help"
+            )
+        return (
+            f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
+            f"[e] Export  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        )
 
     def render_status_bar(
         self,
@@ -1965,28 +2093,15 @@ class TUIRenderer:
             safe_addstr(win, 0, hint_x, hint_text, status_attr, ascii_mode=self.ascii_mode)
             return
 
-        # Connection status badge
-        if playback_state == PlaybackState.PAUSED:
-            badge = self.glyphs.badge_paused
-            b_attr = warn_attr
-        else:
-            status = snapshot.connection_status
-            if status == ConnectionStatus.CONNECTED:
-                badge = f"{self.glyphs.badge_live}({msg_rate:3.1f} msg/s) "
-                b_attr = connected_attr
-            elif status == ConnectionStatus.CONNECTING:
-                badge = self.glyphs.badge_connecting
-                b_attr = status_attr
-            elif status == ConnectionStatus.RECONNECTING:
-                badge = self.glyphs.badge_reconnecting
-                b_attr = warn_attr
-            elif status == ConnectionStatus.ERROR:
-                badge = self.glyphs.badge_conn_error
-                b_attr = alert_attr
-            else:
-                badge = self.glyphs.badge_demo
-                b_attr = connected_attr
-
+        badge, b_attr = self._resolve_status_badge(
+            snapshot,
+            playback_state,
+            msg_rate,
+            connected_attr,
+            status_attr,
+            warn_attr,
+            alert_attr,
+        )
         badge_w = get_string_display_width(badge)
         badge_x = max(0, width - badge_w)
 
@@ -2003,13 +2118,16 @@ class TUIRenderer:
                 ascii_mode=self.ascii_mode,
             )
         else:
-            # Keybindings cheat sheet
-            follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
-            shortcuts = (
-                f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
-                f"[e] Export  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+            shortcuts = self._format_status_shortcuts(snapshot)
+            safe_addstr(
+                win,
+                0,
+                0,
+                shortcuts,
+                status_attr,
+                max_w=max(0, width - max(24, badge_w + 1)),
+                ascii_mode=self.ascii_mode,
             )
-            safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         safe_addstr(win, 0, badge_x, badge, b_attr, ascii_mode=self.ascii_mode)
 
@@ -2067,8 +2185,8 @@ class TUIRenderer:
             ]),
             ("SEARCH & SYSTEM CONTROLS", [
                 ("/, Esc", "Enter search filter mode / Cancel and return"),
-                ("e / E, Space", "Export train GeoJSON / CSV / Pause telemetry stream"),
-                ("?, q", "Toggle this help dialog / Clean exit dashboard"),
+                ("e / E, Space", "Export train GeoJSON / CSV / Pause stream or DVR"),
+                ("[ / ], < / >, ?, q", "DVR scrub -/+5m & speed (1x..60x) / Help / Quit"),
             ]),
             ("SYMBOLS & COLOR LEGEND", [
                 (

@@ -440,3 +440,30 @@ class DatabaseStats:
     latest_record: Optional[str]
     wal_mode_enabled: bool
 
+
+@dataclass(frozen=True)
+class ReplayBounds:
+    """Temporal boundaries and observation counts for SQLite historical DVR replay."""
+
+    min_recorded_at: str
+    max_recorded_at: str
+    min_epoch: float
+    max_epoch: float
+    total_rows: int
+    total_trains: int
+
+    @property
+    def duration_sec(self) -> float:
+        """Total timeline span in seconds."""
+        return max(0.0, self.max_epoch - self.min_epoch)
+
+
+@dataclass(frozen=True)
+class ReplayObservation:
+    """A single historical telemetry observation enriched with vehicle and trip metadata."""
+
+    position: TrainPosition
+    recorded_at: str
+    recorded_epoch: float
+
+

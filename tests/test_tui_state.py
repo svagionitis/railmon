@@ -18,6 +18,7 @@ from tui.state import (
     ConnectionStatus,
     HistoricalBreadcrumb,
     InspectorMode,
+    REPLAY_SPEED_MULTIPLIERS,
     RosterSortMode,
     StateSnapshot,
     StationLabelMode,
@@ -25,7 +26,7 @@ from tui.state import (
     TrainRecord,
     TrainStateStore,
 )
-from tui.stream_worker import StreamWorker
+from tui.stream_worker import ReplayWorker, StreamWorker
 
 
 def _create_sample_train(
@@ -948,6 +949,174 @@ class TestStreamWorker(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             self.store.set_track_color_mode("CORRIDOR")  # type: ignore[arg-type]
+
+    def test_replay_state_and_virtual_timestamps(self):
+        """TC-F42-03: Verify set_replay_status, replace_replay_state, ingest_replay_observations, and virtual pruning."""
+        t0 = 1795000000.0
+        self.store.set_replay_status(
+            is_replay=True,
+            db_path="history.db",
+            virtual_time=t0,
+            start_time=t0,
+            end_time=t0 + 3600.0,
+            speed=15.0,
+        )
+        snap0 = self.store.get_snapshot()
+        self.assertTrue(snap0.is_replay)
+        self.assertEqual(snap0.replay_db, "history.db")
+        self.assertEqual(snap0.replay_virtual_time, t0)
+        self.assertEqual(snap0.replay_start_time, t0)
+        self.assertEqual(snap0.replay_end_time, t0 + 3600.0)
+        self.assertEqual(snap0.replay_speed, 15.0)
+
+        # Build 3 historical observations for train 1597 and 1 for train 2232
+        p1 = _create_sample_train("1597", "1597", lat=38.00, lng=23.70, speed=80.0)
+        p2 = _create_sample_train("1597", "1597", lat=38.05, lng=23.72, speed=120.0)
+        p3 = _create_sample_train("1597", "1597", lat=38.10, lng=23.75, speed=140.0)
+        p_other = _create_sample_train("2232", "2232", lat=38.46, lng=23.59, speed=60.0)
+
+        self.store.replace_replay_state(
+            [(p1, t0 + 60.0), (p2, t0 + 120.0), (p_other, t0 + 150.0)],
+            virtual_now=t0 + 150.0,
+        )
+        self.store.select_by_id("1597")
+        self.store.set_follow_mode(True)
+
+        snap1 = self.store.get_snapshot()
+        self.assertEqual(len(snap1.trains), 2)
+        self.assertEqual(len(snap1.trains["1597"].trail), 2)
+        self.assertEqual(snap1.trains["1597"].last_updated, t0 + 120.0)
+        self.assertEqual(snap1.replay_virtual_time, t0 + 150.0)
+
+        # Ingest next incremental observation at t0 + 180.0
+        self.store.ingest_replay_observations([(p3, t0 + 180.0)], virtual_now=t0 + 180.0)
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(len(snap2.trains["1597"].trail), 3)
+        self.assertEqual(snap2.trains["1597"].position.speed, 140.0)
+        self.assertEqual(snap2.replay_virtual_time, t0 + 180.0)
+
+        # Virtual pruning: 2232 was updated at t0+150, 1597 at t0+180. At virtual time t0+1200 with 900s cutoff:
+        # 2232 age = 1050s (>900s -> pruned), 1597 age = 1020s (>900s -> pruned)
+        # At virtual time t0+1060 with 900s cutoff: 2232 age = 910s (pruned), 1597 age = 880s (kept)
+        pruned = self.store.prune_stale_trains(max_age_sec=900.0, now=t0 + 1060.0)
+        self.assertEqual(pruned, 1)
+        snap3 = self.store.get_snapshot()
+        self.assertIn("1597", snap3.trains)
+        self.assertNotIn("2232", snap3.trains)
+        # Selection on 1597 is preserved!
+        self.assertEqual(snap3.selected_train.position.id, "1597")
+        self.assertTrue(snap3.follow_mode)
+
+        # Scrub to a window where 1597 is no longer present -> selection and follow_mode reset cleanly
+        self.store.replace_replay_state([(p_other, t0 + 1500.0)], virtual_now=t0 + 1500.0)
+        snap4 = self.store.get_snapshot()
+        self.assertIsNone(snap4.selected_train)
+        self.assertFalse(snap4.follow_mode)
+
+    def test_replay_worker_virtual_clock_scrubbing_and_speed_cycling(self):
+        """TC-F42-04: Verify ReplayWorker initializes bounds, advances virtual clock, seeks, cycles speed, and handles empty DB."""
+        import os
+        import shutil
+        import tempfile
+        from storage.db import Database
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(temp_dir, "dvr_test.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO trains (train_number, default_name, train_type, service_type, first_observed_at, last_observed_at)
+                        VALUES ('1597', 'IC 1597', 'IC', 'InterCity', '2026-11-20T10:00:00Z', '2026-11-20T10:10:00Z');
+                        """
+                    )
+                    cur.executemany(
+                        """
+                        INSERT INTO telemetry_history (
+                            train_number, recorded_at, lat, lng, speed, course, delay_min, status, next_station, corridor
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        [
+                            ("1597", "2026-11-20T10:00:00Z", 38.00, 23.70, 80.0, 0.0, 0, "Normal", "SKA", "PATHE"),
+                            ("1597", "2026-11-20T10:05:00Z", 38.08, 23.73, 125.0, 0.0, 2, "Normal", "OINOI", "PATHE"),
+                            ("1597", "2026-11-20T10:10:00Z", 38.20, 23.65, 145.0, 0.0, 4, "Normal", "THIVA", "PATHE"),
+                        ],
+                    )
+            finally:
+                db.close()
+
+            store = TrainStateStore()
+            worker = ReplayWorker(
+                store=store,
+                db_path=db_path,
+                speed_multiplier=5.0,
+                tick_interval_sec=0.02,
+            )
+
+            # 1. Initialize timeline synchronously
+            bounds = worker.initialize_timeline()
+            self.assertIsNotNone(bounds)
+            self.assertEqual(bounds.total_rows, 3)
+            self.assertEqual(worker.speed_multiplier, 5.0)
+            self.assertAlmostEqual(worker.virtual_time, bounds.min_epoch, places=2)
+
+            snap_init = store.get_snapshot()
+            self.assertTrue(snap_init.is_replay)
+            self.assertIn("1597", snap_init.trains)
+            self.assertEqual(snap_init.trains["1597"].position.speed, 80.0)
+
+            # 2. Scrub forward +5 minutes (+300s) -> reaches 10:05:00Z where speed is 125.0 and trail has 2 points
+            t_5m = worker.seek_relative(300.0)
+            self.assertAlmostEqual(t_5m, bounds.min_epoch + 300.0, places=2)
+            snap_5m = store.get_snapshot()
+            self.assertEqual(snap_5m.trains["1597"].position.speed, 125.0)
+            self.assertEqual(len(snap_5m.trains["1597"].trail), 2)
+
+            # 3. Scrub forward beyond max_epoch (+1000s) -> clamps to max_epoch (10:10:00Z) and sets at_eof=True
+            t_eof = worker.seek_relative(1000.0)
+            self.assertAlmostEqual(t_eof, bounds.max_epoch, places=2)
+            self.assertTrue(worker.at_eof)
+            snap_eof = store.get_snapshot()
+            self.assertEqual(snap_eof.trains["1597"].position.speed, 145.0)
+            self.assertEqual(len(snap_eof.trains["1597"].trail), 3)
+
+            # 4. Cycle speed up and down across REPLAY_SPEED_MULTIPLIERS (1x, 5x, 15x, 60x)
+            self.assertEqual(REPLAY_SPEED_MULTIPLIERS, (1.0, 5.0, 15.0, 60.0))
+            self.assertEqual(worker.cycle_speed(faster=True), 15.0)
+            self.assertEqual(worker.cycle_speed(faster=True), 60.0)
+            self.assertEqual(worker.cycle_speed(faster=True), 60.0)  # Clamped at max 60x
+            self.assertEqual(worker.cycle_speed(faster=False), 15.0)
+            self.assertEqual(worker.cycle_speed(faster=False), 5.0)
+            self.assertEqual(worker.cycle_speed(faster=False), 1.0)
+            self.assertEqual(worker.cycle_speed(faster=False), 1.0)  # Clamped at min 1x
+
+            # 5. Start background thread, pause, resume from EOF (rewinds to min_epoch), and stop
+            worker.start()
+            self.assertTrue(worker.is_running)
+            time.sleep(0.06)
+            # Because worker was at EOF, background loop auto-paused at EOF
+            self.assertTrue(worker.is_paused)
+            # Calling resume() at EOF rewinds to min_epoch and resumes playback
+            worker.resume()
+            self.assertFalse(worker.is_paused)
+            time.sleep(0.04)
+            worker.pause()
+            self.assertTrue(worker.is_paused)
+            worker.stop(timeout_sec=1.0)
+            self.assertFalse(worker.is_running)
+
+            # 6. Empty database sets ConnectionStatus.ERROR gracefully
+            empty_db_path = os.path.join(temp_dir, "empty.db")
+            empty_db = Database(empty_db_path)
+            empty_db.close()
+            empty_store = TrainStateStore()
+            empty_worker = ReplayWorker(store=empty_store, db_path=empty_db_path)
+            self.assertIsNone(empty_worker.initialize_timeline())
+            self.assertEqual(empty_store.get_snapshot().connection_status, ConnectionStatus.ERROR)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

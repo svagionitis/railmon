@@ -108,6 +108,12 @@ class TestCLIArgumentParser(unittest.TestCase):
         args = self.parser.parse_args(["--debug"])
         self.assertTrue(args.debug)
 
+    def test_replay_flags(self):
+        """TC-F42-08a: --replay and --replay-speed flags parsed correctly."""
+        args = self.parser.parse_args(["--tui", "--replay", "my_history.db", "--replay-speed", "15"])
+        self.assertEqual(args.replay, "my_history.db")
+        self.assertEqual(args.replay_speed, 15.0)
+
 
 class TestCLIDispatchAndLifecycle(unittest.TestCase):
     """Test suite for CLI dispatch routing and process lifecycle safety."""
@@ -420,6 +426,38 @@ class TestCLIASCIIFallbackRouting(unittest.TestCase):
         self.assertTrue(mock_run_tui.called)
         _, kwargs = mock_run_tui.call_args
         self.assertTrue(kwargs.get("ascii_mode"))
+
+    @patch("train_tracker.run_tui_mode")
+    def test_main_replay_routes_to_tui_mode_and_validates_missing_db(self, mock_run_tui):
+        """TC-F42-08b: Verify --replay validates DB file existence and dispatches TelemetrySource.REPLAY."""
+        import os
+        import tempfile
+
+        # 1. Non-existent database file returns exit code 1 with helpful stderr message
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            ret_missing = main(["--tui", "--replay", "nonexistent_dvr_file_12345.db"])
+            self.assertEqual(ret_missing, 1)
+            self.assertIn("not found", mock_stderr.getvalue())
+            mock_run_tui.assert_not_called()
+
+        # 2. Existing database file routes to run_tui_mode(source=TelemetrySource.REPLAY) even without explicit --tui
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+            tmp_db = tf.name
+        try:
+            ret_ok = main(["--replay", tmp_db, "--replay-speed", "15"])
+            self.assertEqual(ret_ok, 0)
+            mock_run_tui.assert_called_once_with(
+                source=TelemetrySource.REPLAY,
+                fps=15.0,
+                reconnect_delay=3.0,
+                recording=RecordingMode.DISABLED,
+                db_path=tmp_db,
+                glyph_mode=GlyphMode.AUTO,
+                replay_speed=15.0,
+            )
+        finally:
+            if os.path.exists(tmp_db):
+                os.remove(tmp_db)
 
 
 if __name__ == "__main__":
