@@ -3,7 +3,7 @@ Historical data repository and analytical query engine for Hellenic Railways tel
 """
 
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -87,6 +87,316 @@ def validate_export_path(
             raise ValueError(f"Export path escapes allowed base directory: '{raw_path}'")
 
     return abs_path
+
+
+def sanitize_train_identifier(raw_identifier: Optional[str]) -> str:
+    """
+    Sanitize a train number or ID into a filesystem-safe token ([A-Za-z0-9_-]+).
+
+    Replaces whitespace and punctuation with underscores, collapses consecutive
+    underscores, and falls back to 'unknown' if the input contains no valid characters.
+
+    Args:
+        raw_identifier: Raw train_number or position.id string.
+
+    Returns:
+        Filesystem-safe train identifier token (max 32 chars).
+    """
+    if not raw_identifier:
+        return "unknown"
+    cleaned_chars: List[str] = []
+    for ch in str(raw_identifier).strip():
+        if ch.isalnum() or ch in ("-", "_"):
+            cleaned_chars.append(ch)
+        else:
+            cleaned_chars.append("_")
+    token = "".join(cleaned_chars).strip("_")
+    while "__" in token:
+        token = token.replace("__", "_")
+    return token[:32] if token else "unknown"
+
+
+def _epoch_to_iso_utc(epoch_sec: float) -> str:
+    """Convert a POSIX epoch timestamp in seconds to an ISO-8601 UTC string with 'Z' suffix."""
+    try:
+        return datetime.fromtimestamp(float(epoch_sec), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (ValueError, TypeError, OSError, OverflowError):
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _extract_in_memory_trajectory_points(record: Any) -> List[Dict[str, Any]]:
+    """
+    Extract chronological trajectory points from an in-memory TrainRecord's trail
+    and current TrainPosition.
+    """
+    pos = record.position
+    train_number = str(pos.train_number or pos.id or "Unknown").strip() or "Unknown"
+    delay_min = int(pos.delay) if pos.delay is not None else 0
+    course = float(pos.course) if pos.course is not None else 0.0
+    track_heading = float(pos.track_heading) if pos.track_heading is not None else course
+
+    points: List[Dict[str, Any]] = []
+    trail = getattr(record, "trail", None) or ()
+    for crumb in trail:
+        points.append(
+            {
+                "train_number": train_number,
+                "schedule_id": pos.schedule_id,
+                "recorded_at": _epoch_to_iso_utc(crumb.timestamp),
+                "timestamp_epoch": float(crumb.timestamp),
+                "lat": float(crumb.lat),
+                "lng": float(crumb.lng),
+                "speed": max(0.0, float(crumb.speed if crumb.speed is not None else 0.0)),
+                "course": course,
+                "track_heading": track_heading,
+                "altitude": pos.altitude,
+                "delay_min": delay_min,
+                "status": pos.status,
+                "progress": pos.progress,
+                "chainage_m": pos.chainage_m,
+                "dist_to_dest_m": pos.distance_to_destination_m,
+                "next_station": pos.next_station,
+                "corridor": pos.corridor,
+            }
+        )
+
+    last_updated = float(getattr(record, "last_updated", 0.0) or 0.0)
+    curr_iso = pos.timestamp if (pos.timestamp and str(pos.timestamp).strip()) else _epoch_to_iso_utc(last_updated)
+    curr_spd = max(0.0, float(pos.speed if pos.speed is not None else 0.0))
+
+    if not points:
+        points.append(
+            {
+                "train_number": train_number,
+                "schedule_id": pos.schedule_id,
+                "recorded_at": curr_iso,
+                "timestamp_epoch": last_updated,
+                "lat": float(pos.lat),
+                "lng": float(pos.lng),
+                "speed": curr_spd,
+                "course": course,
+                "track_heading": track_heading,
+                "altitude": pos.altitude,
+                "delay_min": delay_min,
+                "status": pos.status,
+                "progress": pos.progress,
+                "chainage_m": pos.chainage_m,
+                "dist_to_dest_m": pos.distance_to_destination_m,
+                "next_station": pos.next_station,
+                "corridor": pos.corridor,
+            }
+        )
+    else:
+        last_pt = points[-1]
+        pos_shifted = (
+            abs(last_pt["lat"] - float(pos.lat)) > 1e-6
+            or abs(last_pt["lng"] - float(pos.lng)) > 1e-6
+        )
+        if pos_shifted:
+            points.append(
+                {
+                    "train_number": train_number,
+                    "schedule_id": pos.schedule_id,
+                    "recorded_at": curr_iso,
+                    "timestamp_epoch": max(last_updated, last_pt["timestamp_epoch"]),
+                    "lat": float(pos.lat),
+                    "lng": float(pos.lng),
+                    "speed": curr_spd,
+                    "course": course,
+                    "track_heading": track_heading,
+                    "altitude": pos.altitude,
+                    "delay_min": delay_min,
+                    "status": pos.status,
+                    "progress": pos.progress,
+                    "chainage_m": pos.chainage_m,
+                    "dist_to_dest_m": pos.distance_to_destination_m,
+                    "next_station": pos.next_station,
+                    "corridor": pos.corridor,
+                }
+            )
+
+    return points
+
+
+def export_in_memory_geojson(
+    record: Any,
+    feature_type: str = "LineString",
+) -> Dict[str, Any]:
+    """
+    Synthesize an RFC 7946 compliant GeoJSON FeatureCollection from an in-memory TrainRecord.
+
+    Used by F-4.1 when exporting a train trajectory in live or --demo TUI mode without
+    active SQLite recording (or before the background recorder flushes its first batch).
+
+    Args:
+        record: TrainRecord containing .trail (Deque[HistoricalBreadcrumb]) and .position (TrainPosition).
+        feature_type: 'LineString' (continuous track geometry) or 'Point' (individual breadcrumbs).
+
+    Returns:
+        Dictionary matching GeoJSON FeatureCollection schema.
+    """
+    ft_lower = feature_type.strip().lower()
+    if ft_lower not in ("linestring", "point"):
+        raise ValueError(
+            f"Unsupported feature_type '{feature_type}': must be 'LineString' or 'Point'"
+        )
+
+    if record is None or getattr(record, "position", None) is None:
+        return {"type": "FeatureCollection", "features": []}
+
+    pos = record.position
+    train_number = str(pos.train_number or pos.id or "Unknown").strip() or "Unknown"
+    points = _extract_in_memory_trajectory_points(record)
+    if not points:
+        return {"type": "FeatureCollection", "features": []}
+
+    if ft_lower == "linestring":
+        coordinates = [
+            [pt["lng"], pt["lat"]]
+            if pt["altitude"] is None
+            else [pt["lng"], pt["lat"], pt["altitude"]]
+            for pt in points
+        ]
+        # RFC 7946 Section 3.1.4 requires at least 2 positions in a LineString coordinates array
+        if len(coordinates) == 1:
+            coordinates = [coordinates[0], list(coordinates[0])]
+
+        speeds = [float(pt["speed"]) for pt in points]
+        delays = [int(pt["delay_min"]) for pt in points]
+        timestamps = [str(pt["recorded_at"]) for pt in points]
+
+        feature = {
+            "type": "Feature",
+            "id": train_number,
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coordinates,
+            },
+            "properties": {
+                "train_number": train_number,
+                "corridor": pos.corridor,
+                "origin": pos.origin,
+                "destination": pos.destination,
+                "next_station": pos.next_station,
+                "status": pos.status,
+                "source": "in_memory_tui_snapshot",
+                "start_time": timestamps[0],
+                "end_time": timestamps[-1],
+                "total_points": len(points),
+                "max_speed_kmh": max(speeds),
+                "avg_speed_kmh": round(sum(speeds) / len(speeds), 1),
+                "max_delay_min": max(delays),
+                "timestamps": timestamps,
+                "speeds_kmh": speeds,
+                "delays_min": delays,
+            },
+        }
+        return {"type": "FeatureCollection", "features": [feature]}
+
+    features: List[Dict[str, Any]] = []
+    for pt in points:
+        coord = (
+            [pt["lng"], pt["lat"]]
+            if pt["altitude"] is None
+            else [pt["lng"], pt["lat"], pt["altitude"]]
+        )
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": coord,
+                },
+                "properties": {
+                    "train_number": pt["train_number"],
+                    "recorded_at": pt["recorded_at"],
+                    "speed_kmh": pt["speed"],
+                    "course": pt["course"],
+                    "delay_min": pt["delay_min"],
+                    "status": pt["status"],
+                    "next_station": pt["next_station"],
+                    "corridor": pt["corridor"],
+                    "chainage_m": pt["chainage_m"],
+                    "source": "in_memory_tui_snapshot",
+                },
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
+
+
+def export_in_memory_csv(
+    record: Any,
+    target: Union[str, TextIO],
+) -> int:
+    """
+    Export an in-memory TrainRecord trajectory directly to a CSV file or file-like stream.
+
+    Writes the same 17-column telemetry CSV format as HistoricalRepository.export_csv('telemetry').
+
+    Args:
+        record: TrainRecord containing .trail and .position.
+        target: Destination file path string or open TextIO stream.
+
+    Returns:
+        Number of data rows exported.
+    """
+    if isinstance(target, str):
+        clean_target = validate_export_path(target)
+        with open(clean_target, "w", newline="", encoding="utf-8") as f:
+            return _write_in_memory_csv_stream(record, f)
+    return _write_in_memory_csv_stream(record, target)
+
+
+def _write_in_memory_csv_stream(record: Any, output: TextIO) -> int:
+    """Write 17-column telemetry CSV rows for an in-memory TrainRecord to an open TextIO stream."""
+    headers = [
+        "id",
+        "train_number",
+        "schedule_id",
+        "recorded_at",
+        "lat",
+        "lng",
+        "speed",
+        "course",
+        "track_heading",
+        "altitude",
+        "delay_min",
+        "status",
+        "progress",
+        "chainage_m",
+        "dist_to_dest_m",
+        "next_station",
+        "corridor",
+    ]
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    if record is None or getattr(record, "position", None) is None:
+        return 0
+
+    points = _extract_in_memory_trajectory_points(record)
+    for idx, pt in enumerate(points, start=1):
+        writer.writerow(
+            [
+                idx,
+                pt["train_number"],
+                pt["schedule_id"],
+                pt["recorded_at"],
+                pt["lat"],
+                pt["lng"],
+                pt["speed"],
+                pt["course"],
+                pt["track_heading"],
+                pt["altitude"],
+                pt["delay_min"],
+                pt["status"],
+                pt["progress"],
+                pt["chainage_m"],
+                pt["dist_to_dest_m"],
+                pt["next_station"],
+                pt["corridor"],
+            ]
+        )
+    return len(points)
 
 
 class HistoricalRepository:

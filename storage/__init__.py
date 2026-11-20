@@ -26,7 +26,13 @@ from storage.models import (
     TripSummary,
 )
 from storage.recorder import RecorderConfig, TelemetryRecorder
-from storage.repository import HistoricalRepository, validate_export_path
+from storage.repository import (
+    HistoricalRepository,
+    export_in_memory_csv,
+    export_in_memory_geojson,
+    sanitize_train_identifier,
+    validate_export_path,
+)
 from storage.schema import SchemaManager
 
 __all__ = [
@@ -48,6 +54,9 @@ __all__ = [
     "TelemetryRecorder",
     "HistoricalRepository",
     "validate_export_path",
+    "sanitize_train_identifier",
+    "export_in_memory_geojson",
+    "export_in_memory_csv",
     "format_file_size",
     "format_trips_table",
     "format_train_history_table",

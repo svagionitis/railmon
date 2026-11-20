@@ -7,7 +7,9 @@ scale-aware camera kinematics, dynamic resizing, frame-rate synchronization
 """
 
 import curses
+from datetime import datetime
 from enum import Enum, auto
+import json
 import logging
 import os
 import signal
@@ -18,6 +20,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("railmon." + __name__)
 
+from storage.db import Database
+from storage.repository import (
+    HistoricalRepository,
+    export_in_memory_csv,
+    export_in_memory_geojson,
+    sanitize_train_identifier,
+    validate_export_path,
+)
 from tui.geo import (
     BoundingBox,
     BrailleCanvas,
@@ -162,6 +172,7 @@ class TUIApp:
         target_fps: float = 15.0,
         stop_event: Optional[threading.Event] = None,
         ascii_mode: bool = False,
+        export_dir: Optional[str] = None,
     ) -> None:
         """Initialize the TUI application controller.
 
@@ -174,6 +185,7 @@ class TUIApp:
             target_fps: Target frames per second (default: 15.0).
             stop_event: Optional external shutdown event triggered by OS signals.
             ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
+            export_dir: Optional base directory for in-TUI trajectory exports (defaults to '.').
         """
         self.stdscr = stdscr
         self.store = store
@@ -183,6 +195,7 @@ class TUIApp:
         self.running = False
         self.stop_event = stop_event
         self.ascii_mode = ascii_mode
+        self.export_dir: str = export_dir if export_dir is not None else "."
 
         # Interactive state & modal input
         self.input_mode: InputMode = InputMode.NORMAL
@@ -191,13 +204,19 @@ class TUIApp:
         self.show_help: bool = False
         self.paused: bool = False
 
+        # Transient status bar toast notification state (F-4.1)
+        self.toast_duration_sec: float = 4.0
+        self.toast_message: Optional[str] = None
+        self.toast_expiry: float = 0.0
+        self.toast_is_error: bool = False
+
         # Render cycle optimization & dirty-checking state
         self._force_redraw: bool = True
         self._last_rendered_version: Optional[int] = None
         self._last_viewport_state: Optional[Tuple[float, float, float, int, int]] = None
         self._last_clock_sec: Optional[int] = None
         self._last_rendered_msg_rate: Optional[float] = None
-        self._last_modal_state: Optional[Tuple[InputMode, str, bool, bool]] = None
+        self._last_modal_state: Optional[Tuple[InputMode, str, bool, bool, Optional[str], bool]] = None
         self._render_count: int = 0
         self._skip_count: int = 0
 
@@ -517,6 +536,131 @@ class TUIApp:
             self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
 
     # ------------------------------------------------------------------
+    # In-TUI Trajectory Snapshot Export & Toast Notifications (F-4.1)
+    # ------------------------------------------------------------------
+
+    def _set_toast(
+        self,
+        message: str,
+        duration_sec: Optional[float] = None,
+        is_error: bool = False,
+    ) -> None:
+        """Set a transient status bar toast notification message."""
+        dur = self.toast_duration_sec if duration_sec is None else max(0.1, float(duration_sec))
+        self.toast_message = message
+        self.toast_expiry = time.monotonic() + dur
+        self.toast_is_error = is_error
+        self._force_redraw = True
+
+    def get_active_toast(self, now: Optional[float] = None) -> Tuple[Optional[str], bool]:
+        """Return (toast_message, toast_is_error) if a toast is currently active, else (None, False)."""
+        if self.toast_message is None:
+            return None, False
+        current_mono = time.monotonic() if now is None else now
+        if current_mono >= self.toast_expiry:
+            self.toast_message = None
+            self.toast_is_error = False
+            return None, False
+        return self.toast_message, self.toast_is_error
+
+    def _try_export_from_sqlite(
+        self,
+        db_path: str,
+        train_no: str,
+        norm_fmt: str,
+        clean_path: str,
+    ) -> bool:
+        """Attempt to export train trajectory from SQLite HistoricalRepository if rows exist."""
+        if not os.path.exists(db_path):
+            return False
+
+        db = Database(db_path, auto_migrate=False)
+        try:
+            repo = HistoricalRepository(db)
+            if norm_fmt == "geojson":
+                geojson_data = repo.export_trip_geojson(train_number=train_no)
+                if not geojson_data.get("features"):
+                    return False
+                out_str = json.dumps(geojson_data, indent=2, ensure_ascii=False)
+                with open(clean_path, "w", encoding="utf-8") as f:
+                    f.write(out_str)
+                return True
+
+            history_rows = repo.get_train_history(train_number=train_no)
+            if not history_rows:
+                return False
+            repo.export_csv(
+                query_type="telemetry",
+                target=clean_path,
+                params={"train_number": train_no},
+            )
+            return True
+        finally:
+            db.close()
+
+    def export_selected_train_snapshot(self, fmt: str = "geojson") -> Optional[str]:
+        """Export the selected train's trajectory to a timestamped GeoJSON or CSV file.
+
+        Resolves trajectory data from SQLite HistoricalRepository when background recording
+        (--record) is active and has persisted rows for the train; otherwise synthesizes
+        the trajectory directly from the in-memory TrainRecord breadcrumb trail.
+
+        Args:
+            fmt: Export format, either 'geojson' (default, bound to 'e') or 'csv' (bound to 'E').
+
+        Returns:
+            Canonical absolute path of the exported file on success, or None if export failed.
+        """
+        norm_fmt = fmt.strip().lower()
+        if norm_fmt not in ("geojson", "csv"):
+            raise ValueError(f"Unsupported export format '{fmt}': must be 'geojson' or 'csv'")
+
+        snapshot = self.store.get_snapshot()
+        selected = snapshot.selected_train
+        if selected is None:
+            self._set_toast("[! No train selected to export]", is_error=True)
+            return None
+
+        pos = selected.position
+        train_no = (pos.train_number or pos.id or "unknown").strip() or "unknown"
+        safe_train_no = sanitize_train_identifier(train_no)
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ext = "geojson" if norm_fmt == "geojson" else "csv"
+        filename = f"railmon_train_{safe_train_no}_{timestamp_str}.{ext}"
+        raw_target = os.path.join(self.export_dir, filename)
+
+        try:
+            clean_path = validate_export_path(raw_target, base_dir=self.export_dir)
+            exported_from_db = False
+
+            if snapshot.is_recording and snapshot.recording_db:
+                exported_from_db = self._try_export_from_sqlite(
+                    db_path=snapshot.recording_db,
+                    train_no=train_no,
+                    norm_fmt=norm_fmt,
+                    clean_path=clean_path,
+                )
+
+            if not exported_from_db:
+                if norm_fmt == "geojson":
+                    geojson_data = export_in_memory_geojson(selected)
+                    out_str = json.dumps(geojson_data, indent=2, ensure_ascii=False)
+                    with open(clean_path, "w", encoding="utf-8") as f:
+                        f.write(out_str)
+                else:
+                    export_in_memory_csv(selected, clean_path)
+
+            ok_icon = "OK" if self.ascii_mode else "✓"
+            self._set_toast(f"[{ok_icon} Exported {filename}]", is_error=False)
+            logger.info("Exported train %s trajectory snapshot to %s", train_no, clean_path)
+            return clean_path
+
+        except (ValueError, PermissionError, OSError) as exc:
+            logger.error("Failed to export trajectory snapshot for train %s: %s", train_no, exc)
+            self._set_toast(f"[! Export failed: {exc}]", is_error=True)
+            return None
+
+    # ------------------------------------------------------------------
     # Modal Event Dispatch Handlers
     # ------------------------------------------------------------------
 
@@ -591,6 +735,12 @@ class TUIApp:
             self.cycle_station_inspector(exit_if_active=False)
         elif key == ord("M"):
             self.cycle_station_inspector(exit_if_active=True)
+
+        # Instant In-TUI GeoJSON ('e') / CSV ('E') Trajectory Snapshot Export (F-4.1)
+        elif key == ord("e"):
+            self.export_selected_train_snapshot(fmt="geojson")
+        elif key == ord("E"):
+            self.export_selected_train_snapshot(fmt="csv")
 
         # Search filter prompt activation
         elif key in SEARCH_OPEN_KEYS:
@@ -999,11 +1149,14 @@ class TUIApp:
                     vp.width_cells,
                     vp.height_cells,
                 )
+                active_toast_msg, active_toast_err = self.get_active_toast(frame_start)
                 current_modal = (
                     self.input_mode,
                     self.search_buffer,
                     self.show_help,
                     self.paused,
+                    active_toast_msg,
+                    active_toast_err,
                 )
 
                 if (
@@ -1025,6 +1178,8 @@ class TUIApp:
                         search_buffer=self.search_buffer,
                         help_overlay=HelpOverlay.VISIBLE if self.show_help else HelpOverlay.HIDDEN,
                         playback_state=PlaybackState.PAUSED if self.paused else PlaybackState.RUNNING,
+                        toast_message=active_toast_msg,
+                        toast_is_error=active_toast_err,
                     )
 
                     # 4b. Flush frame using double buffering (noutrefresh + doupdate)

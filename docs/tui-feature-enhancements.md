@@ -20,7 +20,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / `M` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
-| **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py) |
+| **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` / `E` | **Implemented** | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py), [`storage/repository.py`](../storage/repository.py) |
 | **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
 
 ---
@@ -456,20 +456,22 @@ The repository already includes a rich SQLite historical subsystem in [`storage/
 
 ---
 
-### F-4.1: Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export (`e`)
+### F-4.1: Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export (`e` / `E`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`docs/f-4-1-instant-in-tui-trajectory-export-plan.md`](./f-4-1-instant-in-tui-trajectory-export-plan.md)
 
 #### Overview
-When observing an interesting delay event or anomaly in the TUI, pressing `e` immediately exports the selected train's trajectory to a timestamped `.geojson` file in the working directory without leaving the dashboard.
+When observing an interesting delay event or anomaly in the TUI, pressing `e` immediately exports the selected train's trajectory to a timestamped `.geojson` file (or `E` for `.csv`) in the working directory without leaving the dashboard.
 
 #### Technical Design
 1. **Dual-Source Trajectory Resolution:**
-   - **If `--record` is active** (`snapshot.is_recording and snapshot.recording_db`): Query full recorded trip points for `selected_train.position.train_number` via [`HistoricalRepository.export_geojson`](../storage/repository.py).
-   - **If running without `--record` (Live or `--demo`):** Build an RFC 7946 GeoJSON `FeatureCollection` directly from the in-memory `selected_train.trail` (`Deque[HistoricalBreadcrumb]`) and current [`TrainPosition`](../train_tracker.py).
+   - **If `--record` is active** (`snapshot.is_recording and snapshot.recording_db`): Query full recorded trip points for `selected_train.position.train_number` via [`HistoricalRepository.export_trip_geojson`](../storage/repository.py) (for `e`) or [`HistoricalRepository.export_csv`](../storage/repository.py) (for `E`), seamlessly falling back to the in-memory trail if the selected train has not yet been flushed to SQLite.
+   - **If running without `--record` (Live or `--demo`):** Build an RFC 7946 GeoJSON `FeatureCollection` or 17-column telemetry CSV directly from the in-memory `selected_train.trail` (`Deque[HistoricalBreadcrumb]`) and current [`TrainPosition`](../train_tracker.py) via [`export_in_memory_geojson`](../storage/repository.py) and [`export_in_memory_csv`](../storage/repository.py).
 2. **Filename & Security Validation:**
-   - Reuse path sanitization rules from [`storage/repository.py`](../storage/repository.py) to write `railmon_train_<train_no>_<YYYYMMDD_HHMMSS>.geojson`.
+   - Sanitize `train_number` via [`sanitize_train_identifier`](../storage/repository.py) and reuse path sanitization rules from [`validate_export_path`](../storage/repository.py) to write `railmon_train_<train_no>_<YYYYMMDD_HHMMSS>.geojson` (or `.csv`).
 3. **Transient Status Bar Toast Notification:**
-   - Add `toast_message: Optional[str]` and `toast_expiry: float` to [`TUIApp`](../tui/app.py).
-   - Display `[✓ Exported railmon_train_1597_20261119.geojson]` in the status bar for 4 seconds.
+   - Added `toast_message: Optional[str]`, `toast_expiry: float`, and `toast_is_error: bool` to [`TUIApp`](../tui/app.py).
+   - Displays `[✓ Exported railmon_train_1597_20261120_160500.geojson]` (or `[OK Exported ...]` in `--ascii` mode) in the status bar for 4 seconds.
 
 ---
 
@@ -540,7 +542,7 @@ sequenceDiagram
 | **`t` / `T`** | **Normal** | **Toggle corridor-colored Braille track rendering** | **Implemented (Tier 3)** |
 | **`m` / `M`** | **Normal** | **Cycle Station Departure Board / Return to Train Telemetry** | **Implemented (Tier 3)** |
 | **Mouse Click / Wheel** | **Normal** | **Click-to-select train or station, double-click follow/recenter, wheel zoom/scroll** | **Implemented (Tier 3)** |
-| **`e`** | **Normal** | **Export selected train trajectory to GeoJSON file** | **Proposed (Tier 4)** |
+| **`e` / `E`** | **Normal** | **Export selected train trajectory to GeoJSON (`e`) / CSV (`E`) file** | **Implemented (Tier 4)** |
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Proposed (Tier 4)** |
 | **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Proposed (Tier 4)** |
 
@@ -583,5 +585,5 @@ sequenceDiagram
 2. Added dynamic scale bar calculation (`F-3.4`), station label mode `v` & corridor track colors `t` (`F-3.3`), and station proximity board `m` (`F-3.2`) in [`tui/renderer.py`](../tui/renderer.py) and [`tui/geo.py`](../tui/geo.py).
 
 ### Phase 4: Tier 4 Storage Export & Historical Replay
-1. Wire `e` in [`tui/app.py`](../tui/app.py) to export GeoJSON snapshots with status bar toast notifications.
-2. Implement `ReplayWorker` and `--replay <db>` CLI option in [`train_tracker.py`](../train_tracker.py) and [`tui/stream_worker.py`](../tui/stream_worker.py).
+1. **F-4.1 (*Completed*):** Wired `e` (GeoJSON) and `E` (CSV) in [`tui/app.py`](../tui/app.py) to export dual-source trajectory snapshots (SQLite [`HistoricalRepository`](../storage/repository.py) when `--record` is active, or in-memory [`TrainRecord.trail`](../tui/state.py) via [`export_in_memory_geojson`](../storage/repository.py) / [`export_in_memory_csv`](../storage/repository.py)) with 4-second status bar toast notifications in [`tui/renderer.py`](../tui/renderer.py).
+2. **F-4.2 (*Proposed*):** Implement `ReplayWorker` and `--replay <db>` CLI option in [`train_tracker.py`](../train_tracker.py) and [`tui/stream_worker.py`](../tui/stream_worker.py).

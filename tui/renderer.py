@@ -1915,6 +1915,8 @@ class TUIRenderer:
         search_buffer: str = "",
         playback_state: PlaybackState = PlaybackState.RUNNING,
         *,
+        toast_message: Optional[str] = None,
+        toast_is_error: bool = False,
         search_mode: Optional[bool] = None,
         paused: Optional[bool] = None,
     ) -> None:
@@ -1928,6 +1930,8 @@ class TUIRenderer:
             input_mode: Current input mode (NORMAL or SEARCH).
             search_buffer: Current search text buffer.
             playback_state: Stream execution state (RUNNING or PAUSED).
+            toast_message: Optional transient toast notification banner text.
+            toast_is_error: Whether toast_message represents a warning/error state.
             search_mode: Legacy boolean flag for search input mode.
             paused: Legacy boolean flag for paused stream state.
         """
@@ -1961,14 +1965,6 @@ class TUIRenderer:
             safe_addstr(win, 0, hint_x, hint_text, status_attr, ascii_mode=self.ascii_mode)
             return
 
-        # Keybindings cheat sheet
-        follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
-        shortcuts = (
-            f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
-            f"[v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
-        )
-        safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
-
         # Connection status badge
         if playback_state == PlaybackState.PAUSED:
             badge = self.glyphs.badge_paused
@@ -1993,6 +1989,28 @@ class TUIRenderer:
 
         badge_w = get_string_display_width(badge)
         badge_x = max(0, width - badge_w)
+
+        if toast_message and toast_message.strip():
+            toast_attr = warn_attr if toast_is_error else connected_attr
+            toast_text = f" {toast_message.strip()} "
+            safe_addstr(
+                win,
+                0,
+                0,
+                toast_text,
+                toast_attr,
+                max_w=max(0, width - badge_w - 1),
+                ascii_mode=self.ascii_mode,
+            )
+        else:
+            # Keybindings cheat sheet
+            follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
+            shortcuts = (
+                f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
+                f"[e] Export  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+            )
+            safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
+
         safe_addstr(win, 0, badge_x, badge, b_attr, ascii_mode=self.ascii_mode)
 
     def render_help_modal(self, win: Any, height: int, width: int) -> None:
@@ -2049,7 +2067,7 @@ class TUIRenderer:
             ]),
             ("SEARCH & SYSTEM CONTROLS", [
                 ("/, Esc", "Enter search filter mode / Cancel and return"),
-                ("Space", "Pause / resume live telemetry ingestion"),
+                ("e / E, Space", "Export train GeoJSON / CSV / Pause telemetry stream"),
                 ("?, q", "Toggle this help dialog / Clean exit dashboard"),
             ]),
             ("SYMBOLS & COLOR LEGEND", [
@@ -2093,6 +2111,8 @@ class TUIRenderer:
         help_overlay: HelpOverlay = HelpOverlay.HIDDEN,
         playback_state: PlaybackState = PlaybackState.RUNNING,
         *,
+        toast_message: Optional[str] = None,
+        toast_is_error: bool = False,
         search_mode: Optional[bool] = None,
         show_help: Optional[bool] = None,
         paused: Optional[bool] = None,
@@ -2109,6 +2129,8 @@ class TUIRenderer:
             search_buffer: Current search text buffer.
             help_overlay: Modal help overlay visibility (HIDDEN or VISIBLE).
             playback_state: Live telemetry ingestion state (RUNNING or PAUSED).
+            toast_message: Optional transient toast notification banner text.
+            toast_is_error: Whether toast_message represents a warning/error state.
             search_mode: Legacy boolean flag for search input mode.
             show_help: Legacy boolean flag for help dialog visibility.
             paused: Legacy boolean flag for paused ingestion state.
@@ -2150,6 +2172,8 @@ class TUIRenderer:
                 input_mode=input_mode,
                 search_buffer=search_buffer,
                 playback_state=playback_state,
+                toast_message=toast_message,
+                toast_is_error=toast_is_error,
             )
 
         if help_overlay == HelpOverlay.VISIBLE and "root" in windows:

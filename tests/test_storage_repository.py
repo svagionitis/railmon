@@ -22,8 +22,15 @@ from storage.models import (
     TripSummary,
 )
 from storage.recorder import RecorderConfig, TelemetryRecorder
-from storage.repository import HistoricalRepository, validate_export_path
+from storage.repository import (
+    HistoricalRepository,
+    export_in_memory_csv,
+    export_in_memory_geojson,
+    sanitize_train_identifier,
+    validate_export_path,
+)
 from train_tracker import TrainPosition
+from tui.state import HistoricalBreadcrumb, TrainRecord
 
 
 class TestHistoricalRepository(unittest.TestCase):
@@ -674,6 +681,128 @@ class TestHistoricalRepository(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.repo.resolve_archive_path("../bad_archive.db")
         self.assertIn("traversal", str(ctx.exception).lower())
+
+    def test_sanitize_train_identifier(self):
+        """TC-F41-01: sanitize_train_identifier scrubs arbitrary train identifiers into safe filename tokens."""
+        self.assertEqual(sanitize_train_identifier("1597"), "1597")
+        self.assertEqual(sanitize_train_identifier("IC 50"), "IC_50")
+        self.assertEqual(sanitize_train_identifier("  PR-2232/A  "), "PR-2232_A")
+        self.assertEqual(sanitize_train_identifier("../../etc/passwd"), "etc_passwd")
+        self.assertEqual(sanitize_train_identifier(""), "unknown")
+        self.assertEqual(sanitize_train_identifier("   "), "unknown")
+        self.assertEqual(sanitize_train_identifier(None), "unknown")
+        self.assertEqual(sanitize_train_identifier("///...///"), "unknown")
+        self.assertEqual(len(sanitize_train_identifier("A" * 60)), 32)
+
+    def test_export_in_memory_geojson_and_csv(self):
+        """TC-F41-02 & TC-F41-03: Verify RFC 7946 GeoJSON and 17-column CSV synthesis from in-memory TrainRecord."""
+        pos1 = TrainPosition(
+            id="t-1597",
+            train_number="1597",
+            locomotive_number="120-024",
+            name="1597",
+            train_type="IC",
+            service_type="InterCity",
+            status="Κανονική",
+            origin="ΑΘΗΝΑ",
+            destination="ΘΕΣΣΑΛΟΝΙΚΗ",
+            next_station="Λάρισα",
+            speed=110.0,
+            course=340.0,
+            track_heading=340.0,
+            lat=38.001,
+            lng=23.701,
+            altitude=50.0,
+            delay=4,
+            progress=0.35,
+            chainage_m=15000,
+            corridor="PATHE",
+            distance_to_destination_m=300000,
+            timestamp="2026-11-20T14:00:00Z",
+            schedule_id="SCH-1597",
+        )
+        record = TrainRecord(position=pos1)
+        record.trail.clear()
+        record.trail.append(
+            HistoricalBreadcrumb(lat=38.001, lng=23.701, timestamp=1795183200.0, speed=95.0)
+        )
+        record.trail.append(
+            HistoricalBreadcrumb(lat=38.050, lng=23.730, timestamp=1795183260.0, speed=120.0)
+        )
+        # Advance current position beyond last trail breadcrumb
+        pos_latest = TrainPosition(
+            id="t-1597",
+            train_number="1597",
+            locomotive_number="120-024",
+            name="1597",
+            train_type="IC",
+            service_type="InterCity",
+            status="Κανονική",
+            origin="ΑΘΗΝΑ",
+            destination="ΘΕΣΣΑΛΟΝΙΚΗ",
+            next_station="Λάρισα",
+            speed=142.0,
+            course=342.0,
+            track_heading=342.0,
+            lat=38.100,
+            lng=23.750,
+            altitude=70.0,
+            delay=6,
+            progress=0.40,
+            chainage_m=25000,
+            corridor="PATHE",
+            distance_to_destination_m=290000,
+            timestamp="2026-11-20T14:02:00Z",
+            schedule_id="SCH-1597",
+        )
+        record.position = pos_latest
+        record.last_updated = 1795183320.0
+
+        # 1. LineString GeoJSON export (2 trail breadcrumbs + 1 shifted current position = 3 points)
+        geojson_ls = export_in_memory_geojson(record, feature_type="LineString")
+        self.assertEqual(geojson_ls["type"], "FeatureCollection")
+        self.assertEqual(len(geojson_ls["features"]), 1)
+        feat = geojson_ls["features"][0]
+        self.assertEqual(feat["id"], "1597")
+        self.assertEqual(feat["geometry"]["type"], "LineString")
+        self.assertEqual(len(feat["geometry"]["coordinates"]), 3)
+        self.assertEqual(feat["geometry"]["coordinates"][0], [23.701, 38.001, 70.0])
+        self.assertEqual(feat["geometry"]["coordinates"][2], [23.750, 38.100, 70.0])
+        self.assertEqual(feat["properties"]["total_points"], 3)
+        self.assertEqual(feat["properties"]["max_speed_kmh"], 142.0)
+        self.assertEqual(feat["properties"]["source"], "in_memory_tui_snapshot")
+
+        # 2. Point GeoJSON export
+        geojson_pt = export_in_memory_geojson(record, feature_type="Point")
+        self.assertEqual(len(geojson_pt["features"]), 3)
+        self.assertEqual(geojson_pt["features"][0]["geometry"]["type"], "Point")
+
+        # 3. Single-point record LineString export duplicates vertex for RFC 7946 Section 3.1.4 compliance
+        single_rec = TrainRecord(position=pos1)
+        single_rec.trail.clear()
+        single_ls = export_in_memory_geojson(single_rec, feature_type="LineString")
+        self.assertEqual(len(single_ls["features"][0]["geometry"]["coordinates"]), 2)
+        self.assertEqual(single_ls["features"][0]["properties"]["total_points"], 1)
+
+        # 4. Invalid feature_type raises ValueError; None record returns empty FeatureCollection
+        with self.assertRaises(ValueError):
+            export_in_memory_geojson(record, feature_type="Polygon")
+        self.assertEqual(export_in_memory_geojson(None), {"type": "FeatureCollection", "features": []})
+
+        # 5. CSV export to StringIO and file
+        csv_buf = io.StringIO()
+        row_count = export_in_memory_csv(record, csv_buf)
+        self.assertEqual(row_count, 3)
+        csv_buf.seek(0)
+        reader = list(csv.reader(csv_buf))
+        self.assertEqual(len(reader), 4)  # 1 header + 3 rows
+        self.assertEqual(reader[0][1], "train_number")
+        self.assertEqual(reader[1][1], "1597")
+
+        csv_file = os.path.join(self.temp_dir, "in_mem_1597.csv")
+        self.assertEqual(export_in_memory_csv(record, csv_file), 3)
+        self.assertTrue(os.path.exists(csv_file))
+        self.assertEqual(export_in_memory_csv(None, io.StringIO()), 0)
 
 
 if __name__ == "__main__":

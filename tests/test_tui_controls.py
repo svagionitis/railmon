@@ -4,11 +4,17 @@ Tests camera panning kinematics, zoom scaling, corridor presets, train selection
 real-time auto-follow camera tracking, modal search filter editing, and help dialog.
 """
 
+import csv
 import curses
+import json
+import os
+import shutil
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+from storage.db import Database
 from train_tracker import TrainPosition
 from tui.app import (
     MOUSE_LEFT_CLICK_MASK,
@@ -1119,6 +1125,180 @@ class TestTUIControls(unittest.TestCase):
         # 3. If curses.getmouse() raises curses.error, process_input returns True gracefully
         mock_getmouse.side_effect = curses.error("empty mouse queue")
         self.assertTrue(self.app.process_input(curses.KEY_MOUSE))
+
+    # ------------------------------------------------------------------
+    # Instant In-TUI Trajectory Snapshot Export Tests (F-4.1)
+    # ------------------------------------------------------------------
+
+    def test_key_e_exports_in_memory_geojson_and_csv_with_toast(self):
+        """TC-F41-04: Verify 'e' exports GeoJSON and 'E' exports CSV from in-memory trail with 4s toast."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            self.app.export_dir = temp_dir
+            self.store.select_by_id("t1")  # Train '1597'
+            # Append a second position to build a 2-point breadcrumb trail
+            t1_moved = create_test_position("t1", "1597", lat=38.05, lng=23.75, corridor="PATHE", speed=135.0)
+            self.store.update_positions([t1_moved])
+
+            # 1. Press 'e' in UTF-8 mode -> exports .geojson and sets '[✓ Exported ...]' toast
+            self.assertTrue(self.app.process_input(ord("e")))
+            self.assertIsNotNone(self.app.toast_message)
+            self.assertFalse(self.app.toast_is_error)
+            self.assertIn("[✓ Exported railmon_train_1597_", self.app.toast_message)
+            self.assertTrue(self.app.toast_message.endswith(".geojson]"))
+
+            exported_files = [f for f in os.listdir(temp_dir) if f.endswith(".geojson")]
+            self.assertEqual(len(exported_files), 1)
+            geojson_path = os.path.join(temp_dir, exported_files[0])
+            with open(geojson_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["type"], "FeatureCollection")
+            self.assertEqual(len(data["features"]), 1)
+            self.assertEqual(data["features"][0]["id"], "1597")
+            self.assertEqual(data["features"][0]["geometry"]["type"], "LineString")
+            self.assertEqual(data["features"][0]["properties"]["total_points"], 2)
+            self.assertEqual(data["features"][0]["properties"]["source"], "in_memory_tui_snapshot")
+
+            # 2. Press 'E' in --ascii mode -> exports .csv and sets '[OK Exported ...]' toast
+            self.app.ascii_mode = True
+            self.assertTrue(self.app.process_input(ord("E")))
+            self.assertIsNotNone(self.app.toast_message)
+            self.assertFalse(self.app.toast_is_error)
+            self.assertIn("[OK Exported railmon_train_1597_", self.app.toast_message)
+            self.assertTrue(self.app.toast_message.endswith(".csv]"))
+
+            csv_files = [f for f in os.listdir(temp_dir) if f.endswith(".csv")]
+            self.assertEqual(len(csv_files), 1)
+            csv_path = os.path.join(temp_dir, csv_files[0])
+            with open(csv_path, "r", encoding="utf-8") as f:
+                rows = list(csv.reader(f))
+            self.assertEqual(len(rows), 3)  # 1 header + 2 points
+            self.assertEqual(rows[0][1], "train_number")
+            self.assertEqual(rows[1][1], "1597")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_key_e_exports_from_sqlite_when_recording_active_and_falls_back_if_unflushed(self):
+        """TC-F41-05: Verify 'e'/'E' query SQLite HistoricalRepository when --record is active, with in-memory fallback."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(temp_dir, "recorded_session.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO trains (train_number, default_name, first_observed_at, last_observed_at)
+                        VALUES ('1597', 'IC 1597', '2026-11-20T10:00:00Z', '2026-11-20T10:15:00Z');
+                        """
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO scheduled_trips (schedule_id, train_number, origin, destination, corridor, service_date)
+                        VALUES ('SCH-1', '1597', 'ATH', 'SKG', 'PATHE', '2026-11-20');
+                        """
+                    )
+                    cur.executemany(
+                        """
+                        INSERT INTO telemetry_history (
+                            train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                            track_heading, altitude, delay_min, status, progress, chainage_m,
+                            dist_to_dest_m, next_station, corridor
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        [
+                            ("1597", "SCH-1", "2026-11-20T10:00:00Z", 38.00, 23.70, 80.0, 0.0, 0.0, 40.0, 1, "Normal", 0.1, 1000, 490000, "SKA", "PATHE"),
+                            ("1597", "SCH-1", "2026-11-20T10:05:00Z", 38.10, 23.72, 120.0, 0.0, 0.0, 50.0, 2, "Normal", 0.2, 10000, 480000, "OINOI", "PATHE"),
+                            ("1597", "SCH-1", "2026-11-20T10:10:00Z", 38.20, 23.65, 145.0, 0.0, 0.0, 60.0, 3, "Normal", 0.3, 25000, 465000, "THIVA", "PATHE"),
+                            ("1597", "SCH-1", "2026-11-20T10:15:00Z", 38.32, 23.31, 150.0, 0.0, 0.0, 75.0, 4, "Normal", 0.4, 45000, 445000, "LEVADIA", "PATHE"),
+                        ],
+                    )
+            finally:
+                db.close()
+
+            self.app.export_dir = temp_dir
+            self.store.set_recording_status(True, db_path)
+            self.store.select_by_id("t1")  # Train '1597' (has 4 rows in SQLite, 1 in memory)
+
+            geojson_path = self.app.export_selected_train_snapshot(fmt="geojson")
+            self.assertIsNotNone(geojson_path)
+            with open(geojson_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Must contain all 4 recorded rows from SQLite rather than just the 1 in-memory point
+            self.assertEqual(data["features"][0]["properties"]["total_points"], 4)
+            self.assertEqual(data["features"][0]["properties"]["max_speed_kmh"], 150.0)
+
+            csv_path = self.app.export_selected_train_snapshot(fmt="csv")
+            self.assertIsNotNone(csv_path)
+            with open(csv_path, "r", encoding="utf-8") as f:
+                csv_rows = list(csv.reader(f))
+            self.assertEqual(len(csv_rows), 5)  # 1 header + 4 SQLite rows
+
+            # Now select train 't2' ('2232') which has 0 rows flushed to SQLite yet -> falls back to in-memory
+            self.store.select_by_id("t2")
+            fallback_path = self.app.export_selected_train_snapshot(fmt="geojson")
+            self.assertIsNotNone(fallback_path)
+            with open(fallback_path, "r", encoding="utf-8") as f:
+                fb_data = json.load(f)
+            self.assertEqual(fb_data["features"][0]["id"], "2232")
+            self.assertEqual(fb_data["features"][0]["properties"]["source"], "in_memory_tui_snapshot")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_key_e_without_selected_train_or_on_io_error_sets_warning_toast(self):
+        """TC-F41-06: Verify pressing 'e' with no train selected or invalid export_dir sets warning toast."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            self.app.export_dir = temp_dir
+            self.store.clear_selection()
+            self.assertTrue(self.app.process_input(ord("e")))
+            self.assertEqual(self.app.toast_message, "[! No train selected to export]")
+            self.assertTrue(self.app.toast_is_error)
+            self.assertEqual(os.listdir(temp_dir), [])
+
+            # Invalid export directory triggers error toast gracefully without crashing
+            self.store.select_by_id("t1")
+            self.app.export_dir = os.path.join(temp_dir, "non_existent_subdir_xyz")
+            self.assertIsNone(self.app.export_selected_train_snapshot(fmt="geojson"))
+            self.assertTrue(self.app.toast_is_error)
+            self.assertIn("[! Export failed:", self.app.toast_message)
+
+            # Unsupported format raises ValueError
+            with self.assertRaises(ValueError):
+                self.app.export_selected_train_snapshot(fmt="xml")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_key_e_in_search_mode_appends_character_without_exporting(self):
+        """TC-F41-07: Verify 'e' and 'E' in SEARCH mode append to search_buffer without exporting files."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            self.app.export_dir = temp_dir
+            self.store.select_by_id("t1")
+            self.app.process_input(ord("/"))
+            self.assertEqual(self.app.input_mode, InputMode.SEARCH)
+
+            self.app.process_input(ord("e"))
+            self.app.process_input(ord("E"))
+            self.assertEqual(self.app.search_buffer, "eE")
+            self.assertIsNone(self.app.toast_message)
+            self.assertEqual(os.listdir(temp_dir), [])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_toast_lifecycle_and_expiration(self):
+        """Verify get_active_toast returns message before expiry and clears after 4.0s duration."""
+        self.app._set_toast("[✓ Exported test.geojson]", duration_sec=4.0, is_error=False)
+        t0 = self.app.toast_expiry - 4.0
+
+        msg_active, err_active = self.app.get_active_toast(now=t0 + 2.0)
+        self.assertEqual(msg_active, "[✓ Exported test.geojson]")
+        self.assertFalse(err_active)
+
+        msg_expired, err_expired = self.app.get_active_toast(now=t0 + 4.1)
+        self.assertIsNone(msg_expired)
+        self.assertFalse(err_expired)
+        self.assertIsNone(self.app.toast_message)
 
 
 if __name__ == "__main__":

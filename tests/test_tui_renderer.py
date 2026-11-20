@@ -56,6 +56,7 @@ from tui.renderer import (
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
+    InputMode,
     InspectorMode,
     RosterSortMode,
     StateSnapshot,
@@ -1781,6 +1782,66 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
             return ["".join(r) for r in grid]
 
         self.assertEqual(reconstruct_inner_rows(win_uni), reconstruct_inner_rows(win_corr))
+
+    def test_render_status_bar_toast_notification_utf8_and_ascii(self):
+        """TC-F41-08: Verify status bar renders transient export toast notifications in UTF-8 and ASCII modes."""
+        renderer_utf8 = TUIRenderer(stations=[], tracks=[], ascii_mode=False)
+        renderer_ascii = TUIRenderer(stations=[], tracks=[], ascii_mode=True)
+        store = TrainStateStore()
+        store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
+        snapshot = store.get_snapshot()
+
+        # 1. Normal idle status bar includes '[e] Export'
+        win_idle = MockCursesWindow(1, 120)
+        renderer_utf8.render_status_bar(win_idle, snapshot, 120, msg_rate=1.2)
+        idle_texts = " ".join(text for (_, _, text, _) in win_idle.strings)
+        self.assertIn("[e] Export", idle_texts)
+        self.assertIn("LIVE", idle_texts)
+
+        # 2. Active success toast in UTF-8 mode replaces shortcuts on left while keeping LIVE badge on right
+        win_toast_utf8 = MockCursesWindow(1, 100)
+        renderer_utf8.render_status_bar(
+            win_toast_utf8,
+            snapshot,
+            100,
+            msg_rate=1.2,
+            toast_message="[✓ Exported railmon_train_1597_20261120_160500.geojson]",
+            toast_is_error=False,
+        )
+        toast_utf8_texts = " ".join(text for (_, _, text, _) in win_toast_utf8.strings)
+        self.assertIn("[✓ Exported railmon_train_1597_20261120_160500.geojson]", toast_utf8_texts)
+        self.assertIn("LIVE", toast_utf8_texts)
+        self.assertNotIn("[q] Quit", toast_utf8_texts)
+
+        # 3. Active toast in 7-bit ASCII mode is strictly 7-bit ASCII
+        win_toast_ascii = MockCursesWindow(1, 100)
+        renderer_ascii.render_status_bar(
+            win_toast_ascii,
+            snapshot,
+            100,
+            msg_rate=1.0,
+            toast_message="[OK Exported railmon_train_1597_20261120_160500.geojson]",
+            toast_is_error=False,
+        )
+        toast_ascii_texts = " ".join(text for (_, _, text, _) in win_toast_ascii.strings)
+        self.assertIn("[OK Exported railmon_train_1597_20261120_160500.geojson]", toast_ascii_texts)
+        for _, _, text, _ in win_toast_ascii.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128)
+
+        # 4. In InputMode.SEARCH, the search prompt takes priority over an active toast
+        win_search = MockCursesWindow(1, 100)
+        renderer_utf8.render_status_bar(
+            win_search,
+            snapshot,
+            100,
+            input_mode=InputMode.SEARCH,
+            search_buffer="1597",
+            toast_message="[✓ Exported railmon_train_1597_20261120_160500.geojson]",
+        )
+        search_texts = " ".join(text for (_, _, text, _) in win_search.strings)
+        self.assertIn("Search filter: 1597", search_texts)
+        self.assertNotIn("Exported railmon_train_1597", search_texts)
 
 
 if __name__ == "__main__":
