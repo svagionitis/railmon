@@ -7,7 +7,7 @@ All links and repository file references inside checked-in Markdown documentatio
 - **No Machine-Local Absolute Paths**: Never embed workstation-specific prefixes (`/home/<user>/...`, `/Users/<user>/...`, `C:\...`) in links, tables, diagrams, or prose referring to repository files.
 
 ## 2. Document-Relative Link Resolution
-Compute every Markdown link `[label](target)` relative to the directory containing the Markdown file itself:
+Compute every Markdown link `[label](./target)` relative to the directory containing the Markdown file itself:
 
 | Source Document Location | Target Location | Required Relative Link |
 |---|---|---|

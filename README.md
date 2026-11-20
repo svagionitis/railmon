@@ -188,25 +188,25 @@ railmon schedules      # Windows
 - [`railmon`](./railmon): Executable wrapper script.
 - [`pyproject.toml`](./pyproject.toml): PEP 517 / PEP 518 / PEP 621 packaging specification, dynamic versioning, and unified tool configuration.
 - [`train_tracker.py`](./train_tracker.py): Core HTTP/SSE API client, data models, and CLI argument parsing.
-- [`tui/`](./tui/): Modular curses terminal user interface:
+- [`tui/`](./tui): Modular curses terminal user interface:
   - [`tui/geo.py`](./tui/geo.py): EPSG:4326 to Braille canvas (2x4 dot matrix) projection engine.
   - [`tui/state.py`](./tui/state.py): Thread-safe telemetry state store and snapshot generation.
   - [`tui/renderer.py`](./tui/renderer.py): Curses multi-pane layout, Braille drawing, and UTF-8 UI renderer.
   - [`tui/mock_engine.py`](./tui/mock_engine.py): Offline physics simulation and track graph kinematics.
   - [`tui/stream_worker.py`](./tui/stream_worker.py): Background SSE ingestion thread.
   - [`tui/app.py`](./tui/app.py): Application coordinator and event loop.
-- [`storage/`](./storage/): Embedded SQLite historical persistence subsystem:
+- [`storage/`](./storage): Embedded SQLite historical persistence subsystem:
   - [`storage/db.py`](./storage/db.py): High-performance WAL connection coordinator.
   - [`storage/recorder.py`](./storage/recorder.py): Asynchronous background batch persistence daemon.
   - [`storage/filter.py`](./storage/filter.py): Deadband filtering and coordinate compression engine.
   - [`storage/repository.py`](./storage/repository.py): Analytical query engine, DTOs, and GeoJSON/CSV exporters.
   - [`storage/cli_formatters.py`](./storage/cli_formatters.py): Zero-dependency tabular terminal reporting formatters.
-- [`scripts/`](./scripts/): Development and profiling utilities:
+- [`scripts/`](./scripts): Development and profiling utilities:
   - [`scripts/benchmark_storage.py`](./scripts/benchmark_storage.py): Ingestion throughput, read latency, and deadband benchmarking harness.
-- [`docs/historical-storage-sqlite.md`](./docs/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.
-- [`docs/architecture.md`](./docs/architecture.md): In-depth architectural analysis and reverse engineering report of the `railway.gov.gr` platform.
-- [`docs/tui-feature-enhancements.md`](./docs/tui-feature-enhancements.md): Interactive, analytical, and geospatial Curses TUI feature enhancement specification.
-- [`tests/`](./tests/): Comprehensive automated test suite (380+ tests).
+- [`docs/historical-storage-sqlite.md`](./docs/architecture/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.
+- [`docs/architecture.md`](./docs/architecture/architecture.md): In-depth architectural analysis and reverse engineering report of the `railway.gov.gr` platform.
+- [`docs/tui-feature-enhancements.md`](./docs/architecture/tui-feature-enhancements.md): Interactive, analytical, and geospatial Curses TUI feature enhancement specification.
+- [`tests/`](./tests): Comprehensive automated test suite (380+ tests).
 
 ---
 

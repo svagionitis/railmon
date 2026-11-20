@@ -1,6 +1,6 @@
 # MISRA C++ / AUTOSAR C++14 / NASA JPL Safety Standards for Python
 
-This document defines mandatory high-assurance coding and static analysis standards for `railmon`, adapted from **MISRA C++**, **AUTOSAR C++14**, **SEI CERT**, and **NASA JPL's "Power of 10" Rules**. Because `railmon` runs continuously as a live railway telemetry daemon and curses terminal map dashboard with zero external runtime dependencies, all code in [`train_tracker.py`](../../train_tracker.py), [`storage/`](../../storage/), [`tui/`](../../tui/), and [`tests/`](../../tests/) must comply with these rules.
+This document defines mandatory high-assurance coding and static analysis standards for `railmon`, adapted from **MISRA C++**, **AUTOSAR C++14**, **SEI CERT**, and **NASA JPL's "Power of 10" Rules**. Because `railmon` runs continuously as a live railway telemetry daemon and curses terminal map dashboard with zero external runtime dependencies, all code in [`train_tracker.py`](../../train_tracker.py), [`storage/`](../../storage), [`tui/`](../../tui), and [`tests/`](../../tests) must comply with these rules.
 
 ---
 

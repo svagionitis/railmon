@@ -17,4 +17,4 @@ These files serve as the ground-truth reference for:
   * `47794.19386b2538c55881.js`: SSE stream connection manager and `/api/msd/geo` GeoJSON loader.
   * `79801.a0cbc95dac2cd2a3.js`: Domain data models, schedule lookup, and train categorization.
 
-See [`docs/architecture.md`](../docs/architecture.md) for detailed architecture and reverse engineering analysis.
+See [`docs/architecture.md`](../docs/architecture/architecture.md) for detailed architecture and reverse engineering analysis.

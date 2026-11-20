@@ -10,7 +10,7 @@ description: >-
 
 # Static Safety Analyzer (MISRA / AUTOSAR / NASA JPL Gate)
 
-Enforces deterministic, safety-critical coding standards across [`train_tracker.py`](../../../train_tracker.py), [`storage/`](../../../storage/), [`tui/`](../../../tui/), and [`tests/`](../../../tests/), verifying compliance with [`.agents/rules/misra-autosar-python.md`](../../rules/misra-autosar-python.md).
+Enforces deterministic, safety-critical coding standards across [`train_tracker.py`](../../../train_tracker.py), [`storage/`](../../../storage), [`tui/`](../../../tui), and [`tests/`](../../../tests), verifying compliance with [`.agents/rules/misra-autosar-python.md`](../../rules/misra-autosar-python.md).
 
 ## When to Apply
 - After authoring or refactoring any production module (`train_tracker.py`, `storage/*.py`, `tui/*.py`).

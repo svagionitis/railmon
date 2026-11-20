@@ -112,7 +112,7 @@ All links and file references within documentation (`docs/**/*.md`, `README.md`,
 
 ### B. Anti-Patterns to Eliminate
 - ❌ **Absolute workstation paths:** `C:\Users\...\storage\db.py` or `/home/user/project/storage/db.py`
-- ❌ **`file://` URIs:** `[storage](file:///C:/Users/.../storage/db.py)`
+- ❌ **`file://` URIs:** `[storage](./file:/C:/Users/.../storage/db.py)`
 - ❌ **Root-slashed paths:** `/storage/db.py` (resolves to filesystem root in standard Markdown renderers)
 
 ---
