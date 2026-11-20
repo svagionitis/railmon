@@ -19,9 +19,12 @@ from tui.renderer import (
     PAIR_TRAIN_PROAST,
     PAIR_TRAIN_WARN,
     PaneGeometry,
+    StationBoardEntry,
     TUIRenderer,
     _INITIALIZED_COLOR_PAIRS,
     calculate_scroll_offset,
+    compute_station_board_entries,
+    format_corridor_display_name,
     format_next_station_eta,
     format_progress_bar,
     format_speed_sparkline,
@@ -49,6 +52,7 @@ from tui.renderer import (
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
+    InspectorMode,
     RosterSortMode,
     StateSnapshot,
     TrainRecord,
@@ -1356,6 +1360,147 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
         ascii_texts = " ".join(text for (_, _, text, _) in win_ascii.strings)
         self.assertIn("Coordinates:", ascii_texts)
         self.assertIn("39.5108d N, 22.4222d E", ascii_texts)
+
+    def test_compute_station_board_entries_and_render_station_inspector(self):
+        """TC-F32-03, TC-F32-04, TC-F32-07 & TC-F32-08: Verify Station Departure Board & Proximity Inspector."""
+        stations_dict = load_stations()
+        stations_list = list(stations_dict.values())
+        renderer_utf8 = TUIRenderer(stations=stations_list, ascii_mode=False)
+        renderer_ascii = TUIRenderer(stations=stations_list, ascii_mode=True)
+
+        larissa = renderer_utf8.resolve_station("LAR")
+        self.assertIsNotNone(larissa)
+        assert larissa is not None
+
+        # 1. Train 1598: Halted right at Larissa platform (~0.1 km away, speed 0.0 -> DIR='HLT', ETA='AT')
+        t_at = create_test_position(
+            train_id="t-1598",
+            train_number="1598",
+            speed=0.0,
+            delay=0.0,
+            lat=39.6376,
+            lng=22.4222,
+            track_heading=180.0,
+        )
+        t_at.next_station = "Λάρισα"
+
+        # 2. Train 1597: Approaching Larissa from ~4.2 km South at 126 km/h (DIR='NNW', DIST='4.2km', ETA='~2m', DLY='+4m')
+        t_near = create_test_position(
+            train_id="t-1597",
+            train_number="1597",
+            speed=126.0,
+            delay=4.0,
+            lat=39.6007,
+            lng=22.4222,
+            track_heading=340.0,
+        )
+        t_near.next_station = "Λάρισα"
+
+        # 3. Train 2591: Approaching Larissa from ~11.8 km North at 101 km/h (DIR='SSE', DIST='11.8km', ETA='~7m', DLY='0m')
+        t_mid = create_test_position(
+            train_id="t-2591",
+            train_number="2591",
+            speed=101.0,
+            delay=0.0,
+            lat=39.7446,
+            lng=22.4222,
+            track_heading=160.0,
+        )
+        t_mid.next_station = "Λάρισα"
+
+        # 4. Train IC 52: 185 km away in Athens, but destination is "Λάρισα" (included via route match)
+        t_route = create_test_position(
+            train_id="t-52",
+            train_number="IC 52",
+            speed=120.0,
+            delay=2.0,
+            lat=37.9926,
+            lng=23.7203,
+            track_heading=350.0,
+            destination="Λάρισα",
+        )
+        t_route.next_station = "ΣΚΑ"
+
+        # 5. Train 4200: 210 km away in Alexandroupoli with unrelated route (excluded: d > 80 km and no route match)
+        t_far_unrelated = create_test_position(
+            train_id="t-4200",
+            train_number="4200",
+            speed=90.0,
+            delay=0.0,
+            lat=40.8472,
+            lng=25.8778,
+            origin="Ξάνθη",
+            destination="Αλεξανδρούπολη",
+        )
+        t_far_unrelated.next_station = "Κομοτηνή"
+
+        store = TrainStateStore()
+        store.update_positions([t_mid, t_far_unrelated, t_near, t_route, t_at])
+        store.select_by_id("t-1597")
+        store.set_selected_station("LAR")
+        snapshot = store.get_snapshot()
+
+        entries = compute_station_board_entries(
+            station=larissa,
+            trains=snapshot.filtered_trains,
+            resolve_station_fn=renderer_utf8.resolve_station,
+            selected_train_id="t-1597",
+        )
+
+        # Unrelated far train (4200) must be excluded; remaining 4 sorted by ascending distance
+        self.assertEqual([e.train_number for e in entries], ["1598", "1597", "2591", "IC 52"])
+        self.assertEqual(entries[0].direction, "HLT")
+        self.assertEqual(entries[0].dist_str, "0.1km")
+        self.assertEqual(entries[0].eta_str, "AT")
+        self.assertEqual(entries[0].delay_str, "0m")
+
+        self.assertEqual(entries[1].direction, "NNW")
+        self.assertEqual(entries[1].dist_str, "4.2km")
+        self.assertEqual(entries[1].eta_str, "~2m")
+        self.assertEqual(entries[1].delay_str, "+4m")
+        self.assertTrue(entries[1].is_selected)
+
+        self.assertEqual(entries[2].direction, "SSE")
+        self.assertEqual(entries[2].dist_str, "11.8km")
+        self.assertEqual(entries[2].eta_str, "~7m")
+
+        self.assertTrue(entries[3].is_matched_route)
+        self.assertGreater(entries[3].distance_km, 80.0)
+
+        # Render Station Board in wide UTF-8 Inspector window (14x36)
+        win_utf8 = MockCursesWindow(14, 36)
+        renderer_utf8.render_inspector(win_utf8, snapshot)
+        utf8_texts = " ".join(text for (_, _, text, _) in win_utf8.strings)
+        self.assertIn("STATION BOARD: Larissa", utf8_texts)
+        self.assertIn("PATHE Mainline", utf8_texts)
+        self.assertIn("39.6385°N, 22.4222°E", utf8_texts)
+        self.assertIn("APPROACHING / AT STATION:", utf8_texts)
+        self.assertIn("TRAIN  DIR  DIST   ETA   DLY", utf8_texts)
+        self.assertIn("1598", utf8_texts)
+        self.assertIn("1597", utf8_texts)
+        self.assertIn("2591", utf8_texts)
+
+        # Render Station Board in compact 80x24 Inspector window (11x28)
+        win_compact = MockCursesWindow(11, 28)
+        renderer_utf8.render_inspector(win_compact, snapshot)
+        compact_texts = " ".join(text for (_, _, text, _) in win_compact.strings)
+        self.assertIn("STATION BOARD: Larissa", compact_texts)
+        self.assertIn("TRAIN DIR DIST   ETA  DLY", compact_texts)
+        self.assertIn("1598", compact_texts)
+        self.assertIn("1597", compact_texts)
+
+        # Render Station Board in 7-bit ASCII mode and verify strict 7-bit ASCII compliance
+        win_ascii = MockCursesWindow(14, 36)
+        renderer_ascii.render_inspector(win_ascii, snapshot)
+        ascii_texts = " ".join(text for (_, _, text, _) in win_ascii.strings)
+        self.assertIn("39.6385d N, 22.4222d E", ascii_texts)
+        for _, _, text, _ in win_ascii.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character '{ch}' in ASCII station board")
+
+        self.assertEqual(format_corridor_display_name("PROASTIAKOS_ATH"), "Proastiakos Suburban")
+        self.assertEqual(format_corridor_display_name("NORTHERN"), "Northern Greece")
+        self.assertEqual(format_corridor_display_name(None), "National Network")
 
 
 if __name__ == "__main__":

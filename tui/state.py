@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 import threading
 import time
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
 from train_tracker import TrainPosition
 from tui.geo import (
@@ -51,6 +51,13 @@ class BreadcrumbMode(Enum):
     ALL = auto()  # Draw breadcrumb dots for all active filtered trains
     SELECTED = auto()  # Draw breadcrumb dots only for snapshot.selected_train
     OFF = auto()  # Hide all historical breadcrumb trails
+
+
+class InspectorMode(Enum):
+    """Display mode for the bottom-right Inspector pane."""
+
+    TRAIN = auto()  # Default: Selected Train Telemetry Inspector
+    STATION = auto()  # Station Departure Board & Proximity Inspector
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,8 @@ class StateSnapshot:
     recording_db: Optional[str] = None
     sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
     breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL
+    inspector_mode: InspectorMode = InspectorMode.TRAIN
+    selected_station_id: Optional[str] = None
 
 
 def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
@@ -293,6 +302,9 @@ class TrainStateStore:
         self._corridor_filter: Optional[str] = None
         self._sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
         self._breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL
+        self._inspector_mode: InspectorMode = InspectorMode.TRAIN
+        self._selected_station_id: Optional[str] = None
+        self._station_cycle_anchor_id: Optional[str] = None
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
         self._is_recording: bool = False
@@ -415,6 +427,8 @@ class TrainStateStore:
                 recording_db=self._recording_db,
                 sort_mode=self._sort_mode,
                 breadcrumb_mode=self._breadcrumb_mode,
+                inspector_mode=self._inspector_mode,
+                selected_station_id=self._selected_station_id,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -553,12 +567,115 @@ class TrainStateStore:
             self._version += 1
             return self._breadcrumb_mode
 
+    def set_inspector_mode(self, mode: InspectorMode) -> None:
+        """Explicitly set the active Inspector pane display mode."""
+        if not isinstance(mode, InspectorMode):
+            raise TypeError(f"Expected InspectorMode, got {type(mode).__name__}")
+        with self._lock:
+            if self._inspector_mode != mode:
+                self._inspector_mode = mode
+                if mode == InspectorMode.TRAIN:
+                    self._selected_station_id = None
+                    self._station_cycle_anchor_id = None
+                self._version += 1
+
+    def set_selected_station(self, station_id: Optional[str]) -> None:
+        """Select a station by ID and engage STATION inspector mode (or return to TRAIN if None)."""
+        norm_id = station_id.strip().upper() if (station_id and station_id.strip()) else None
+        target_mode = InspectorMode.STATION if norm_id is not None else InspectorMode.TRAIN
+        with self._lock:
+            if self._selected_station_id != norm_id or self._inspector_mode != target_mode:
+                self._selected_station_id = norm_id
+                self._inspector_mode = target_mode
+                self._station_cycle_anchor_id = norm_id
+                self._version += 1
+
+    def cycle_station_board(
+        self,
+        station_ids: Sequence[str],
+        initial_station_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Cycle through station IDs in STATION inspector mode, wrapping back to TRAIN mode.
+
+        When entering from InspectorMode.TRAIN:
+        - Selects initial_station_id if provided and non-empty (else station_ids[0]),
+          records it as the cycle anchor, and switches to InspectorMode.STATION.
+        When already in InspectorMode.STATION:
+        - Advances to the next station in station_ids.
+        - Once the cycle wraps back to the anchor station (having visited all stations in
+          station_ids), resets selected_station_id to None and returns to InspectorMode.TRAIN.
+
+        Args:
+            station_ids: Ordered sequence of candidate hub station IDs to cycle through.
+            initial_station_id: Optional preferred starting station ID when entering from TRAIN mode.
+
+        Returns:
+            Newly selected station ID string, or None when returning to InspectorMode.TRAIN.
+        """
+        cleaned_ids: List[str] = []
+        for sid in station_ids:
+            norm = sid.strip().upper()
+            if norm and norm not in cleaned_ids:
+                cleaned_ids.append(norm)
+
+        with self._lock:
+            if not cleaned_ids:
+                if self._inspector_mode != InspectorMode.TRAIN or self._selected_station_id is not None:
+                    self._inspector_mode = InspectorMode.TRAIN
+                    self._selected_station_id = None
+                    self._station_cycle_anchor_id = None
+                    self._version += 1
+                return None
+
+            init_norm = (
+                initial_station_id.strip().upper()
+                if (initial_station_id and initial_station_id.strip())
+                else None
+            )
+
+            # Transition 1: TRAIN -> STATION
+            if self._inspector_mode == InspectorMode.TRAIN or self._selected_station_id is None:
+                start_id = init_norm if (init_norm and init_norm in cleaned_ids) else (init_norm or cleaned_ids[0])
+                self._selected_station_id = start_id
+                self._station_cycle_anchor_id = start_id if start_id in cleaned_ids else cleaned_ids[0]
+                self._inspector_mode = InspectorMode.STATION
+                self._version += 1
+                return self._selected_station_id
+
+            # Transition 2: Already in STATION mode -> advance or wrap back to TRAIN
+            if self._selected_station_id not in cleaned_ids:
+                next_id = cleaned_ids[0]
+                self._selected_station_id = next_id
+                self._station_cycle_anchor_id = next_id
+                self._version += 1
+                return self._selected_station_id
+
+            curr_idx = cleaned_ids.index(self._selected_station_id)
+            next_idx = (curr_idx + 1) % len(cleaned_ids)
+            next_id = cleaned_ids[next_idx]
+            anchor_id = self._station_cycle_anchor_id if self._station_cycle_anchor_id in cleaned_ids else cleaned_ids[0]
+
+            if next_id == anchor_id:
+                # Completed full cycle through all candidate hub stations -> return to TRAIN mode
+                self._selected_station_id = None
+                self._station_cycle_anchor_id = None
+                self._inspector_mode = InspectorMode.TRAIN
+                self._version += 1
+                return None
+
+            self._selected_station_id = next_id
+            self._version += 1
+            return self._selected_station_id
+
     def clear(self) -> None:
         """Reset state store completely."""
         with self._lock:
             self._trains.clear()
             self._selected_id = None
             self._follow_mode = False
+            self._inspector_mode = InspectorMode.TRAIN
+            self._selected_station_id = None
+            self._station_cycle_anchor_id = None
             self._total_messages = 0
             self._last_update_ts = 0.0
             self._version += 1

@@ -17,6 +17,7 @@ from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
     HistoricalBreadcrumb,
+    InspectorMode,
     RosterSortMode,
     StateSnapshot,
     TrainRecord,
@@ -820,6 +821,58 @@ class TestStreamWorker(unittest.TestCase):
         record.position = pos_brake
         history3 = record.get_speed_history(max_samples=10)
         self.assertEqual(history3[-1], 0.0)
+
+    def test_inspector_mode_and_station_board_cycling(self):
+        """TC-F32-01 & TC-F32-02: Verify InspectorMode transitions, set_selected_station, and cycle_station_board."""
+        snap0 = self.store.get_snapshot()
+        self.assertEqual(snap0.inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(snap0.selected_station_id)
+        v0 = snap0.version
+
+        # 1. Cycle into STATION mode starting at "LAR"
+        hubs = ["ATH", "LAR", "SKG"]
+        sel1 = self.store.cycle_station_board(hubs, initial_station_id="lar")
+        self.assertEqual(sel1, "LAR")
+        snap1 = self.store.get_snapshot()
+        self.assertEqual(snap1.inspector_mode, InspectorMode.STATION)
+        self.assertEqual(snap1.selected_station_id, "LAR")
+        self.assertEqual(snap1.version, v0 + 1)
+
+        # 2. Next cycle moves to "SKG"
+        sel2 = self.store.cycle_station_board(hubs)
+        self.assertEqual(sel2, "SKG")
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(snap2.inspector_mode, InspectorMode.STATION)
+        self.assertEqual(snap2.selected_station_id, "SKG")
+        self.assertEqual(snap2.version, v0 + 2)
+
+        # 3. Next cycle wraps to "ATH"
+        sel3 = self.store.cycle_station_board(hubs)
+        self.assertEqual(sel3, "ATH")
+        snap3 = self.store.get_snapshot()
+        self.assertEqual(snap3.inspector_mode, InspectorMode.STATION)
+        self.assertEqual(snap3.selected_station_id, "ATH")
+
+        # 4. Completing full cycle returns to TRAIN mode (None)
+        sel4 = self.store.cycle_station_board(hubs)
+        self.assertIsNone(sel4)
+        snap4 = self.store.get_snapshot()
+        self.assertEqual(snap4.inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(snap4.selected_station_id)
+
+        # 5. Direct set_selected_station and set_inspector_mode
+        self.store.set_selected_station("  ska ")
+        snap5 = self.store.get_snapshot()
+        self.assertEqual(snap5.inspector_mode, InspectorMode.STATION)
+        self.assertEqual(snap5.selected_station_id, "SKA")
+
+        self.store.set_inspector_mode(InspectorMode.TRAIN)
+        snap6 = self.store.get_snapshot()
+        self.assertEqual(snap6.inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(snap6.selected_station_id)
+
+        with self.assertRaises(TypeError):
+            self.store.set_inspector_mode("STATION")  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

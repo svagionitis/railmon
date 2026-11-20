@@ -17,7 +17,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
 | **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / Click | Proposed | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / `M` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py) |
@@ -374,10 +374,12 @@ Modern terminal emulators (Windows Terminal, iTerm2, Kitty, Alacritty, GNOME Ter
 
 ---
 
-### F-3.2: Station Departure Board & Proximity Inspector Mode (`m`)
+### F-3.2: Station Departure Board & Proximity Inspector Mode (`m` / `M`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`docs/f-3-2-station-departure-board-proximity-inspector-plan.md`](./f-3-2-station-departure-board-proximity-inspector-plan.md)
 
 #### Overview
-Allow users to switch the bottom-right Inspector pane between **Train Telemetry Mode** (default) and **Station Proximity Board Mode** (`m` key or clicking a station node `◉` on the map).
+Allow users to switch the bottom-right Inspector pane between **Train Telemetry Mode** (default) and **Station Proximity Board Mode** (`m` / `M` key or clicking a station node `◉` on the map).
 
 #### Visual Layout of Station Inspector Mode
 
@@ -385,20 +387,26 @@ Allow users to switch the bottom-right Inspector pane between **Train Telemetry 
 +------------------------------+
 | [STATION BOARD: Larissa]     |
 | Corridor: PATHE Mainline     |
-| Coords:   39.6310°N, 22.423E |
+| Coords:   39.6385°N, 22.422E |
 |                              |
 | APPROACHING / AT STATION:    |
 | TRAIN  DIR  DIST   ETA   DLY |
+| 1598   HLT  0.1km  AT     0m |
 | 1597   NNW  4.2km  ~2m   +4m |
 | 2591   SSE  11.8km ~7m    0m |
-| 1598   HLT  0.1km  AT    0m  |
 +------------------------------+
 ```
 
 #### Technical Design
-- Add `selected_station_id: Optional[str]` to [`TrainStateStore`](../tui/state.py).
-- Pressing `m` cycles focus through major hub stations (or nearest station to current viewport center).
-- Compute Haversine distance from the selected `StationNode` to all active trains, filter for trains within $80\text{ km}$ or whose `next_station` / `origin` / `destination` matches the station, and sort by ascending distance.
+1. **State Layer ([`tui/state.py`](../tui/state.py)):**
+   - Add `InspectorMode` enum (`TRAIN`, `STATION`) and expose `inspector_mode: InspectorMode = InspectorMode.TRAIN` and `selected_station_id: Optional[str] = None` on [`StateSnapshot`](../tui/state.py).
+   - Implement thread-safe `set_inspector_mode()`, `set_selected_station()`, and `cycle_station_board()` on [`TrainStateStore`](../tui/state.py) with anchor-tracked wrap-around cycling that returns to `InspectorMode.TRAIN` after visiting all candidate hubs.
+2. **Controller Layer ([`tui/app.py`](../tui/app.py)):**
+   - Pressing `m` in `InputMode.NORMAL` enters `InspectorMode.STATION` starting at the selected train's `next_station` (if resolved) or the hub station nearest to `projector.viewport.center`, and subsequent `m` presses cycle through active corridor/network hub stations before wrapping back to `InspectorMode.TRAIN`.
+   - Pressing `M` (`Shift+M`) while in `InspectorMode.STATION` immediately exits back to `InspectorMode.TRAIN`.
+3. **Proximity Engine & Presentation Layer ([`tui/renderer.py`](../tui/renderer.py)):**
+   - Implement `StationBoardEntry` and `compute_station_board_entries()` computing Haversine distance from the selected `StationNode` to all active filtered trains, retaining trains within $80.0\text{ km}$ or whose `next_station` / `origin` / `destination` resolves to the station, sorted by ascending distance with natural train ID tie-breaking.
+   - Render the Station Board in `TUIRenderer.render_station_inspector()` with adaptive column widths for $80 \times 24$ (`28`-col) and wide (`32+`-col) sidebars, and highlight the active station node on the map canvas (`curses.A_REVERSE | curses.A_BOLD`).
 
 ---
 
@@ -524,7 +532,7 @@ sequenceDiagram
 | **`b` / `B`** | **Normal** | **Cycle breadcrumb trails (`All` → `Selected` → `Off`)** | **Implemented (Tier 1)** |
 | **`v`** | **Normal** | **Cycle station labels (`All` → `Hubs Only` → `Markers Only`)** | **Proposed (Tier 3)** |
 | **`t`** | **Normal** | **Toggle corridor-colored Braille track rendering** | **Proposed (Tier 3)** |
-| **`m`** | **Normal** | **Toggle Inspector between Train Telemetry & Station Board** | **Proposed (Tier 3)** |
+| **`m` / `M`** | **Normal** | **Cycle Station Departure Board / Return to Train Telemetry** | **Implemented (Tier 3)** |
 | **`e`** | **Normal** | **Export selected train trajectory to GeoJSON file** | **Proposed (Tier 4)** |
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Proposed (Tier 4)** |
 | **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Proposed (Tier 4)** |

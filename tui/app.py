@@ -14,7 +14,7 @@ import signal
 import sys
 import threading
 import time
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("railmon." + __name__)
 
@@ -27,6 +27,7 @@ from tui.geo import (
     GeoPoint,
     GeoProjector,
     Viewport,
+    haversine_distance_km,
 )
 from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_tracks
 from tui.renderer import HelpOverlay, PaneGeometry, PlaybackState, TUIRenderer
@@ -34,6 +35,7 @@ from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
     InputMode,
+    InspectorMode,
     RosterSortMode,
     StateSnapshot,
     TrainStateStore,
@@ -367,9 +369,10 @@ class TUIApp:
             self.store.toggle_follow_mode()
 
     def clear_all(self) -> None:
-        """Clear search query, corridor filter, and selection."""
+        """Clear search query, corridor filter, station board mode, and selection."""
         self.store.set_filter_query("")
         self.store.set_corridor_filter(None)
+        self.store.set_inspector_mode(InspectorMode.TRAIN)
         self.store.clear_selection()
         self.search_buffer = ""
         self._pre_search_query = ""
@@ -381,6 +384,81 @@ class TUIApp:
     def cycle_breadcrumbs(self) -> BreadcrumbMode:
         """Cycle historical breadcrumb trail visibility mode (ALL -> SELECTED -> OFF)."""
         return self.store.cycle_breadcrumb_mode()
+
+    def _get_candidate_stations(self, corridor_filter: Optional[str]) -> List[StationNode]:
+        """Return ordered hub stations matching the active corridor filter (or all stations if none are hubs)."""
+        if not self.stations:
+            loaded = list(load_stations().values())
+            self.stations = loaded
+            if not self.renderer.stations:
+                self.renderer.stations = loaded
+                from tui.renderer import _build_station_index
+                self.renderer.station_index = _build_station_index(loaded)
+        if not self.stations:
+            return []
+        hubs = [s for s in self.stations if s.is_hub]
+        base_pool = hubs if hubs else list(self.stations)
+        if not corridor_filter:
+            return base_pool
+
+        target = corridor_filter.strip().upper()
+        filtered: List[StationNode] = []
+        for stn in base_pool:
+            c = (stn.corridor or "").strip().upper()
+            if target in c:
+                filtered.append(stn)
+            elif target in ("PROASTIAKOS", "SUBURBAN") and (
+                "PROAST" in c or stn.id in ("PIR", "ATH", "SKA", "INO")
+            ):
+                filtered.append(stn)
+            elif target in ("NORTHERN", "NORTHERN_GREECE", "NORTH") and (
+                c in ("NORTHERN", "MACEDONIA") or stn.id == "SKG"
+            ):
+                filtered.append(stn)
+            elif target in ("PATHE", "MAINLINE") and c == "PATHE":
+                filtered.append(stn)
+        return filtered if filtered else base_pool
+
+    def cycle_station_inspector(self, exit_if_active: bool = False) -> Optional[str]:
+        """Toggle or cycle the Station Departure Board & Proximity Inspector mode.
+
+        Args:
+            exit_if_active: If True and already in STATION mode, immediately return to TRAIN mode.
+
+        Returns:
+            Active selected_station_id, or None if in TRAIN mode.
+        """
+        snapshot = self.store.get_snapshot()
+        if exit_if_active and snapshot.inspector_mode == InspectorMode.STATION:
+            self.store.set_inspector_mode(InspectorMode.TRAIN)
+            return None
+
+        candidates = self._get_candidate_stations(snapshot.corridor_filter)
+        if not candidates:
+            self.store.set_inspector_mode(InspectorMode.TRAIN)
+            return None
+
+        candidate_ids = [s.id for s in candidates]
+        initial_id: Optional[str] = None
+
+        if snapshot.inspector_mode == InspectorMode.TRAIN or snapshot.selected_station_id is None:
+            # 1. If a train is selected and its next_station resolves to a known station, start there
+            if snapshot.selected_train and snapshot.selected_train.position.next_station:
+                resolved = self.renderer.resolve_station(snapshot.selected_train.position.next_station)
+                if resolved is not None:
+                    initial_id = resolved.id
+                    if initial_id not in candidate_ids:
+                        candidate_ids.insert(0, initial_id)
+            # 2. Otherwise start at the candidate hub station nearest to the current viewport center
+            if initial_id is None:
+                center_pt = self.projector.viewport.center
+                nearest_stn = min(
+                    candidates,
+                    key=lambda s: haversine_distance_km(center_pt, s.point),
+                )
+                initial_id = nearest_stn.id
+
+        return self.store.cycle_station_board(candidate_ids, initial_station_id=initial_id)
 
     def toggle_pause(self) -> None:
         """Toggle paused state for telemetry ingestion."""
@@ -453,6 +531,12 @@ class TUIApp:
         # Cycle historical breadcrumb trail mode (All, Selected, Off)
         elif key in (ord("b"), ord("B")):
             self.cycle_breadcrumbs()
+
+        # Cycle Station Departure Board & Proximity Inspector Mode
+        elif key == ord("m"):
+            self.cycle_station_inspector(exit_if_active=False)
+        elif key == ord("M"):
+            self.cycle_station_inspector(exit_if_active=True)
 
         # Search filter prompt activation
         elif key in SEARCH_OPEN_KEYS:

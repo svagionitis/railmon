@@ -11,15 +11,16 @@ from enum import Enum, auto
 import curses
 import math
 import time
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import unicodedata
 
 from tui.geo import BrailleCanvas, GeoPoint, GeoProjector, haversine_distance_km
-from tui.mock_engine import StationNode, TrackPolyline, snap_to_track_network
+from tui.mock_engine import StationNode, TrackPolyline, calculate_bearing, snap_to_track_network
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
     InputMode,
+    InspectorMode,
     RosterSortMode,
     StateSnapshot,
     TrainRecord,
@@ -683,6 +684,185 @@ def format_wgs84_coords(
     return f"{abs_lat:.4f}°{lat_hemi}, {abs_lng:.4f}°{lng_hemi}"
 
 
+DEFAULT_STATION_PROXIMITY_KM: float = 80.0
+
+
+@dataclass(frozen=True)
+class StationBoardEntry:
+    """Computed proximity and estimated arrival row for a train relative to a StationNode."""
+
+    train_id: str
+    train_number: str
+    direction: str
+    distance_km: float
+    dist_str: str
+    eta_str: str
+    delay_min: int
+    delay_str: str
+    is_matched_route: bool
+    is_selected: bool
+    color_pair: int
+
+
+def format_corridor_display_name(corridor: Optional[str]) -> str:
+    """Map an internal station corridor code to a human-readable display label.
+
+    Args:
+        corridor: Raw corridor identifier (e.g. 'PATHE', 'PROASTIAKOS_ATH', 'NORTHERN').
+
+    Returns:
+        Human-readable corridor title string.
+    """
+    if not corridor or not corridor.strip():
+        return "National Network"
+    norm = corridor.strip().upper()
+    if norm in ("PATHE", "PATHE_MAINLINE", "E85"):
+        return "PATHE Mainline"
+    if "PROAST" in norm or norm in ("SUBURBAN", "PIRAIR", "KIATO", "CHALKIDA"):
+        return "Proastiakos Suburban"
+    if norm in ("NORTHERN", "NORTHERN_GREECE", "NORTH"):
+        return "Northern Greece"
+    if norm == "MACEDONIA":
+        return "Macedonia Corridor"
+    if norm == "THESSALY":
+        return "Thessaly Corridor"
+    return corridor.strip().title()
+
+
+def _natural_train_id_sort_key(train_number: str, train_id: str) -> Tuple[int, str]:
+    """Natural alphanumeric sort key for train numbers on the station proximity board."""
+    tn = (train_number or "").strip()
+    digits = "".join(ch for ch in tn if ch.isdigit())
+    if digits:
+        return (0, f"{int(digits):010d}_{tn}")
+    return (1, tn or train_id)
+
+
+def compute_station_board_entries(
+    station: StationNode,
+    trains: Sequence[TrainRecord],
+    resolve_station_fn: Callable[[Optional[str]], Optional[StationNode]],
+    selected_train_id: Optional[str] = None,
+    proximity_radius_km: float = DEFAULT_STATION_PROXIMITY_KM,
+) -> List[StationBoardEntry]:
+    """Compute and sort approaching / at-station trains for a given StationNode.
+
+    Includes trains within proximity_radius_km (default 80.0 km) of the station OR
+    whose next_station, origin, or destination resolves to the station, sorted by
+    ascending Haversine distance with natural train number tie-breaking.
+
+    Args:
+        station: Target StationNode for the departure/proximity board.
+        trains: Sequence of active TrainRecord items to evaluate.
+        resolve_station_fn: Callable resolving a station name/code/ID to a StationNode.
+        selected_train_id: Optional ID of the currently selected train in the roster.
+        proximity_radius_km: Geodesic capture radius in kilometers (default: 80.0 km).
+
+    Returns:
+        Sorted list of StationBoardEntry objects.
+    """
+    entries: List[StationBoardEntry] = []
+    stn_norm_el = normalize_station_key(station.name_el)
+    stn_norm_en = normalize_station_key(station.name_en)
+
+    for record in trains:
+        pos = record.position
+        if not (math.isfinite(pos.lat) and math.isfinite(pos.lng)):
+            continue
+        if abs(pos.lat) < 1e-9 and abs(pos.lng) < 1e-9:
+            continue
+
+        train_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
+        d_km = haversine_distance_km(train_pt, station.point)
+
+        # Check if next_station, origin, or destination matches this station
+        is_matched_route = False
+        for endpoint_name in (pos.next_station, pos.origin, pos.destination):
+            if not endpoint_name:
+                continue
+            resolved = resolve_station_fn(endpoint_name)
+            if resolved is not None and resolved.id == station.id:
+                is_matched_route = True
+                break
+            norm_ep = normalize_station_key(endpoint_name)
+            if norm_ep and (
+                (stn_norm_el and stn_norm_el in norm_ep)
+                or (stn_norm_en and stn_norm_en in norm_ep)
+            ):
+                is_matched_route = True
+                break
+
+        if d_km > proximity_radius_km and not is_matched_route:
+            continue
+
+        spd = float(pos.speed) if (pos.speed is not None and math.isfinite(pos.speed)) else 0.0
+
+        # 1. Direction (3-char cardinal or 'HLT')
+        if spd < 1.0:
+            direction = "HLT"
+        else:
+            heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
+            if heading_deg is None or not math.isfinite(heading_deg):
+                heading_deg = calculate_bearing(train_pt, station.point)
+            idx = int((heading_deg + 11.25) % 360 // 22.5)
+            direction = COMPASS_POINTS_16[idx]
+
+        # 2. Compact distance string
+        if d_km < 100.0:
+            dist_str = f"{d_km:.1f}km"
+        else:
+            dist_str = f"{int(round(d_km))}km"
+
+        # 3. Kinematic ETA string
+        if d_km < 0.25 and spd < 5.0:
+            eta_str = "AT"
+        elif spd >= 5.0:
+            eta_min = int(round((d_km / spd) * 60.0))
+            if d_km < 0.1 or eta_min <= 0:
+                eta_str = "<1m"
+            elif eta_min >= 120:
+                hours = eta_min // 60
+                mins = eta_min % 60
+                eta_str = f"~{hours}h{mins:02d}" if mins > 0 else f"~{hours}h"
+            else:
+                eta_str = f"~{eta_min}m"
+        else:
+            eta_str = "--"
+
+        # 4. Delay string
+        dly_val = float(pos.delay) if (pos.delay is not None and math.isfinite(pos.delay)) else 0.0
+        dly_int = int(round(dly_val))
+        delay_str = f"+{dly_int}m" if dly_int > 0 else (f"{dly_int}m" if dly_int < 0 else "0m")
+
+        train_num = (pos.train_number or pos.id).strip()
+        is_selected = selected_train_id is not None and pos.id == selected_train_id
+        color_pair = get_train_color_pair(record)
+
+        entries.append(
+            StationBoardEntry(
+                train_id=pos.id,
+                train_number=train_num,
+                direction=direction,
+                distance_km=d_km,
+                dist_str=dist_str,
+                eta_str=eta_str,
+                delay_min=dly_int,
+                delay_str=delay_str,
+                is_matched_route=is_matched_route,
+                is_selected=is_selected,
+                color_pair=color_pair,
+            )
+        )
+
+    entries.sort(
+        key=lambda e: (
+            round(e.distance_km, 3),
+            _natural_train_id_sort_key(e.train_number, e.train_id),
+        )
+    )
+    return entries
+
+
 def safe_addstr(
     win: Any,
     y: int,
@@ -1028,25 +1208,40 @@ class TUIRenderer:
 
         # 3. Overlay Stations with greedy collision avoidance
         occupied_cells: Set[Tuple[int, int]] = set()
-        # Sort stations so hub stations take priority over secondary ones
-        sorted_stations = sorted(self.stations, key=lambda s: not s.is_hub)
+        inspector_mode = getattr(snapshot, "inspector_mode", InspectorMode.TRAIN)
+        selected_stn_id = (
+            getattr(snapshot, "selected_station_id", None)
+            if inspector_mode == InspectorMode.STATION
+            else None
+        )
+        # Prioritize active selected station first, then hub stations over secondary ones
+        sorted_stations = sorted(
+            self.stations,
+            key=lambda s: (s.id != selected_stn_id, not s.is_hub),
+        )
 
         for stn in sorted_stations:
             col, row = projector.resolve_track_cell(stn.point, canvas)
             if not (0 <= col < inner_w and 0 <= row < inner_h):
                 continue
 
+            is_active_station = selected_stn_id is not None and stn.id == selected_stn_id
             # Draw station marker glyph
             glyph = self.glyphs.station_hub if stn.is_hub else self.glyphs.station_normal
+            marker_attr = (
+                (station_attr | curses.A_REVERSE | curses.A_BOLD)
+                if is_active_station
+                else station_attr
+            )
             try:
-                win.addstr(1 + row, 1 + col, glyph, station_attr)
+                win.addstr(1 + row, 1 + col, glyph, marker_attr)
             except curses.error:
                 pass
             occupied_cells.add((col, row))
 
             # Determine label text and width
             name = stn.name_en or stn.name_el or stn.id
-            label = f" {name}"
+            label = f" [{name}]" if is_active_station else f" {name}"
             label_w = get_string_display_width(label)
             label_start_x = col + 1
 
@@ -1058,12 +1253,18 @@ class TUIRenderer:
                     break
 
             if not has_collision and label_start_x + label_w <= inner_w:
+                if is_active_station:
+                    lbl_attr = station_attr | curses.A_REVERSE | curses.A_BOLD
+                elif stn.is_hub:
+                    lbl_attr = station_attr
+                else:
+                    lbl_attr = station_dim_attr
                 safe_addstr(
                     win,
                     1 + row,
                     1 + label_start_x,
                     label,
-                    station_attr if stn.is_hub else station_dim_attr,
+                    lbl_attr,
                     max_w=inner_w - label_start_x,
                     ascii_mode=self.ascii_mode,
                 )
@@ -1198,17 +1399,144 @@ class TUIRenderer:
             row_attr = select_attr if is_selected else safe_color_pair(pair, curses.A_NORMAL)
             safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
+    def render_station_inspector(
+        self,
+        win: Any,
+        snapshot: StateSnapshot,
+    ) -> None:
+        """Render the Station Departure Board & Proximity Inspector mode.
+
+        Args:
+            win: Inspector curses window.
+            snapshot: Current StateSnapshot with selected_station_id.
+        """
+        win.erase()
+        max_y, max_x = win.getmaxyx()
+        if max_y < 3 or max_x < 3:
+            return
+
+        border_attr = safe_color_pair(PAIR_BORDER, curses.A_NORMAL)
+        title_attr = safe_color_pair(PAIR_HEADER, curses.A_BOLD) | curses.A_BOLD
+        val_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL)
+        dim_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL) | curses.A_DIM
+        select_attr = safe_color_pair(PAIR_ROSTER_SELECT, curses.A_REVERSE) | curses.A_BOLD
+
+        try:
+            if self.ascii_mode:
+                win.border(ord('|'), ord('|'), ord('-'), ord('-'), ord('+'), ord('+'), ord('+'), ord('+'))
+            else:
+                win.box()
+        except curses.error:
+            pass
+
+        station = self.resolve_station(getattr(snapshot, "selected_station_id", None))
+        if station is None:
+            safe_addstr(win, 0, 2, "[ STATION BOARD ]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
+            safe_addstr(win, 2, 2, "Station not found.", dim_attr, max_w=max_x - 4, ascii_mode=self.ascii_mode)
+            return
+
+        stn_label = station.name_en or station.name_el or station.id
+        if "(" in stn_label and max_x < 36:
+            stn_label = stn_label.split("(", 1)[0].strip() or stn_label
+        if max_x < 32:
+            framed_title = f"[STATION BOARD: {stn_label}]"
+        else:
+            framed_title = f"[ STATION BOARD: {stn_label} ]"
+        safe_addstr(win, 0, 2, framed_title, border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
+
+        inner_h = max_y - 2
+        if inner_h <= 0:
+            return
+
+        corridor_str = format_corridor_display_name(station.corridor)
+        coords_str = format_wgs84_coords(station.point.lat, station.point.lng, ascii_mode=self.ascii_mode)
+
+        if inner_h >= 1:
+            safe_addstr(win, 1, 2, "Corridor:", title_attr, max_w=9, ascii_mode=self.ascii_mode)
+            safe_addstr(win, 1, 12, corridor_str, val_attr, max_w=max_x - 13, ascii_mode=self.ascii_mode)
+        if inner_h >= 2:
+            safe_addstr(win, 2, 2, "Coords:", title_attr, max_w=9, ascii_mode=self.ascii_mode)
+            safe_addstr(win, 2, 12, coords_str, val_attr, max_w=max_x - 13, ascii_mode=self.ascii_mode)
+
+        selected_tid = snapshot.selected_train.position.id if snapshot.selected_train else None
+        entries = compute_station_board_entries(
+            station=station,
+            trains=snapshot.filtered_trains,
+            resolve_station_fn=self.resolve_station,
+            selected_train_id=selected_tid,
+        )
+
+        # Leave a blank visual spacer row on taller windows (inner_h >= 10), pack tightly on 80x24 (inner_h = 9)
+        sec_hdr_y = 4 if inner_h >= 10 else 3
+        tbl_hdr_y = sec_hdr_y + 1
+        rows_start_y = tbl_hdr_y + 1
+
+        if sec_hdr_y <= inner_h:
+            safe_addstr(
+                win,
+                sec_hdr_y,
+                2 if max_x >= 30 else 1,
+                "APPROACHING / AT STATION:",
+                title_attr,
+                max_w=max_x - 3,
+                ascii_mode=self.ascii_mode,
+            )
+
+        compact_cols = max_x < 32
+        col_x = 1 if compact_cols else 2
+        if tbl_hdr_y <= inner_h:
+            tbl_hdr = "TRAIN DIR DIST   ETA  DLY" if compact_cols else "TRAIN  DIR  DIST   ETA   DLY"
+            safe_addstr(win, tbl_hdr_y, col_x, tbl_hdr, title_attr, max_w=max_x - col_x - 1, ascii_mode=self.ascii_mode)
+
+        if rows_start_y > inner_h:
+            return
+
+        if not entries:
+            safe_addstr(
+                win,
+                rows_start_y,
+                col_x,
+                "No trains within 80km.",
+                dim_attr,
+                max_w=max_x - col_x - 1,
+                ascii_mode=self.ascii_mode,
+            )
+            return
+
+        max_rows = max(0, (inner_h - rows_start_y) + 1)
+        for idx, entry in enumerate(entries[:max_rows]):
+            y = rows_start_y + idx
+            if compact_cols:
+                row_text = (
+                    f"{entry.train_number[:5]:<5} {entry.direction:<3} "
+                    f"{entry.dist_str:<6} {entry.eta_str:<4} {entry.delay_str:>4}"
+                )
+            else:
+                row_text = (
+                    f"{entry.train_number[:5]:<6} {entry.direction:<3}  "
+                    f"{entry.dist_str:<6} {entry.eta_str:<5} {entry.delay_str:>3}"
+                )
+            row_attr = select_attr if entry.is_selected else safe_color_pair(entry.color_pair, curses.A_NORMAL)
+            safe_addstr(win, y, col_x, row_text, row_attr, max_w=max_x - col_x - 1, ascii_mode=self.ascii_mode)
+
     def render_inspector(
         self,
         win: Any,
         snapshot: StateSnapshot,
     ) -> None:
-        """Render the Selected Train Telemetry Inspector pane.
+        """Render the Selected Train Telemetry or Station Departure Board Inspector pane.
 
         Args:
             win: Inspector curses window.
             snapshot: Current StateSnapshot.
         """
+        if (
+            getattr(snapshot, "inspector_mode", InspectorMode.TRAIN) == InspectorMode.STATION
+            and getattr(snapshot, "selected_station_id", None)
+        ):
+            self.render_station_inspector(win, snapshot)
+            return
+
         win.erase()
         max_y, max_x = win.getmaxyx()
         if max_y < 3 or max_x < 3:
@@ -1366,7 +1694,7 @@ class TUIRenderer:
 
         # Keybindings cheat sheet
         follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
-        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
         safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         # Connection status badge
@@ -1403,7 +1731,7 @@ class TUIRenderer:
             height: Total terminal screen height.
             width: Total terminal screen width.
         """
-        box_h = min(24, max(17, height - 2))
+        box_h = min(25, max(17, height - 2))
         box_w = min(74, max(46, width - 4))
         start_y = max(1, (height - box_h) // 2)
         start_x = max(1, (width - box_w) // 2)
@@ -1442,6 +1770,7 @@ class TUIRenderer:
                 ("Tab, n / p", "Select Next / Previous train in active roster"),
                 ("s / S", "Cycle train roster sorting (Train ID, Speed, Delay)"),
                 ("b / B", "Cycle breadcrumb trails (All, Selected, Off)"),
+                ("m / M", "Cycle station departure board / Return to train view"),
                 ("f / F", "Toggle real-time auto-follow camera lock"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),

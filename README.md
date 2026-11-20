@@ -175,6 +175,7 @@ railmon schedules      # Windows
 | `c` | Cycle railway corridor filter (Mainline, Suburban, etc.) |
 | `b` | Toggle historical breadcrumb trails |
 | `s` | Cycle train roster sorting (Train ID, Speed, Delay) |
+| `m` / `M` | Cycle Station Departure Board & Proximity Inspector / Return to train view |
 | `/` | Filter trains by number, name, or station query |
 | `?` | Show interactive Keyboard Controls modal |
 | `q` | Quit `railmon` |

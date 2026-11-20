@@ -22,7 +22,13 @@ from tui.geo import (
     Viewport,
 )
 from tui.renderer import PaneGeometry, TUIRenderer
-from tui.state import BreadcrumbMode, ConnectionStatus, RosterSortMode, TrainStateStore
+from tui.state import (
+    BreadcrumbMode,
+    ConnectionStatus,
+    InspectorMode,
+    RosterSortMode,
+    TrainStateStore,
+)
 from tui.stream_worker import StreamWorker
 
 
@@ -737,6 +743,48 @@ class TestTUIControls(unittest.TestCase):
         self.app.process_input(ord("b"))
         self.assertEqual(self.app.search_buffer, "b")
         self.assertEqual(self.store.get_snapshot().breadcrumb_mode, BreadcrumbMode.ALL)
+
+    def test_key_m_cycles_station_inspector_and_upper_m_exits(self):
+        """TC-F32-05 & TC-F32-06: Verify 'm' cycles Station Departure Board and 'M' / 'c' exits to TRAIN mode."""
+        self.assertEqual(self.store.get_snapshot().inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(self.store.get_snapshot().selected_station_id)
+
+        # Select a train whose next_station is 'SKA'
+        self.store.select_by_id("t1")
+        self.assertTrue(self.app.process_input(ord("m")))
+        snap1 = self.store.get_snapshot()
+        self.assertEqual(snap1.inspector_mode, InspectorMode.STATION)
+        self.assertEqual(snap1.selected_station_id, "SKA")
+
+        # Next 'm' advances to the next hub station
+        self.assertTrue(self.app.process_input(ord("m")))
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(snap2.inspector_mode, InspectorMode.STATION)
+        self.assertIsNotNone(snap2.selected_station_id)
+        self.assertNotEqual(snap2.selected_station_id, "SKA")
+
+        # Uppercase 'M' immediately exits STATION mode back to TRAIN mode
+        self.assertTrue(self.app.process_input(ord("M")))
+        snap3 = self.store.get_snapshot()
+        self.assertEqual(snap3.inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(snap3.selected_station_id)
+
+        # Re-enter via 'M' when in TRAIN mode, then reset with 'c' (clear_all)
+        self.assertTrue(self.app.process_input(ord("M")))
+        self.assertEqual(self.store.get_snapshot().inspector_mode, InspectorMode.STATION)
+        self.assertTrue(self.app.process_input(ord("c")))
+        self.assertEqual(self.store.get_snapshot().inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(self.store.get_snapshot().selected_station_id)
+
+    def test_key_m_in_search_mode_appends_character_without_toggling_station_board(self):
+        """TC-F32-05: Verify pressing 'm' in SEARCH mode appends to search_buffer without switching inspector mode."""
+        self.app.process_input(ord("/"))
+        self.assertEqual(self.app.input_mode, InputMode.SEARCH)
+
+        self.app.process_input(ord("m"))
+        self.assertEqual(self.app.search_buffer, "m")
+        self.assertEqual(self.store.get_snapshot().inspector_mode, InspectorMode.TRAIN)
+        self.assertIsNone(self.store.get_snapshot().selected_station_id)
 
 
 if __name__ == "__main__":
