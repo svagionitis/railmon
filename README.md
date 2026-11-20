@@ -203,7 +203,8 @@ railmon schedules      # Windows
   - [`scripts/benchmark_storage.py`](./scripts/benchmark_storage.py): Ingestion throughput, read latency, and deadband benchmarking harness.
 - [`docs/historical-storage-sqlite.md`](./docs/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.
 - [`docs/architecture.md`](./docs/architecture.md): In-depth architectural analysis and reverse engineering report of the `railway.gov.gr` platform.
-- [`tests/`](./tests/): Comprehensive automated test suite (200+ tests).
+- [`docs/tui-feature-enhancements.md`](./docs/tui-feature-enhancements.md): Interactive, analytical, and geospatial Curses TUI feature enhancement specification.
+- [`tests/`](./tests/): Comprehensive automated test suite (380+ tests).
 
 ---
 

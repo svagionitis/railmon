@@ -14,7 +14,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 1 (Parity)** | **F-1.1** | Dynamic Train Roster Sorting (`ID`, `Speed`, `Delay`) | `s` / `S` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 1 (Parity)** | **F-1.2** | Historical Breadcrumb Trail Mode Toggle (`All`, `Selected`, `Off`) | `b` / `B` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
+| **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
 | **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / Click | Proposed | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
@@ -242,20 +242,82 @@ These enhancements enrich the **Selected Train Telemetry** pane ([`TUIRenderer.r
 
 ---
 
-### F-2.1: Live Speed Sparkline & Telemetry Age Indicator
+### F-2.1: Live Speed Sparkline & Telemetry Age Indicator — *Implemented*
 
-#### Overview
-Each [`TrainRecord`](../tui/state.py#L51) maintains a `trail: Deque[HistoricalBreadcrumb]` (up to 15 samples) where every [`HistoricalBreadcrumb`](../tui/state.py#L41) stores `(lat, lng, timestamp, speed)`, as well as `record.last_updated` and `record.update_count`. Surfacing these in the Inspector gives instant visibility into whether a train is accelerating, cruising, braking, or experiencing a telemetry drop.
+#### Problem Statement
+The Selected Train Telemetry pane previously displayed only instantaneous speed (`pos.speed: 142.0 km/h`) without historical velocity context, momentum direction, or transponder freshness. Operators could not immediately tell if a train was cruising at line speed, decelerating for a signal or station stop, accelerating, or if a stationary reading represented an active dwell versus a dead GPS transponder or stream stall.
 
-#### Technical Design
-1. **Unicode / ASCII Sparkline Generator (`format_speed_sparkline` in [`tui/renderer.py`](../tui/renderer.py)):**
-   - **UTF-8 Glyphs:** `("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")` (8 levels normalized against $V_{\max} = \max(160.0, \max(\text{speeds}))$).
-   - **ASCII Fallback (`--ascii`):** `("_", ".", "-", "=", "+", "*", "#", "@")`.
-   - Append instantaneous trend arrow: `▲` (accelerating $> +3\text{ km/h}$), `▼` (braking $< -3\text{ km/h}$), or `─` (steady).
-2. **Telemetry Age & Stale Warning Row:**
-   - Compute `age_sec = max(0, int(time.time() - record.last_updated))`.
-   - Format as `"Updated 2s ago (#48)"` (where `#48` is `record.update_count`).
-   - Color-code with `PAIR_TRAIN_WARN` if `age_sec > 30` and `PAIR_TRAIN_ALERT` if `age_sec > 120` to alert the user of a dead GPS transponder.
+#### Technical Design & Implementation Details
+1. **State Layer & Chronological Speed History ([`tui/state.py`](../tui/state.py#L86-L125)):**
+   - Implemented [`TrainRecord.get_speed_history(self, max_samples: int = 15) -> List[float]`](../tui/state.py#L106-L125): Chronologically extracts non-negative float speed samples from `record.trail` breadcrumbs and merges the current position speed (`pos.speed`) if updated or changed, while clamping `None` or negative speeds to `0.0`.
+   - Updated [`TrainRecord.append_breadcrumb`](../tui/state.py#L86-L104) and initial record ingestion in [`TrainStateStore.update_positions`](../tui/state.py#L326-L334) to defensively sanitize `pos.speed` via `float(pos.speed) if pos.speed is not None else 0.0`.
+
+2. **Unicode & ASCII Sparkline Generator ([`tui/renderer.py`](../tui/renderer.py#L446-L495)):**
+   - **8-Level Block Height Glyphs:**
+     - UTF-8: `SPARKLINE_BARS_UTF8 = (" ", "▂", "▃", "▄", "▅", "▆", "▇", "█")`
+     - ASCII: `SPARKLINE_BARS_ASCII = ("_", ".", "-", "=", "+", "*", "#", "@")`
+   - **Dynamic Speed Normalization:** Normalized against dynamic ceiling $V_{\max} = \max(160.0, \max(\text{speeds}))\text{ km/h}$, ensuring standard $160\text{ km/h}$ PATHE mainline velocities use the full vertical range while gracefully scaling up during high-speed runs without index overflow.
+   - **Kinematic Trend Arrow:** Appends instantaneous gradient arrow:
+     - Accelerating ($\Delta v > +3.0\text{ km/h}$): `▲` (ASCII: `^`)
+     - Braking ($\Delta v < -3.0\text{ km/h}$): `▼` (ASCII: `v`)
+     - Steady cruise ($|\Delta v| \le 3.0\text{ km/h}$): `─` (ASCII: `-`)
+
+3. **Telemetry Age & Multi-Tier Staleness Alerting ([`tui/renderer.py`](../tui/renderer.py#L497-L536)):**
+   - Implemented [`format_telemetry_age(last_updated: float, update_count: int, now: Optional[float] = None) -> Tuple[str, int]`](../tui/renderer.py#L497-L536).
+   - Computes elapsed age $T_{\text{age}} = \max(0, \text{int}(\text{now} - \text{last\_updated}))$.
+   - **Alert Attributes:**
+     - Normal ($T_{\text{age}} \le 30\text{s}$): `PAIR_DEFAULT` (`2s ago (#48)`)
+     - Warning ($30\text{s} < T_{\text{age}} \le 120\text{s}$): `PAIR_TRAIN_WARN` in yellow (`45s ago (#48)`)
+     - Critical Stale ($T_{\text{age}} > 120\text{s}$): `PAIR_TRAIN_ALERT` in bold red (`2m ago [STALE]`)
+   - Formatted compactly ($< 15$ characters) to guarantee zero text truncation inside narrow $32$-column sidebar inspector windows.
+
+4. **Visual State Machine & Data Flow:**
+
+```mermaid
+stateDiagram-v2
+    [*] --> HEALTHY : Telemetry Ingested (age <= 30s)
+    HEALTHY --> WARNING : 30s < age <= 120s (No updates)
+    WARNING --> STALE_ALERT : age > 120s (Dead transponder suspected)
+    STALE_ALERT --> HEALTHY : Fresh Telemetry Frame Ingested (age = 0s)
+    WARNING --> HEALTHY : Fresh Telemetry Frame Ingested (age = 0s)
+
+    state HEALTHY {
+        [*] : Color: PAIR_DEFAULT
+        [*] : Label: '2s ago (#48)'
+    }
+    state WARNING {
+        [*] : Color: PAIR_TRAIN_WARN (Yellow)
+        [*] : Label: '45s ago (#48)'
+    }
+    state STALE_ALERT {
+        [*] : Color: PAIR_TRAIN_ALERT (Red / Bold)
+        [*] : Label: '2m ago [STALE]'
+    }
+```
+
+```text
++------------------------------+
+| [ SELECTED TRAIN TELEMETRY ] |
+| Train No:     1599 (IC)      |
+| Route:        ΑΘΗΝ -> ΘΕΣΣ   |
+| Next Station: Λάρισα         |
+| Speed:        142.0 km/h     |
+| Speed Trend:   ▂▃▅▆▇██▇▇█ ▲  |
+| Delay:        +9 min (Minor) |
+| Telemetry:    2s ago (#48)   |
+| Progress:     [=====>----] 52|
+| Heading:      340.0° (NNW)   |
+| Locomotive:   120-024        |
++------------------------------+
+```
+
+5. **Adaptive Inspector Row Layout ([`tui/renderer.py`](../tui/renderer.py#L1120-L1145)):**
+   - Reordered `rows` hierarchy in `render_inspector` so primary operational telemetry (`Train No:`, `Route:`, `Next Station:`, `Speed:`, `Speed Trend:`, `Delay:`, `Telemetry:`, `Progress:`) is completely visible on standard $80 \times 24$ consoles (`inner_h = 9`), while secondary fields (`Heading:`, `Locomotive:`, `Status:`, `Chainage:`) render when vertical space permits.
+
+6. **Verification Coverage:**
+   - [`tests/test_tui_state.py`](../tests/test_tui_state.py#L795-L824) (`test_train_record_get_speed_history`): Validates chronological velocity extraction from breadcrumbs, dwell speed changes without spatial translation, and sample count bounds.
+   - [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L301-L380) (`test_format_speed_sparkline`, `test_format_telemetry_age`): Validates empty lists, constant cruising, acceleration and braking trend arrows, dynamic ceiling expansion for speeds $> 160\text{ km/h}$, 7-bit ASCII purity, age thresholds, and negative elapsed time protection.
+   - [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L525-L547) (`test_render_inspector_live_sparkline_and_telemetry_age`): Validates rendering of `Speed Trend:` and `Telemetry:` rows in curses mock windows, including `PAIR_TRAIN_ALERT` color attribute activation on stale trains ($> 120\text{s}$).
 
 ---
 
@@ -478,9 +540,24 @@ sequenceDiagram
    - Verified sort stability, natural ID tie-breaking, selection preservation across sort changes, keyboard mode isolation (`NORMAL` vs. `SEARCH`), and UTF-8/ASCII breadcrumb rendering in [`tests/test_tui_state.py`](../tests/test_tui_state.py#L344-L442), [`tests/test_tui_controls.py`](../tests/test_tui_controls.py#L697-L740), and [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L954-L1084).
 
 ### Phase 2: Tier 2 Inspector Analytics (Sparklines, Telemetry Age, Distance & ETA)
+
+#### A. F-2.1: Live Speed Sparkline & Telemetry Age Indicator — *Completed*
+1. **State Store & Velocity Tracking ([`tui/state.py`](../tui/state.py)):**
+   - Added [`TrainRecord.get_speed_history`](../tui/state.py#L106-L125) extracting chronological velocity samples from historical trail breadcrumbs and instantaneous position speed with non-negative clamping and `None` protection.
+   - Added defensive `float(pos.speed) if pos.speed is not None else 0.0` sanitization in [`append_breadcrumb`](../tui/state.py#L88) and [`update_positions`](../tui/state.py#L331).
+2. **Renderer Helpers & Inspector Integration ([`tui/renderer.py`](../tui/renderer.py)):**
+   - Added `SPARKLINE_BARS_UTF8` / `SPARKLINE_BARS_ASCII` 8-level glyph sets and `TREND_*` arrows.
+   - Implemented [`format_speed_sparkline`](../tui/renderer.py#L446-L495) with $V_{\max} = \max(160.0, \max(\text{speeds}))\text{ km/h}$ dynamic ceiling and kinematic trend detection.
+   - Implemented [`format_telemetry_age`](../tui/renderer.py#L497-L536) with multi-tier alerts (`PAIR_DEFAULT` $\le 30$s, `PAIR_TRAIN_WARN` $31\text{--}120$s, `PAIR_TRAIN_ALERT` with `[STALE]` $> 120$s) and compact width formatting for 32-column sidebars.
+   - Reordered Inspector `rows` in [`render_inspector`](../tui/renderer.py#L1120-L1145) to prioritize critical telemetry for standard $80 \times 24$ consoles (`inner_h = 9`).
+3. **Unit & Integration Test Suite:**
+   - Verified speed history extraction in [`tests/test_tui_state.py`](../tests/test_tui_state.py#L795-L824).
+   - Verified sparkline glyphs, trend arrows, dynamic ceiling scaling, pure ASCII mode, age alert formatting, and curses inspector window attributes in [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L301-L380).
+
+#### B. F-2.2: WGS84 Coordinate Readout, Next-Station Distance & ETA — *Pending*
 1. Add `haversine_distance_km` to [`tui/geo.py`](../tui/geo.py).
-2. Add `format_speed_sparkline` and station distance/ETA lookup to [`tui/renderer.py`](../tui/renderer.py).
-3. Verify both UTF-8 and `--ascii` fallback rendering via [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py).
+2. Add station lookup index and kinematic ETA calculation to [`tui/renderer.py`](../tui/renderer.py).
+3. Verify coordinate formatting and ETA calculations via [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py).
 
 ### Phase 3: Tier 3 Interactive Map & Mouse Support
 1. Enable `curses.mousemask` and coordinate hit-testing in [`tui/app.py`](../tui/app.py).

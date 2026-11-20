@@ -86,6 +86,7 @@ class TrainRecord:
     def append_breadcrumb(self, pos: TrainPosition, threshold_deg: float = 1e-5) -> None:
         """Record a historical coordinate if position has shifted significantly."""
         now = time.time()
+        speed_val = float(pos.speed) if pos.speed is not None else 0.0
         if not self.trail or (
             abs(self.trail[-1].lat - pos.lat) > threshold_deg
             or abs(self.trail[-1].lng - pos.lng) > threshold_deg
@@ -95,12 +96,38 @@ class TrainRecord:
                     lat=pos.lat,
                     lng=pos.lng,
                     timestamp=now,
-                    speed=pos.speed,
+                    speed=speed_val,
                 )
             )
         self.position = pos
         self.last_updated = now
         self.update_count += 1
+
+    def get_speed_history(self, max_samples: int = 15) -> List[float]:
+        """Extract chronological speed samples from historical trail and current position.
+
+        Args:
+            max_samples: Maximum number of recent velocity readings to return.
+
+        Returns:
+            List of non-negative float speed values in km/h.
+        """
+        speeds: List[float] = [
+            max(0.0, float(crumb.speed if crumb.speed is not None else 0.0))
+            for crumb in self.trail
+        ]
+        curr_spd = max(0.0, float(self.position.speed)) if self.position.speed is not None else None
+        if curr_spd is not None:
+            if not speeds:
+                speeds.append(curr_spd)
+            elif abs(speeds[-1] - curr_spd) > 0.01:
+                speeds.append(curr_spd)
+        elif not speeds:
+            speeds.append(0.0)
+
+        if len(speeds) > max_samples:
+            return speeds[-max_samples:]
+        return speeds
 
     def is_stale(self, threshold_sec: float = 1800.0) -> bool:
         """Check if train has stopped receiving updates beyond threshold (default: 30 minutes)."""
@@ -301,7 +328,7 @@ class TrainStateStore:
                             lat=pos.lat,
                             lng=pos.lng,
                             timestamp=now,
-                            speed=pos.speed,
+                            speed=float(pos.speed) if pos.speed is not None else 0.0,
                         )
                     )
                     self._trains[pos.id] = record

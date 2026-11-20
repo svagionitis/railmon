@@ -793,6 +793,34 @@ class TestStreamWorker(unittest.TestCase):
         finally:
             worker.stop(timeout_sec=1.0)
 
+    def test_train_record_get_speed_history(self):
+        """TC-F21-01: Verify TrainRecord.get_speed_history extracts chronological velocity samples."""
+        t1 = _create_sample_train("ic-50", "IC 50", speed=80.0, lat=38.0, lng=23.7)
+        self.store.update_positions([t1])
+        record = self.store._trains["ic-50"]
+
+        # 1. Initial position with 1 trail entry
+        history1 = record.get_speed_history(max_samples=10)
+        self.assertEqual(history1, [80.0])
+
+        # 2. Append moved positions with accelerating speeds
+        for spd, lat_offset in [(100.0, 0.01), (120.0, 0.02), (140.0, 0.03)]:
+            pos = _create_sample_train("ic-50", "IC 50", speed=spd, lat=38.0 + lat_offset, lng=23.7)
+            record.append_breadcrumb(pos)
+
+        history2 = record.get_speed_history(max_samples=10)
+        self.assertEqual(history2, [80.0, 100.0, 120.0, 140.0])
+
+        # 3. Verify max_samples truncation
+        history_trunc = record.get_speed_history(max_samples=2)
+        self.assertEqual(history_trunc, [120.0, 140.0])
+
+        # 4. Instantaneous position speed update without spatial movement (e.g. dwell / brake)
+        pos_brake = _create_sample_train("ic-50", "IC 50", speed=0.0, lat=38.0 + 0.03, lng=23.7)
+        record.position = pos_brake
+        history3 = record.get_speed_history(max_samples=10)
+        self.assertEqual(history3[-1], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 """Unit tests for TUI layout geometry, multi-pane rendering, and curses application controller."""
 
 import curses
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,8 @@ from tui.renderer import (
     _INITIALIZED_COLOR_PAIRS,
     calculate_scroll_offset,
     format_progress_bar,
+    format_speed_sparkline,
+    format_telemetry_age,
     get_compass_bearing,
     get_delay_color_pair,
     get_heading_glyph,
@@ -30,6 +33,15 @@ from tui.renderer import (
     safe_addstr,
     safe_color_pair,
     truncate_to_display_width,
+    PAIR_DEFAULT,
+    SPARKLINE_BARS_UTF8,
+    SPARKLINE_BARS_ASCII,
+    TREND_UP_UTF8,
+    TREND_DOWN_UTF8,
+    TREND_STEADY_UTF8,
+    TREND_UP_ASCII,
+    TREND_DOWN_ASCII,
+    TREND_STEADY_ASCII,
 )
 from tui.state import (
     BreadcrumbMode,
@@ -285,6 +297,75 @@ class TestFormattingAndLookups(unittest.TestCase):
         self.assertEqual(truncate_to_display_width(s, 10), "Athens Ce…")
         self.assertEqual(truncate_to_display_width(s, 30), s)
 
+    def test_format_speed_sparkline(self):
+        """TC-F21-02: Verify speed sparkline generation, dynamic scaling, and trend arrow calculation."""
+        # 1. Empty speeds -> baseline character + steady trend
+        spark_empty = format_speed_sparkline([], max_bars=10, ascii_mode=False)
+        self.assertEqual(spark_empty, f"{SPARKLINE_BARS_UTF8[0]} {TREND_STEADY_UTF8}")
+
+        spark_empty_ascii = format_speed_sparkline([], max_bars=10, ascii_mode=True)
+        self.assertEqual(spark_empty_ascii, f"{SPARKLINE_BARS_ASCII[0]} {TREND_STEADY_ASCII}")
+
+        # 2. Steady speed (delta <= 3.0) -> steady trend arrow
+        spark_steady = format_speed_sparkline([100.0, 100.5, 101.0], max_bars=10, ascii_mode=False)
+        self.assertTrue(spark_steady.endswith(f" {TREND_STEADY_UTF8}"))
+
+        # 3. Accelerating (delta > +3.0) -> up trend arrow
+        spark_accel = format_speed_sparkline([60.0, 90.0, 130.0], max_bars=10, ascii_mode=False)
+        self.assertTrue(spark_accel.endswith(f" {TREND_UP_UTF8}"))
+        spark_accel_ascii = format_speed_sparkline([60.0, 90.0, 130.0], max_bars=10, ascii_mode=True)
+        self.assertTrue(spark_accel_ascii.endswith(f" {TREND_UP_ASCII}"))
+
+        # 4. Decelerating (delta < -3.0) -> down trend arrow
+        spark_decel = format_speed_sparkline([140.0, 100.0, 50.0], max_bars=10, ascii_mode=False)
+        self.assertTrue(spark_decel.endswith(f" {TREND_DOWN_UTF8}"))
+        spark_decel_ascii = format_speed_sparkline([140.0, 100.0, 50.0], max_bars=10, ascii_mode=True)
+        self.assertTrue(spark_decel_ascii.endswith(f" {TREND_DOWN_ASCII}"))
+
+        # 5. Speeds exceeding baseline 160.0 km/h -> dynamic ceiling expansion without overflow
+        spark_high = format_speed_sparkline([120.0, 160.0, 200.0], max_bars=10, ascii_mode=False)
+        self.assertEqual(len(spark_high.split()[0]), 3)
+        self.assertEqual(spark_high.split()[0][-1], SPARKLINE_BARS_UTF8[-1])
+
+        # 6. Strict ASCII purity check in ascii_mode
+        spark_ascii_all = format_speed_sparkline([0.0, 50.0, 100.0, 150.0], max_bars=10, ascii_mode=True)
+        for ch in spark_ascii_all:
+            self.assertLess(ord(ch), 128)
+
+    def test_format_telemetry_age(self):
+        """TC-F21-03: Verify telemetry age elapsed time calculation and warning color attributes."""
+        now = 1000.0
+
+        # 1. Fresh telemetry (<= 30s) -> PAIR_DEFAULT
+        str1, pair1 = format_telemetry_age(last_updated=995.0, update_count=42, now=now)
+        self.assertEqual(str1, "5s ago (#42)")
+        self.assertEqual(pair1, PAIR_DEFAULT)
+
+        # 2. Warning range (31s - 120s) -> PAIR_TRAIN_WARN
+        str2, pair2 = format_telemetry_age(last_updated=955.0, update_count=42, now=now)
+        self.assertEqual(str2, "45s ago (#42)")
+        self.assertEqual(pair2, PAIR_TRAIN_WARN)
+
+        # 3. Warning range with minutes (e.g. 75s)
+        str3, pair3 = format_telemetry_age(last_updated=925.0, update_count=42, now=now)
+        self.assertEqual(str3, "1m 15s ago (#42)")
+        self.assertEqual(pair3, PAIR_TRAIN_WARN)
+
+        # 4. Critical stale threshold (> 120s) -> PAIR_TRAIN_ALERT with [STALE]
+        str4, pair4 = format_telemetry_age(last_updated=850.0, update_count=42, now=now)
+        self.assertEqual(str4, "2m ago [STALE]")
+        self.assertEqual(pair4, PAIR_TRAIN_ALERT)
+
+        # 5. Over 1 hour staleness
+        str5, pair5 = format_telemetry_age(last_updated=now - 3700.0, update_count=42, now=now)
+        self.assertEqual(str5, "1h ago [STALE]")
+        self.assertEqual(pair5, PAIR_TRAIN_ALERT)
+
+        # 6. Negative age guardrail (future timestamp / clock skew)
+        str6, pair6 = format_telemetry_age(last_updated=now + 50.0, update_count=1, now=now)
+        self.assertEqual(str6, "0s ago (#1)")
+        self.assertEqual(pair6, PAIR_DEFAULT)
+
 
 class TestTUIRendererComponents(unittest.TestCase):
     """Test renderer multi-pane drawing against mock curses windows."""
@@ -440,6 +521,28 @@ class TestTUIRendererComponents(unittest.TestCase):
         self.renderer.render_inspector(win, snapshot)
         rendered_texts = " ".join(s[2] for s in win.strings)
         self.assertIn("No train selected", rendered_texts)
+
+    def test_render_inspector_live_sparkline_and_telemetry_age(self):
+        """TC-F21-04: Verify inspector pane renders Speed Trend and Telemetry rows with proper attributes."""
+        win = MockCursesWindow(14, 40)
+        snapshot = self.store.get_snapshot()
+        self.renderer.render_inspector(win, snapshot)
+
+        rendered_texts = " ".join(s[2] for s in win.strings)
+        self.assertIn("Speed Trend:", rendered_texts)
+        self.assertIn("Telemetry:", rendered_texts)
+        self.assertIn("ago", rendered_texts)
+
+        # Stale train triggers PAIR_TRAIN_ALERT on the Telemetry row
+        selected = snapshot.selected_train
+        assert selected is not None
+        self.store._trains[selected.position.id].last_updated = time.time() - 300.0
+        snapshot_stale = self.store.get_snapshot()
+
+        win_stale = MockCursesWindow(14, 40)
+        self.renderer.render_inspector(win_stale, snapshot_stale)
+        stale_texts = " ".join(s[2] for s in win_stale.strings)
+        self.assertIn("[STALE]", stale_texts)
 
     def test_render_status_bar(self):
         """Verify status bar displays keybindings and connection badge."""

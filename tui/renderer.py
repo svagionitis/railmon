@@ -134,6 +134,18 @@ GLYPHS_ASCII = RenderGlyphs(
     sort_desc="v",
 )
 
+# Sparkline glyph bars and trend arrow constants
+SPARKLINE_BARS_UTF8: Tuple[str, ...] = (" ", "▂", "▃", "▄", "▅", "▆", "▇", "█")
+SPARKLINE_BARS_ASCII: Tuple[str, ...] = ("_", ".", "-", "=", "+", "*", "#", "@")
+
+TREND_UP_UTF8: str = "▲"
+TREND_DOWN_UTF8: str = "▼"
+TREND_STEADY_UTF8: str = "─"
+
+TREND_UP_ASCII: str = "^"
+TREND_DOWN_ASCII: str = "v"
+TREND_STEADY_ASCII: str = "-"
+
 
 @dataclass(frozen=True)
 class PaneGeometry:
@@ -441,6 +453,96 @@ def format_progress_bar(progress: Optional[float], bar_width: int) -> str:
         bar_content = "=" * (fill_count - 1) + ">" + "-" * (inner_width - fill_count)
 
     return f"[{bar_content}]{pct_str}"
+
+
+def format_speed_sparkline(
+    speeds: Sequence[float],
+    max_bars: int = 10,
+    ascii_mode: bool = False,
+    v_max_floor: float = 160.0,
+) -> str:
+    """Render a compact speed sparkline with instantaneous kinematic trend arrow.
+
+    Args:
+        speeds: Chronological sequence of speed samples in km/h.
+        max_bars: Maximum number of bar characters to render.
+        ascii_mode: Whether to restrict output to 7-bit ASCII characters.
+        v_max_floor: Baseline normalization speed ceiling in km/h (default: 160.0 km/h).
+
+    Returns:
+        Formatted string containing sparkline bars and trailing trend arrow (e.g. ' ▂▃▅▆▇██ ▲').
+    """
+    if not speeds:
+        empty_bar = "_" if ascii_mode else " "
+        trend_steady = TREND_STEADY_ASCII if ascii_mode else TREND_STEADY_UTF8
+        return f"{empty_bar} {trend_steady}"
+
+    # Select recent window
+    window = list(speeds[-max_bars:]) if len(speeds) > max_bars else list(speeds)
+    v_max = max(v_max_floor, max(window))
+
+    bar_glyphs = SPARKLINE_BARS_ASCII if ascii_mode else SPARKLINE_BARS_UTF8
+    num_levels = len(bar_glyphs)
+
+    bars: List[str] = []
+    for spd in window:
+        clamped_spd = max(0.0, float(spd))
+        ratio = clamped_spd / v_max if v_max > 0.0 else 0.0
+        idx = min(num_levels - 1, int(ratio * num_levels))
+        bars.append(bar_glyphs[idx])
+
+    # Compute trend arrow from last two points
+    if len(window) >= 2:
+        delta_v = window[-1] - window[-2]
+    else:
+        delta_v = 0.0
+
+    if delta_v > 3.0:
+        arrow = TREND_UP_ASCII if ascii_mode else TREND_UP_UTF8
+    elif delta_v < -3.0:
+        arrow = TREND_DOWN_ASCII if ascii_mode else TREND_DOWN_UTF8
+    else:
+        arrow = TREND_STEADY_ASCII if ascii_mode else TREND_STEADY_UTF8
+
+    return f"{''.join(bars)} {arrow}"
+
+
+def format_telemetry_age(
+    last_updated: float,
+    update_count: int,
+    now: Optional[float] = None,
+) -> Tuple[str, int]:
+    """Calculate elapsed telemetry age and resolve warning color attributes.
+
+    Args:
+        last_updated: Epoch timestamp of the last received position message.
+        update_count: Total position updates received for this train.
+        now: Current epoch timestamp (defaults to time.time()).
+
+    Returns:
+        Tuple of (formatted_age_string, curses_color_pair_index).
+    """
+    current_time = now if now is not None else time.time()
+    age_sec = max(0, int(current_time - last_updated))
+
+    if age_sec < 60:
+        age_str = f"{age_sec}s ago"
+    elif age_sec < 3600:
+        mins = age_sec // 60
+        secs = age_sec % 60
+        age_str = f"{mins}m {secs}s ago" if secs > 0 and mins < 10 else f"{mins}m ago"
+    else:
+        hours = age_sec // 3600
+        mins = (age_sec % 3600) // 60
+        age_str = f"{hours}h {mins}m ago"
+
+    if age_sec > 120:
+        short_age = f"{age_sec // 60}m ago" if age_sec < 3600 else f"{age_sec // 3600}h ago"
+        return f"{short_age} [STALE]", PAIR_TRAIN_ALERT
+    elif age_sec > 30:
+        return f"{age_str} (#{update_count})", PAIR_TRAIN_WARN
+    else:
+        return f"{age_str} (#{update_count})", PAIR_DEFAULT
 
 
 def safe_addstr(
@@ -1011,17 +1113,26 @@ class TUIRenderer:
 
         progress_str = format_progress_bar(pos.progress, max_x - 14)
 
+        speed_history = record.get_speed_history(max_samples=10)
+        sparkline_str = format_speed_sparkline(speed_history, max_bars=10, ascii_mode=self.ascii_mode)
+        telemetry_str, telemetry_pair = format_telemetry_age(record.last_updated, record.update_count)
+        telemetry_attr = safe_color_pair(telemetry_pair, curses.A_BOLD if telemetry_pair != PAIR_DEFAULT else curses.A_NORMAL)
+        if telemetry_pair != PAIR_DEFAULT:
+            telemetry_attr |= curses.A_BOLD
+
         rows = [
             ("Train No:", f"{pos.train_number or pos.id} ({pos.train_type or 'Passenger'})", val_attr),
-            ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
-            ("Status:", f"{pos.status or 'In Service'}", val_attr),
             ("Route:", route_str, val_attr),
             ("Next Station:", f"{pos.next_station or 'N/A'}", val_attr),
             ("Speed:", spd_display, val_attr),
+            ("Speed Trend:", sparkline_str, val_attr),
             ("Delay:", dly_display, delay_attr),
-            ("Heading:", compass_str, val_attr),
-            ("Chainage:", chainage_str, val_attr),
+            ("Telemetry:", telemetry_str, telemetry_attr),
             ("Progress:", progress_str, val_attr),
+            ("Heading:", compass_str, val_attr),
+            ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
+            ("Status:", f"{pos.status or 'In Service'}", val_attr),
+            ("Chainage:", chainage_str, val_attr),
         ]
 
         inner_h = max_y - 2
