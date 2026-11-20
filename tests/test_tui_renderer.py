@@ -27,6 +27,7 @@ from tui.renderer import (
     format_corridor_display_name,
     format_next_station_eta,
     format_progress_bar,
+    format_scale_bar,
     format_speed_sparkline,
     format_telemetry_age,
     format_wgs84_coords,
@@ -1501,6 +1502,96 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
         self.assertEqual(format_corridor_display_name("PROASTIAKOS_ATH"), "Proastiakos Suburban")
         self.assertEqual(format_corridor_display_name("NORTHERN"), "Northern Greece")
         self.assertEqual(format_corridor_display_name(None), "National Network")
+
+    def test_format_scale_bar_utf8_and_ascii(self):
+        """TC-F34-04: Verify format_scale_bar produces exact UTF-8 and 7-bit ASCII strings and widths."""
+        self.assertEqual(format_scale_bar(25, width_cells=15, ascii_mode=False), "├─── 25 km ───┤")
+        self.assertEqual(format_scale_bar(25, width_cells=17, ascii_mode=False), "├──── 25 km ────┤")
+        self.assertEqual(format_scale_bar(25, width_cells=15, ascii_mode=True), "|--- 25 km ---|")
+        self.assertEqual(format_scale_bar(25, width_cells=17, ascii_mode=True), "|---- 25 km ----|")
+
+        for interval_km in (1, 2, 5, 10, 20, 25, 50, 100, 200):
+            for width in range(12, 19):
+                bar_utf8 = format_scale_bar(interval_km, width_cells=width, ascii_mode=False)
+                bar_ascii = format_scale_bar(interval_km, width_cells=width, ascii_mode=True)
+                self.assertEqual(len(bar_utf8), width)
+                self.assertEqual(len(bar_ascii), width)
+                self.assertTrue(bar_utf8.startswith("├") and bar_utf8.endswith("┤"))
+                self.assertTrue(bar_ascii.startswith("|") and bar_ascii.endswith("|"))
+                self.assertIn(f" {interval_km} km ", bar_utf8)
+                self.assertIn(f" {interval_km} km ", bar_ascii)
+                for ch in bar_ascii:
+                    self.assertLess(ord(ch), 128)
+
+    def test_render_map_scale_bar_overlay_and_zoom_adaptation(self):
+        """TC-F34-05, TC-F34-06 & TC-F34-07: Verify dynamic conformal scale bar overlay in render_map."""
+        win_h, win_w = 24, 80
+        inner_h, inner_w = win_h - 2, win_w - 2
+        viewport = Viewport(
+            center=GeoPoint(lat=39.50, lng=22.50),
+            zoom=1.0,
+            width_cells=inner_w,
+            height_cells=inner_h,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+
+        # Place a secondary station right at the bottom-left scale bar position (col=2, row=inner_h - 1)
+        scale_row_sub_y = (inner_h - 1) * 4 + 2
+        scale_col_sub_x = 2 * 2 + 1
+        bl_geo = projector.subpixel_to_geo(scale_col_sub_x, scale_row_sub_y)
+        bottom_left_station = StationNode(
+            id="BLS",
+            name_el="Σταθμός Κλίμακας",
+            name_en="ScaleCollisionTestStation",
+            point=bl_geo,
+            corridor="PATHE",
+            code="9999",
+            is_hub=False,
+        )
+
+        renderer_utf8 = TUIRenderer(stations=[bottom_left_station], tracks=[], ascii_mode=False)
+        renderer_ascii = TUIRenderer(stations=[bottom_left_station], tracks=[], ascii_mode=True)
+        store = TrainStateStore()
+        snapshot = store.get_snapshot()
+
+        # 1. UTF-8 render at zoom=1.0: scale bar rendered at row=win_h-2 (22), col=2
+        win_z1 = MockCursesWindow(win_h, win_w)
+        renderer_utf8.render_map(win_z1, snapshot, projector)
+        spec_z1 = projector.compute_scale_bar()
+        expected_bar_z1 = format_scale_bar(spec_z1.distance_km, spec_z1.width_cells, ascii_mode=False)
+
+        scale_writes_z1 = [
+            text for (y, x, text, _) in win_z1.strings if y == win_h - 2 and x == 2
+        ]
+        self.assertIn(expected_bar_z1, scale_writes_z1)
+        # Station label at bottom-left must be suppressed by scale bar occupied_cells reservation
+        all_z1_texts = " ".join(text for (_, _, text, _) in win_z1.strings)
+        self.assertNotIn("ScaleCollisionTestStation", all_z1_texts)
+
+        # 2. Zoom in to 10.0x: scale bar dynamically adapts to a smaller distance interval
+        projector.viewport.zoom = 10.0
+        win_z10 = MockCursesWindow(win_h, win_w)
+        renderer_utf8.render_map(win_z10, snapshot, projector)
+        spec_z10 = projector.compute_scale_bar()
+        self.assertLess(spec_z10.distance_km, spec_z1.distance_km)
+        expected_bar_z10 = format_scale_bar(spec_z10.distance_km, spec_z10.width_cells, ascii_mode=False)
+        scale_writes_z10 = [
+            text for (y, x, text, _) in win_z10.strings if y == win_h - 2 and x == 2
+        ]
+        self.assertIn(expected_bar_z10, scale_writes_z10)
+
+        # 3. ASCII mode render: pure 7-bit ASCII scale bar at (win_h - 2, 2)
+        win_ascii = MockCursesWindow(win_h, win_w)
+        renderer_ascii.render_map(win_ascii, snapshot, projector)
+        expected_bar_ascii = format_scale_bar(spec_z10.distance_km, spec_z10.width_cells, ascii_mode=True)
+        scale_writes_ascii = [
+            text for (y, x, text, _) in win_ascii.strings if y == win_h - 2 and x == 2
+        ]
+        self.assertIn(expected_bar_ascii, scale_writes_ascii)
+        for _, _, text, _ in win_ascii.strings:
+            for ch in text:
+                self.assertLess(ord(ch), 128)
 
 
 if __name__ == "__main__":

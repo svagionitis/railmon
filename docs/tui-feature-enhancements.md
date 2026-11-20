@@ -19,7 +19,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / `M` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
+| **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py) |
 | **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
 
@@ -429,18 +429,20 @@ At low zoom levels (`0.5x`–`1.0x`), station labels can crowd narrow corridors,
 
 ---
 
-### F-3.4: Dynamic Conformal Map Scale Bar Overlay
+### F-3.4: Dynamic Conformal Map Scale Bar Overlay — *Implemented*
+
+> **Detailed Implementation Plan:** [`docs/f-3-4-dynamic-conformal-map-scale-bar-plan.md`](./f-3-4-dynamic-conformal-map-scale-bar-plan.md)
 
 #### Overview
 Because the zoom factor ranges from `0.2x` to `25.0x`, users benefit from a live geographic scale bar in the bottom-left corner of the map viewport showing real-world distance.
 
 #### Technical Design
 1. **Scale Calculation in [`GeoProjector`](../tui/geo.py):**
-   - Compute kilometers per terminal column cell at current viewport center latitude $\phi_0$:
+   - Compute kilometers per terminal column cell at current viewport center latitude $\phi_0$ via `GeoProjector.get_km_per_cell()`:
      $$\text{km\_per\_cell} = \frac{2.0}{S_x \cdot \cos(\phi_0)} \times 111.32$$
-   - Snap a target bar width of $12\text{--}18$ cells to the nearest standard cartographic interval in $\{1, 2, 5, 10, 20, 25, 50, 100, 200\}\text{ km}$.
+   - Snap a target bar width of $12\text{--}18$ cells via `GeoProjector.compute_scale_bar()` to the nearest standard cartographic interval in `SCALE_BAR_INTERVALS_KM` ($1\text{--}1500\text{ km}$, spaced with Voronoï cell ratios $< 1.25\times$ so every `+`/`-` zoom step transitions to a distinct kilometer value across `0.2x`–`25.0x`), returning an immutable `ScaleBarSpec(distance_km, width_cells, km_per_cell)`.
 2. **Rendering in [`TUIRenderer.render_map`](../tui/renderer.py):**
-   - Draw `|--- 25 km ---|` (or `├──── 25 km ────┤` in UTF-8 mode) at row `max_y - 2`, column `2` inside the map window before overlaying trains.
+   - Format the scale bar via `format_scale_bar()` (`|--- 25 km ---|` in `--ascii` mode or `├─── 25 km ───┤` / `├──── 25 km ────┤` in UTF-8 mode), reserve its bottom-left cells in `occupied_cells` to prevent station label overlap, and draw it at row `max_y - 2`, column `2` inside the map window before overlaying trains.
 
 ---
 

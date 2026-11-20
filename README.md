@@ -16,6 +16,7 @@
   - **Follow Camera Mode (`f`)**: Locks viewport center on a selected train as it traverses tracks across Greece.
   - **Corridor Filtering (`c`)**: Filter by Athens–Thessaloniki Mainline, Proastiakos Suburban, Peloponnese, Northern Greece, or View All.
   - **Historical Breadcrumb Trails (`b`)**: Visualize train journey paths over time.
+  - **Dynamic Conformal Map Scale Bar**: Live bottom-left cartographic scale bar (`├──── 25 km ────┤` / `|---- 25 km ----|`) that automatically adapts to viewport zoom (`0.2x`–`25.0x`) and center latitude.
 - **Historical Telemetry Recording & Analytics**:
   - Embedded zero-dependency SQLite persistence with Write-Ahead Logging (WAL) for non-blocking concurrent reading and writing.
   - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.

@@ -115,6 +115,67 @@ class GeoPoint:
 # Mean spherical Earth radius in kilometers (WGS84)
 EARTH_RADIUS_KM = 6371.0
 
+# Standard meridional kilometers per degree of latitude
+KM_PER_DEGREE_LAT: float = 111.32
+
+# Standard cartographic scale bar distance intervals in kilometers.
+# Spaced with Voronoï cell ratios < 1.25x so every +/- zoom step (1.25x)
+# transitions to a distinct cartographic interval across 0.2x..25.0x.
+SCALE_BAR_INTERVALS_KM: Tuple[int, ...] = (
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    10,
+    12,
+    15,
+    18,
+    20,
+    25,
+    30,
+    35,
+    40,
+    50,
+    60,
+    75,
+    90,
+    100,
+    120,
+    150,
+    180,
+    200,
+    250,
+    300,
+    350,
+    400,
+    500,
+    600,
+    750,
+    900,
+    1000,
+    1200,
+    1500,
+)
+
+
+@dataclass(frozen=True)
+class ScaleBarSpec:
+    """Computed conformal geographic scale bar parameters for the current viewport.
+
+    Attributes:
+        distance_km: Snapped cartographic interval in kilometers (from SCALE_BAR_INTERVALS_KM).
+        width_cells: Total terminal character cell width of the scale bar (clamped to min_cells..max_cells).
+        km_per_cell: Conformal ground distance in kilometers per terminal column cell at viewport center.
+    """
+
+    distance_km: int
+    width_cells: int
+    km_per_cell: float
+
 
 def haversine_distance_km(a: GeoPoint, b: GeoPoint) -> float:
     """Calculate the great-circle distance between two WGS84 GeoPoints in kilometers.
@@ -436,6 +497,70 @@ class GeoProjector:
 
         base_scale = self._get_base_scale_x()
         self.viewport.zoom = max(0.2, effective_scale_x / base_scale)
+
+    def get_km_per_cell(self) -> float:
+        """Compute kilometers per terminal column cell at current viewport center latitude.
+
+        Uses the conformal equirectangular cell resolution formula:
+            km_per_cell = (2.0 / (S_x * cos(phi_0))) * 111.32
+        where S_x is the horizontal scale in sub-pixels per degree longitude and
+        phi_0 is the current viewport center latitude in degrees.
+
+        Returns:
+            Kilometers per horizontal character cell (positive float).
+        """
+        scale_x = max(1e-6, self.get_scale_x())
+        cos_phi0 = max(0.05, abs(math.cos(math.radians(self.viewport.center.lat))))
+        return (2.0 / (scale_x * cos_phi0)) * KM_PER_DEGREE_LAT
+
+    def compute_scale_bar(
+        self,
+        min_cells: int = 12,
+        max_cells: int = 18,
+    ) -> ScaleBarSpec:
+        """Snap a target bar width of min_cells..max_cells to the nearest standard cartographic interval.
+
+        Evaluates candidate intervals in SCALE_BAR_INTERVALS_KM (1..1500 km) against
+        the current conformal km_per_cell resolution. Prefers intervals whose ideal cell
+        width falls within [min_cells, max_cells] and is closest to the midpoint target;
+        otherwise selects the interval closest to the target cell width and clamps the
+        rendered cell width to [min_cells, max_cells].
+
+        Args:
+            min_cells: Minimum character cell width for the scale bar (default: 12).
+            max_cells: Maximum character cell width for the scale bar (default: 18).
+
+        Returns:
+            ScaleBarSpec containing (distance_km, width_cells, km_per_cell).
+        """
+        low = max(6, int(min_cells))
+        high = max(low, int(max_cells))
+        target_cells = (low + high) / 2.0
+        km_per_cell = self.get_km_per_cell()
+
+        in_band: List[Tuple[float, int, int]] = []
+        all_candidates: List[Tuple[float, int, int]] = []
+
+        for interval_km in SCALE_BAR_INTERVALS_KM:
+            exact_cells = interval_km / km_per_cell
+            rounded_cells = int(round(exact_cells))
+            dist_to_target = abs(exact_cells - target_cells)
+            candidate = (dist_to_target, interval_km, rounded_cells)
+            all_candidates.append(candidate)
+            if low <= exact_cells <= high or low <= rounded_cells <= high:
+                in_band.append(candidate)
+
+        if in_band:
+            _, best_km, raw_cells = min(in_band, key=lambda item: (item[0], item[1]))
+        else:
+            _, best_km, raw_cells = min(all_candidates, key=lambda item: (item[0], item[1]))
+
+        width_cells = max(low, min(high, raw_cells))
+        return ScaleBarSpec(
+            distance_km=best_km,
+            width_cells=width_cells,
+            km_per_cell=km_per_cell,
+        )
 
 
 class BrailleCanvas:

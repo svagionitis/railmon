@@ -14,7 +14,14 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import unicodedata
 
-from tui.geo import BrailleCanvas, GeoPoint, GeoProjector, haversine_distance_km
+from tui.geo import (
+    BrailleCanvas,
+    GeoPoint,
+    GeoProjector,
+    SCALE_BAR_INTERVALS_KM,
+    ScaleBarSpec,
+    haversine_distance_km,
+)
 from tui.mock_engine import StationNode, TrackPolyline, calculate_bearing, snap_to_track_network
 from tui.state import (
     BreadcrumbMode,
@@ -93,6 +100,9 @@ class RenderGlyphs:
     warn_icon: str
     sort_asc: str
     sort_desc: str
+    scale_left: str = "├"
+    scale_right: str = "┤"
+    scale_bar: str = "─"
 
 
 GLYPHS_UTF8 = RenderGlyphs(
@@ -113,6 +123,9 @@ GLYPHS_UTF8 = RenderGlyphs(
     warn_icon="⚠️  ",
     sort_asc="▲",
     sort_desc="▼",
+    scale_left="├",
+    scale_right="┤",
+    scale_bar="─",
 )
 
 GLYPHS_ASCII = RenderGlyphs(
@@ -133,6 +146,9 @@ GLYPHS_ASCII = RenderGlyphs(
     warn_icon="[!] ",
     sort_asc="^",
     sort_desc="v",
+    scale_left="|",
+    scale_right="|",
+    scale_bar="-",
 )
 
 # Sparkline glyph bars and trend arrow constants
@@ -684,6 +700,43 @@ def format_wgs84_coords(
     return f"{abs_lat:.4f}°{lat_hemi}, {abs_lng:.4f}°{lng_hemi}"
 
 
+def format_scale_bar(
+    distance_km: int,
+    width_cells: int = 15,
+    ascii_mode: bool = False,
+) -> str:
+    """Format a conformal map scale bar string of the specified character cell width.
+
+    Examples:
+        - UTF-8 (width_cells=15, distance_km=25): '├─── 25 km ───┤'
+        - UTF-8 (width_cells=17, distance_km=25): '├──── 25 km ────┤'
+        - ASCII (width_cells=15, distance_km=25): '|--- 25 km ---|'
+        - ASCII (width_cells=17, distance_km=25): '|---- 25 km ----|'
+
+    Args:
+        distance_km: Cartographic distance label in kilometers.
+        width_cells: Target total character cell width (minimum label + 4).
+        ascii_mode: Whether to use 7-bit ASCII ('|', '-') instead of UTF-8 ('├', '─', '┤').
+
+    Returns:
+        Formatted scale bar string.
+    """
+    glyphs = GLYPHS_ASCII if ascii_mode else GLYPHS_UTF8
+    label = f" {int(distance_km)} km "
+    min_w = len(label) + 4
+    effective_w = max(min_w, int(width_cells))
+    total_dashes = effective_w - 2 - len(label)
+    left_dashes = total_dashes // 2
+    right_dashes = total_dashes - left_dashes
+    return (
+        f"{glyphs.scale_left}"
+        f"{glyphs.scale_bar * left_dashes}"
+        f"{label}"
+        f"{glyphs.scale_bar * right_dashes}"
+        f"{glyphs.scale_right}"
+    )
+
+
 DEFAULT_STATION_PROXIMITY_KM: float = 80.0
 
 
@@ -1208,6 +1261,25 @@ class TUIRenderer:
 
         # 3. Overlay Stations with greedy collision avoidance
         occupied_cells: Set[Tuple[int, int]] = set()
+        scale_bar_str: Optional[str] = None
+        scale_row_inner = inner_h - 1  # Window row y = max_y - 2
+        scale_col_inner = 1            # Window col x = 2
+        if max_y >= 4 and max_x >= 16:
+            max_bar_w = min(18, max_x - 4)
+            min_bar_w = min(12, max_bar_w)
+            scale_spec = projector.compute_scale_bar(min_cells=min_bar_w, max_cells=max_bar_w)
+            candidate_bar = format_scale_bar(
+                scale_spec.distance_km,
+                width_cells=scale_spec.width_cells,
+                ascii_mode=self.ascii_mode,
+            )
+            bar_w = get_string_display_width(candidate_bar)
+            if bar_w <= max_x - 4:
+                scale_bar_str = candidate_bar
+                if 0 <= scale_row_inner < inner_h:
+                    for dx in range(bar_w):
+                        occupied_cells.add((scale_col_inner + dx, scale_row_inner))
+
         inspector_mode = getattr(snapshot, "inspector_mode", InspectorMode.TRAIN)
         selected_stn_id = (
             getattr(snapshot, "selected_station_id", None)
@@ -1270,6 +1342,19 @@ class TUIRenderer:
                 )
                 for dx in range(label_w):
                     occupied_cells.add((label_start_x + dx, row))
+
+        # 3b. Overlay Dynamic Conformal Map Scale Bar at bottom-left (row max_y - 2, col 2)
+        if scale_bar_str is not None:
+            scale_attr = border_attr | curses.A_BOLD
+            safe_addstr(
+                win,
+                max_y - 2,
+                2,
+                scale_bar_str,
+                scale_attr,
+                max_w=max_x - 4,
+                ascii_mode=self.ascii_mode,
+            )
 
         # 4. Overlay Live Trains and Directional Heading Glyphs
         selected_record = snapshot.selected_train

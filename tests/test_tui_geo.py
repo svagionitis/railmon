@@ -1,5 +1,6 @@
 """Unit tests for the TUI geospatial projection and Braille canvas engine."""
 
+import math
 import os
 import unittest
 from unittest.mock import patch
@@ -7,6 +8,8 @@ from tui.geo import (
     ASCII_BRAILLE_TABLE,
     BRAILLE_BASE,
     DOT_MASKS,
+    KM_PER_DEGREE_LAT,
+    SCALE_BAR_INTERVALS_KM,
     BoundingBox,
     BrailleCanvas,
     GeoPoint,
@@ -15,6 +18,7 @@ from tui.geo import (
     NORTHERN_GREECE_PRESET,
     PATHE_PRESET,
     PROASTIAKOS_PRESET,
+    ScaleBarSpec,
     Viewport,
     haversine_distance_km,
     is_utf8_supported,
@@ -353,6 +357,62 @@ class TestGeoProjector(unittest.TestCase):
         # 4. Known Greek railway distances: Athens -> SKA (~9.23 km), Athens -> Thessaloniki (~302.3 km)
         self.assertAlmostEqual(haversine_distance_km(athens, ska), 9.23, delta=0.15)
         self.assertAlmostEqual(haversine_distance_km(athens, thessaloniki), 302.3, delta=1.5)
+
+    def test_get_km_per_cell_and_conformal_latitude_scaling(self):
+        """TC-F34-01 & TC-F34-02: Verify conformal km_per_cell formula, zoom scaling, and latitude variation."""
+        self.viewport.center = GeoPoint(lat=39.5, lng=22.5)
+        self.viewport.zoom = 1.0
+        km_z1 = self.projector.get_km_per_cell()
+        expected_z1 = (
+            2.0
+            / (self.projector.get_scale_x() * math.cos(math.radians(39.5)))
+            * KM_PER_DEGREE_LAT
+        )
+        self.assertAlmostEqual(km_z1, expected_z1, places=6)
+
+        # Doubling zoom halves km_per_cell
+        self.viewport.zoom = 2.0
+        km_z2 = self.projector.get_km_per_cell()
+        self.assertAlmostEqual(km_z2, km_z1 / 2.0, places=6)
+
+        # Panning from Athens (37.9926 deg N) to Northern Greece (41.30 deg N) scales with 1/cos(phi_0)
+        self.viewport.zoom = 1.0
+        self.viewport.center = GeoPoint(lat=37.9926, lng=23.7203)
+        km_athens = self.projector.get_km_per_cell()
+        self.viewport.center = GeoPoint(lat=41.30, lng=23.7203)
+        km_north = self.projector.get_km_per_cell()
+        expected_ratio = math.cos(math.radians(37.9926)) / math.cos(math.radians(41.30))
+        self.assertAlmostEqual(km_north / km_athens, expected_ratio, places=6)
+
+        # Polar latitude defensive clamping prevents ZeroDivisionError
+        self.viewport.center = GeoPoint(lat=90.0, lng=0.0)
+        km_pole = self.projector.get_km_per_cell()
+        self.assertTrue(math.isfinite(km_pole))
+        self.assertGreater(km_pole, 0.0)
+
+    def test_compute_scale_bar_snapping_across_zoom_range(self):
+        """TC-F34-03: Verify compute_scale_bar snaps to distinct standard intervals across 1.25x zoom steps."""
+        self.viewport.center = GREECE_PRESET.center
+        # Generate consecutive 1.25x zoom steps matching TUIApp.zoom(1.25) / zoom(1/1.25)
+        zoom_levels = [1.0 * (1.25 ** k) for k in range(-7, 13)]
+        specs = []
+        for z in zoom_levels:
+            self.viewport.zoom = z
+            spec = self.projector.compute_scale_bar(min_cells=12, max_cells=18)
+            self.assertIsInstance(spec, ScaleBarSpec)
+            self.assertIn(spec.distance_km, SCALE_BAR_INTERVALS_KM)
+            self.assertGreaterEqual(spec.width_cells, 12)
+            self.assertLessEqual(spec.width_cells, 18)
+            self.assertGreater(spec.km_per_cell, 0.0)
+            specs.append(spec)
+
+        # Every single 1.25x zoom step across the active range must decrease distance_km
+        for prev_spec, next_spec in zip(specs, specs[1:]):
+            self.assertGreater(
+                prev_spec.distance_km,
+                next_spec.distance_km,
+                f"Expected distance_km to change on 1.25x zoom step, got {prev_spec} -> {next_spec}",
+            )
 
 
 class TestBrailleCanvasASCIIFallback(unittest.TestCase):
