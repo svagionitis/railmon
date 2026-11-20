@@ -22,14 +22,17 @@ from tui.renderer import (
     TUIRenderer,
     _INITIALIZED_COLOR_PAIRS,
     calculate_scroll_offset,
+    format_next_station_eta,
     format_progress_bar,
     format_speed_sparkline,
     format_telemetry_age,
+    format_wgs84_coords,
     get_compass_bearing,
     get_delay_color_pair,
     get_heading_glyph,
     get_string_display_width,
     get_train_color_pair,
+    normalize_station_key,
     safe_addstr,
     safe_color_pair,
     truncate_to_display_width,
@@ -365,6 +368,114 @@ class TestFormattingAndLookups(unittest.TestCase):
         str6, pair6 = format_telemetry_age(last_updated=now + 50.0, update_count=1, now=now)
         self.assertEqual(str6, "0s ago (#1)")
         self.assertEqual(pair6, PAIR_DEFAULT)
+
+    def test_format_next_station_eta(self):
+        """TC-F22-03..05: Verify next-station geodesic distance and kinematic ETA formatting."""
+        larissa_node = StationNode(
+            id="LAR",
+            code="1080",
+            name_el="Λάρισα",
+            name_en="Larissa",
+            point=GeoPoint(lat=39.6385, lng=22.4222),
+            corridor="PATHE",
+            is_hub=True,
+        )
+        # Train ~14.2 km south of Larissa along meridian (14.2 / 111.195 = 0.1277 deg lat)
+        train_pt = GeoPoint(lat=39.6385 - 0.1277, lng=22.4222)
+
+        # 1. Moving at 142.0 km/h over 14.2 km -> ~6m ETA
+        res_moving = format_next_station_eta(
+            "Λάρισα",
+            train_point=train_pt,
+            station_node=larissa_node,
+            speed_kmh=142.0,
+        )
+        self.assertEqual(res_moving, "Λάρισα (14.2 km, ~6m)")
+
+        # 2. Moving slowly over long distance (>= 120 min) -> ~XhYYm format
+        far_pt = GeoPoint(lat=37.9926, lng=23.7203)  # ~195 km from Larissa
+        res_long = format_next_station_eta(
+            "Larissa",
+            train_point=far_pt,
+            station_node=larissa_node,
+            speed_kmh=80.0,
+        )
+        self.assertIn("km, ~2h", res_long)
+
+        # 3. Moving right outside station (< 0.1 km) -> <1m
+        near_pt = GeoPoint(lat=39.6380, lng=22.4222)
+        res_imminent = format_next_station_eta(
+            "Λάρισα",
+            train_point=near_pt,
+            station_node=larissa_node,
+            speed_kmh=60.0,
+        )
+        self.assertEqual(res_imminent, "Λάρισα (0.1 km, <1m)")
+
+        # 4. Halted en route (speed < 5.0 km/h, d >= 0.25 km) -> distance without ETA
+        res_halted = format_next_station_eta(
+            "Λάρισα",
+            train_point=train_pt,
+            station_node=larissa_node,
+            speed_kmh=0.0,
+        )
+        self.assertEqual(res_halted, "Λάρισα (14.2 km)")
+
+        # 5. Halted at platform (speed < 5.0 km/h, d < 0.25 km) -> AT indicator
+        res_at = format_next_station_eta(
+            "Λάρισα",
+            train_point=near_pt,
+            station_node=larissa_node,
+            speed_kmh=0.0,
+        )
+        self.assertEqual(res_at, "Λάρισα (0.1 km, AT)")
+
+        # 6. Unknown station node or uninitialized (0.0, 0.0) GPS -> raw station name
+        self.assertEqual(
+            format_next_station_eta("Καλαμάτα", train_point=train_pt, station_node=None, speed_kmh=100.0),
+            "Καλαμάτα",
+        )
+        self.assertEqual(
+            format_next_station_eta(
+                "Λάρισα",
+                train_point=GeoPoint(0.0, 0.0),
+                station_node=larissa_node,
+                speed_kmh=100.0,
+            ),
+            "Λάρισα",
+        )
+
+        # 7. None or empty station -> 'N/A'
+        self.assertEqual(format_next_station_eta(None), "N/A")
+        self.assertEqual(format_next_station_eta("   "), "N/A")
+
+    def test_format_wgs84_coords(self):
+        """TC-F22-06..07: Verify WGS84 coordinate formatting in UTF-8 and ASCII modes."""
+        # 1. Standard Greek railway coordinate in UTF-8 and ASCII modes
+        self.assertEqual(
+            format_wgs84_coords(39.6384, 22.4192, ascii_mode=False),
+            "39.6384°N, 22.4192°E",
+        )
+        ascii_coords = format_wgs84_coords(39.6384, 22.4192, ascii_mode=True)
+        self.assertEqual(ascii_coords, "39.6384d N, 22.4192d E")
+        for ch in ascii_coords:
+            self.assertLess(ord(ch), 128)
+
+        # 2. Southern and Western hemisphere coordinates
+        self.assertEqual(
+            format_wgs84_coords(-33.8688, -151.2093, ascii_mode=False),
+            "33.8688°S, 151.2093°W",
+        )
+        self.assertEqual(
+            format_wgs84_coords(-33.8688, -151.2093, ascii_mode=True),
+            "33.8688d S, 151.2093d W",
+        )
+
+        # 3. Uninitialized (0.0, 0.0), None, or NaN coordinates -> 'N/A'
+        self.assertEqual(format_wgs84_coords(0.0, 0.0), "N/A")
+        self.assertEqual(format_wgs84_coords(None, 23.7), "N/A")
+        self.assertEqual(format_wgs84_coords(38.0, None), "N/A")
+        self.assertEqual(format_wgs84_coords(float("nan"), 23.7), "N/A")
 
 
 class TestTUIRendererComponents(unittest.TestCase):
@@ -1184,6 +1295,67 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
             if text == renderer.glyphs.trail_dot
         }
         self.assertEqual(len(off_trail_cells), 0)
+
+    def test_station_lookup_index_and_inspector_coordinates_eta(self):
+        """TC-F22-02 & TC-F22-08: Verify diacritic-insensitive station resolution and Inspector F-2.2 rows."""
+        stations_dict = load_stations()
+        renderer_utf8 = TUIRenderer(stations=list(stations_dict.values()), ascii_mode=False)
+        renderer_ascii = TUIRenderer(stations=list(stations_dict.values()), ascii_mode=True)
+
+        # 1. Resolve by Greek name with tonos, uppercase toneless Greek, English, ID, code, and base name
+        for query, expected_id in [
+            ("Λάρισα", "LAR"),
+            ("ΛΑΡΙΣΑ", "LAR"),
+            ("Larissa", "LAR"),
+            ("LAR", "LAR"),
+            ("1080", "LAR"),
+            ("Αθήνα", "ATH"),
+            ("ΑΘΗΝΑ", "ATH"),
+            ("Athens", "ATH"),
+            ("ΣΚΑ", "SKA"),
+            ("SKA", "SKA"),
+            ("Αεροδρόμιο", "AIA"),
+            ("ΑΕΡΟΔΡΟΜΙΟ", "AIA"),
+        ]:
+            resolved = renderer_utf8.resolve_station(query)
+            self.assertIsNotNone(resolved, f"Failed to resolve station query '{query}'")
+            assert resolved is not None
+            self.assertEqual(resolved.id, expected_id)
+
+        self.assertIsNone(renderer_utf8.resolve_station("Atlantis"))
+        self.assertIsNone(renderer_utf8.resolve_station(None))
+        self.assertEqual(normalize_station_key("  Λάρισα "), "λαρισα")
+
+        # 2. Verify Inspector renders Next Station with distance & ETA and Coordinates row in UTF-8 and ASCII
+        # Train at (39.5108, 22.4222) is ~14.2 km south of Larissa (39.6385, 22.4222) at 142.0 km/h (~6m ETA)
+        pos = create_test_position(
+            train_id="ic-1599",
+            train_number="1599",
+            train_type="IC",
+            speed=142.0,
+            lat=39.5108,
+            lng=22.4222,
+            delay=9.0,
+        )
+        pos.next_station = "Λάρισα"
+        store = TrainStateStore()
+        store.update_positions([pos])
+        store.select_by_id("ic-1599")
+        snapshot = store.get_snapshot()
+
+        win_utf8 = MockCursesWindow(14, 42)
+        renderer_utf8.render_inspector(win_utf8, snapshot)
+        utf8_texts = " ".join(text for (_, _, text, _) in win_utf8.strings)
+        self.assertIn("Next Station:", utf8_texts)
+        self.assertIn("Λάρισα (14.2 km, ~6m)", utf8_texts)
+        self.assertIn("Coordinates:", utf8_texts)
+        self.assertIn("39.5108°N, 22.4222°E", utf8_texts)
+
+        win_ascii = MockCursesWindow(14, 42)
+        renderer_ascii.render_inspector(win_ascii, snapshot)
+        ascii_texts = " ".join(text for (_, _, text, _) in win_ascii.strings)
+        self.assertIn("Coordinates:", ascii_texts)
+        self.assertIn("39.5108d N, 22.4222d E", ascii_texts)
 
 
 if __name__ == "__main__":

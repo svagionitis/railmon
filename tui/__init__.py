@@ -1,7 +1,14 @@
 """Terminal User Interface (TUI) package for Hellenic Railways live tracker."""
 
 from tui.app import TUIApp, run_tui
-from tui.geo import BoundingBox, BrailleCanvas, GeoPoint, GeoProjector, Viewport
+from tui.geo import (
+    BoundingBox,
+    BrailleCanvas,
+    GeoPoint,
+    GeoProjector,
+    Viewport,
+    haversine_distance_km,
+)
 from tui.mock_engine import (
     MockTelemetryEngine,
     SimulatedTrain,
@@ -16,10 +23,13 @@ from tui.renderer import (
     PaneGeometry,
     TUIRenderer,
     calculate_scroll_offset,
+    format_next_station_eta,
     format_progress_bar,
+    format_wgs84_coords,
     get_compass_bearing,
     get_delay_color_pair,
     get_heading_glyph,
+    normalize_station_key,
 )
 from tui.state import (
     BreadcrumbMode,
@@ -38,6 +48,7 @@ __all__ = [
     "Viewport",
     "GeoProjector",
     "BrailleCanvas",
+    "haversine_distance_km",
     "StationNode",
     "TrackPolyline",
     "SimulatedTrain",
@@ -62,5 +73,8 @@ __all__ = [
     "get_compass_bearing",
     "get_delay_color_pair",
     "format_progress_bar",
+    "format_next_station_eta",
+    "format_wgs84_coords",
+    "normalize_station_key",
     "calculate_scroll_offset",
 ]

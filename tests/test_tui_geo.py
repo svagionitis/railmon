@@ -16,6 +16,7 @@ from tui.geo import (
     PATHE_PRESET,
     PROASTIAKOS_PRESET,
     Viewport,
+    haversine_distance_km,
     is_utf8_supported,
 )
 
@@ -328,6 +329,30 @@ class TestGeoProjector(unittest.TestCase):
         self.assertAlmostEqual(self.viewport.center.lng, PROASTIAKOS_PRESET.center.lng, delta=0.01)
         # Because Proastiakos span is smaller than Greece span, zoom must be > 1.0
         self.assertGreater(self.viewport.zoom, 1.0)
+
+    def test_haversine_distance_km(self):
+        """TC-F22-01: Verify Haversine great-circle distance in kilometers for Greek railway nodes."""
+        athens = GeoPoint(lat=37.9926, lng=23.7203)
+        ska = GeoPoint(lat=38.0744, lng=23.7381)
+        larissa = GeoPoint(lat=39.6385, lng=22.4222)
+        thessaloniki = GeoPoint(lat=40.6441, lng=22.9298)
+
+        # 1. Identity distance is 0.0 km
+        self.assertAlmostEqual(haversine_distance_km(athens, athens), 0.0, places=9)
+
+        # 2. Symmetry
+        d_ath_lar = haversine_distance_km(athens, larissa)
+        d_lar_ath = haversine_distance_km(larissa, athens)
+        self.assertAlmostEqual(d_ath_lar, d_lar_ath, places=9)
+
+        # 3. 1 degree latitude along a meridian is ~111.195 km (2 * pi * 6371 / 360)
+        p0 = GeoPoint(lat=38.0, lng=23.0)
+        p1 = GeoPoint(lat=39.0, lng=23.0)
+        self.assertAlmostEqual(haversine_distance_km(p0, p1), 111.195, delta=0.05)
+
+        # 4. Known Greek railway distances: Athens -> SKA (~9.23 km), Athens -> Thessaloniki (~302.3 km)
+        self.assertAlmostEqual(haversine_distance_km(athens, ska), 9.23, delta=0.15)
+        self.assertAlmostEqual(haversine_distance_km(athens, thessaloniki), 302.3, delta=1.5)
 
 
 class TestBrailleCanvasASCIIFallback(unittest.TestCase):

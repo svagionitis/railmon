@@ -14,7 +14,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import unicodedata
 
-from tui.geo import BrailleCanvas, GeoPoint, GeoProjector
+from tui.geo import BrailleCanvas, GeoPoint, GeoProjector, haversine_distance_km
 from tui.mock_engine import StationNode, TrackPolyline, snap_to_track_network
 from tui.state import (
     BreadcrumbMode,
@@ -545,6 +545,144 @@ def format_telemetry_age(
         return f"{age_str} (#{update_count})", PAIR_DEFAULT
 
 
+def normalize_station_key(name: str) -> str:
+    """Normalize a station identifier or Greek/Latin name for diacritic-insensitive lookup.
+
+    Strips Unicode combining accents/tonos (NFD category 'Mn'), converts to lowercase,
+    and collapses surrounding whitespace.
+
+    Args:
+        name: Raw station name, code, or identifier.
+
+    Returns:
+        Normalized lookup key string.
+    """
+    if not name:
+        return ""
+    decomposed = unicodedata.normalize("NFD", name.strip())
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return unicodedata.normalize("NFC", stripped).casefold().strip()
+
+
+def _build_station_index(stations: Sequence[StationNode]) -> Dict[str, StationNode]:
+    """Build a multi-key lookup dictionary mapping Greek, English, ID, and alias keys to StationNode.
+
+    Args:
+        stations: Sequence of StationNode objects.
+
+    Returns:
+        Dictionary mapping normalized keys to their corresponding StationNode.
+    """
+    index: Dict[str, StationNode] = {}
+    for stn in stations:
+        candidates: List[str] = [stn.id, stn.code, stn.name_el, stn.name_en]
+        for raw_name in (stn.name_el, stn.name_en):
+            if "(" in raw_name:
+                base = raw_name.split("(", 1)[0].strip()
+                if base:
+                    candidates.append(base)
+            if "-" in raw_name:
+                for part in raw_name.split("-"):
+                    part_clean = part.strip()
+                    if len(part_clean) >= 3:
+                        candidates.append(part_clean)
+
+        for candidate in candidates:
+            key = normalize_station_key(candidate)
+            if key and key not in index:
+                index[key] = stn
+
+        if stn.id.upper() == "AIA":
+            for alias in ("αεροδρομιο", "airport", "athens airport"):
+                if alias not in index:
+                    index[alias] = stn
+
+    return index
+
+
+def format_next_station_eta(
+    next_station: Optional[str],
+    train_point: Optional[GeoPoint] = None,
+    station_node: Optional[StationNode] = None,
+    speed_kmh: Optional[float] = None,
+) -> str:
+    """Format the next station readout with geodesic distance and kinematic ETA.
+
+    Args:
+        next_station: Display name of the upcoming station from telemetry.
+        train_point: Current WGS84 GeoPoint of the train.
+        station_node: Resolved StationNode for next_station, if matched.
+        speed_kmh: Instantaneous train speed in km/h.
+
+    Returns:
+        Formatted Next Station string for the Inspector pane.
+    """
+    if not next_station or not next_station.strip():
+        return "N/A"
+
+    clean_name = next_station.strip()
+    if (
+        station_node is None
+        or train_point is None
+        or (abs(train_point.lat) < 1e-9 and abs(train_point.lng) < 1e-9)
+        or not (math.isfinite(train_point.lat) and math.isfinite(train_point.lng))
+    ):
+        return clean_name
+
+    d_km = haversine_distance_km(train_point, station_node.point)
+    spd = float(speed_kmh) if (speed_kmh is not None and math.isfinite(speed_kmh)) else 0.0
+
+    if spd >= 5.0:
+        raw_eta_min = (d_km / spd) * 60.0
+        eta_min = int(round(raw_eta_min))
+        if d_km < 0.1 or eta_min <= 0:
+            eta_str = "<1m"
+        elif eta_min >= 120:
+            hours = eta_min // 60
+            mins = eta_min % 60
+            eta_str = f"~{hours}h{mins:02d}m" if mins > 0 else f"~{hours}h"
+        else:
+            eta_str = f"~{eta_min}m"
+        return f"{clean_name} ({d_km:.1f} km, {eta_str})"
+
+    if d_km < 0.25:
+        return f"{clean_name} ({d_km:.1f} km, AT)"
+    return f"{clean_name} ({d_km:.1f} km)"
+
+
+def format_wgs84_coords(
+    lat: Optional[float],
+    lng: Optional[float],
+    ascii_mode: bool = False,
+) -> str:
+    """Format a WGS84 latitude/longitude pair into a human-readable degree readout.
+
+    Args:
+        lat: Latitude in decimal degrees (-90.0 to +90.0).
+        lng: Longitude in decimal degrees (-180.0 to +180.0).
+        ascii_mode: Whether to format degrees using 7-bit ASCII ('d ').
+
+    Returns:
+        Formatted coordinate string (e.g. '39.6384°N, 22.4192°E' or '39.6384d N, 22.4192d E'),
+        or 'N/A' if coordinates are missing or uninitialized (0.0, 0.0).
+    """
+    if lat is None or lng is None:
+        return "N/A"
+    if not (math.isfinite(lat) and math.isfinite(lng)):
+        return "N/A"
+    if abs(lat) < 1e-9 and abs(lng) < 1e-9:
+        return "N/A"
+
+    lat_hemi = "N" if lat >= 0.0 else "S"
+    lng_hemi = "E" if lng >= 0.0 else "W"
+    abs_lat = abs(float(lat))
+    abs_lng = abs(float(lng))
+
+    if ascii_mode:
+        return f"{abs_lat:.4f}d {lat_hemi}, {abs_lng:.4f}d {lng_hemi}"
+    return f"{abs_lat:.4f}°{lat_hemi}, {abs_lng:.4f}°{lng_hemi}"
+
+
 def safe_addstr(
     win: Any,
     y: int,
@@ -631,9 +769,25 @@ class TUIRenderer:
             ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
         """
         self.stations: Sequence[StationNode] = stations or []
+        self.station_index: Dict[str, StationNode] = _build_station_index(self.stations)
         self.tracks: Sequence[TrackPolyline] = tracks or []
         self.ascii_mode: bool = ascii_mode
         self.glyphs: RenderGlyphs = GLYPHS_ASCII if ascii_mode else GLYPHS_UTF8
+
+    def resolve_station(self, name_or_id: Optional[str]) -> Optional[StationNode]:
+        """Resolve a station name, Greek/English alias, code, or ID to a StationNode."""
+        if not name_or_id:
+            return None
+        key = normalize_station_key(name_or_id)
+        if not key:
+            return None
+        if key in self.station_index:
+            return self.station_index[key]
+        if "(" in key:
+            base_key = key.split("(", 1)[0].strip()
+            if base_key in self.station_index:
+                return self.station_index[base_key]
+        return None
 
     def init_colors(self) -> None:
         """Initialize standard curses color pairs and semantic visual attributes with error bounds."""
@@ -1120,15 +1274,26 @@ class TUIRenderer:
         if telemetry_pair != PAIR_DEFAULT:
             telemetry_attr |= curses.A_BOLD
 
+        matched_station = self.resolve_station(pos.next_station)
+        train_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
+        next_station_str = format_next_station_eta(
+            pos.next_station,
+            train_point=train_pt,
+            station_node=matched_station,
+            speed_kmh=pos.speed,
+        )
+        coords_str = format_wgs84_coords(pos.lat, pos.lng, ascii_mode=self.ascii_mode)
+
         rows = [
             ("Train No:", f"{pos.train_number or pos.id} ({pos.train_type or 'Passenger'})", val_attr),
             ("Route:", route_str, val_attr),
-            ("Next Station:", f"{pos.next_station or 'N/A'}", val_attr),
+            ("Next Station:", next_station_str, val_attr),
             ("Speed:", spd_display, val_attr),
             ("Speed Trend:", sparkline_str, val_attr),
             ("Delay:", dly_display, delay_attr),
             ("Telemetry:", telemetry_str, telemetry_attr),
             ("Progress:", progress_str, val_attr),
+            ("Coordinates:", coords_str, val_attr),
             ("Heading:", compass_str, val_attr),
             ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
             ("Status:", f"{pos.status or 'In Service'}", val_attr),

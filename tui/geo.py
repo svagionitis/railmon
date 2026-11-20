@@ -112,6 +112,34 @@ class GeoPoint:
     lng: float
 
 
+# Mean spherical Earth radius in kilometers (WGS84)
+EARTH_RADIUS_KM = 6371.0
+
+
+def haversine_distance_km(a: GeoPoint, b: GeoPoint) -> float:
+    """Calculate the great-circle distance between two WGS84 GeoPoints in kilometers.
+
+    Uses the Haversine formula with mean spherical Earth radius R = 6371.0 km.
+
+    Args:
+        a: Origin geographic coordinate (lat, lng).
+        b: Destination geographic coordinate (lat, lng).
+
+    Returns:
+        Great-circle distance in kilometers (non-negative float).
+    """
+    phi1 = math.radians(a.lat)
+    phi2 = math.radians(b.lat)
+    delta_phi = math.radians(b.lat - a.lat)
+    delta_lambda = math.radians(b.lng - a.lng)
+
+    sin_dphi = math.sin(delta_phi / 2.0)
+    sin_dlng = math.sin(delta_lambda / 2.0)
+    h = sin_dphi * sin_dphi + math.cos(phi1) * math.cos(phi2) * sin_dlng * sin_dlng
+    h = min(1.0, max(0.0, h))
+    return 2.0 * EARTH_RADIUS_KM * math.atan2(math.sqrt(h), math.sqrt(1.0 - h))
+
+
 @dataclass(frozen=True)
 class BoundingBox:
     """Geographic rectangular bounding box.

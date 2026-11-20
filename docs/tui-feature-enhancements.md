@@ -15,7 +15,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 1 (Parity)** | **F-1.1** | Dynamic Train Roster Sorting (`ID`, `Speed`, `Delay`) | `s` / `S` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 1 (Parity)** | **F-1.2** | Historical Breadcrumb Trail Mode Toggle (`All`, `Selected`, `Off`) | `b` / `B` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
-| **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | Proposed | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
+| **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / Click | Proposed | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
@@ -321,23 +321,27 @@ stateDiagram-v2
 
 ---
 
-### F-2.2: WGS84 Coordinate Readout, Next-Station Distance & ETA
+### F-2.2: WGS84 Coordinate Readout, Next-Station Distance & ETA — *Implemented*
 
-#### Overview
-While the map viewport title displays the camera center coordinates, the Inspector does not currently show the selected train's exact latitude/longitude or how far it is from `next_station`.
+#### Problem Statement
+While the map viewport title displays the camera center coordinates, the Selected Train Telemetry Inspector previously displayed only the raw `pos.next_station` name without showing the selected train's exact WGS84 latitude/longitude, its remaining distance to `next_station`, or its kinematic estimated time of arrival (ETA).
 
-#### Technical Design
-1. **Haversine Distance Helper in [`tui/geo.py`](../tui/geo.py):**
-   - Implement `haversine_distance_km(a: GeoPoint, b: GeoPoint) -> float` using standard spherical Earth radius $R = 6371.0\text{ km}$.
-2. **Station Lookup Index in [`TUIRenderer.__init__`](../tui/renderer.py#L505):**
-   - Build a normalized lookup dictionary mapping Greek (`name_el`), English (`name_en`), and station `id` keys from `self.stations` to their `StationNode`.
-3. **Next-Station Distance & Kinematic ETA:**
-   - When `pos.next_station` matches a known `StationNode`:
-     - Compute straight-line/track distance $d_{\text{km}}$ between `(pos.lat, pos.lng)` and `station.point`.
-     - If `pos.speed >= 5.0`, compute $\text{ETA}_{\min} = \text{round}\left(\frac{d_{\text{km}}}{\text{pos.speed}} \times 60\right)$.
-     - Render in Inspector: `Next Station: Λάρισα (14.2 km, ~6m)`.
-4. **Coordinate Readout Row:**
-   - Render `Coordinates: 39.6384°N, 22.4192°E` (or `39.6384d N, 22.4192d E` in `--ascii` mode).
+#### Technical Design & Implementation Details
+1. **Haversine Distance Helper in [`tui/geo.py`](../tui/geo.py#L118-L143):**
+   - Implemented [`haversine_distance_km(a: GeoPoint, b: GeoPoint) -> float`](../tui/geo.py#L121-L143) using standard spherical Earth radius $R = 6371.0\text{ km}$ with domain clamping `min(1.0, max(0.0, h))`.
+2. **Diacritic-Insensitive Station Lookup Index in [`TUIRenderer.__init__`](../tui/renderer.py#L549-L601):**
+   - Implemented [`normalize_station_key(name: str) -> str`](../tui/renderer.py#L549-L565) using Unicode `NFD` decomposition to strip combining Greek accents/*tonos* (`Mn`) and casefold.
+   - Implemented [`_build_station_index(stations: Sequence[StationNode]) -> Dict[str, StationNode]`](../tui/renderer.py#L568-L601) indexing station `id`, `code`, Greek (`name_el`), English (`name_en`), parenthetical-stripped base names (`"Αθήνα (Σ.Σ. Λαρίσης)"` $\rightarrow$ `"αθηνα"`), and airport aliases, exposed via [`TUIRenderer.resolve_station`](../tui/renderer.py#L728-L741).
+3. **Next-Station Distance & Kinematic ETA ([`format_next_station_eta`](../tui/renderer.py#L604-L651)):**
+   - When `pos.next_station` resolves to a known `StationNode` and `(pos.lat, pos.lng)` is a valid non-zero coordinate:
+     - Computes great-circle distance $d_{\text{km}} = \text{haversine\_distance\_km}(\text{train\_pt}, \text{station.point})$.
+     - If `pos.speed >= 5.0`, computes $\text{ETA}_{\min} = \text{round}\left(\frac{d_{\text{km}}}{\text{pos.speed}} \times 60\right)$ and renders `Next Station: Λάρισα (14.2 km, ~6m)` (or `<1m` when $d_{\text{km}} < 0.1\text{ km}$, `~XhYYm` when $\text{ETA}_{\min} \ge 120$).
+     - If halted (`pos.speed < 5.0`), renders `Λάρισα (0.1 km, AT)` when at the station platform ($d_{\text{km}} < 0.25\text{ km}$) or `Λάρισα (14.2 km)` when stopped en route.
+4. **Coordinate Readout Row ([`format_wgs84_coords`](../tui/renderer.py#L654-L683)):**
+   - Renders `Coordinates: 39.6384°N, 22.4192°E` in UTF-8 mode (or `39.6384d N, 22.4192d E` in `--ascii` mode) at row index 8 of [`TUIRenderer.render_inspector`](../tui/renderer.py#L1217-L1242), immediately visible on standard $80 \times 24$ consoles (`inner_h = 9`).
+5. **Verification Coverage:**
+   - [`tests/test_tui_geo.py`](../tests/test_tui_geo.py#L334-L356) (`test_haversine_distance_km`): Validates identity distance, symmetry, 1° meridian arc ($\approx 111.195\text{ km}$), Athens–SKA ($\approx 9.23\text{ km}$), and Athens–Thessaloniki ($\approx 302.3\text{ km}$).
+   - [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L371-L469) (`test_format_next_station_eta`, `test_format_wgs84_coords`) and [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L1278-L1337) (`test_station_lookup_index_and_inspector_coordinates_eta`): Validates Greek/English/toneless station resolution, moving/halted/platform ETA formatting, UTF-8/ASCII coordinate formatting, and Curses Inspector window rendering.
 
 ---
 
@@ -554,10 +558,10 @@ sequenceDiagram
    - Verified speed history extraction in [`tests/test_tui_state.py`](../tests/test_tui_state.py#L795-L824).
    - Verified sparkline glyphs, trend arrows, dynamic ceiling scaling, pure ASCII mode, age alert formatting, and curses inspector window attributes in [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py#L301-L380).
 
-#### B. F-2.2: WGS84 Coordinate Readout, Next-Station Distance & ETA — *Pending*
-1. Add `haversine_distance_km` to [`tui/geo.py`](../tui/geo.py).
-2. Add station lookup index and kinematic ETA calculation to [`tui/renderer.py`](../tui/renderer.py).
-3. Verify coordinate formatting and ETA calculations via [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py).
+#### B. F-2.2: WGS84 Coordinate Readout, Next-Station Distance & ETA — *Completed*
+1. Added [`haversine_distance_km`](../tui/geo.py#L121-L143) to [`tui/geo.py`](../tui/geo.py).
+2. Added diacritic-insensitive station lookup index ([`normalize_station_key`](../tui/renderer.py#L549-L565), [`_build_station_index`](../tui/renderer.py#L568-L601), [`TUIRenderer.resolve_station`](../tui/renderer.py#L728-L741)), [`format_next_station_eta`](../tui/renderer.py#L604-L651), and [`format_wgs84_coords`](../tui/renderer.py#L654-L683) to [`tui/renderer.py`](../tui/renderer.py).
+3. Verified Haversine distances, station resolution, coordinate formatting, and ETA calculations via [`tests/test_tui_geo.py`](../tests/test_tui_geo.py) and [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py).
 
 ### Phase 3: Tier 3 Interactive Map & Mouse Support
 1. Enable `curses.mousemask` and coordinate hit-testing in [`tui/app.py`](../tui/app.py).
