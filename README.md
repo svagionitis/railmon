@@ -17,6 +17,7 @@
   - **Corridor Filtering (`c`)**: Filter by Athens–Thessaloniki Mainline, Proastiakos Suburban, Peloponnese, Northern Greece, or View All.
   - **Historical Breadcrumb Trails (`b`)**: Visualize train journey paths over time.
   - **Dynamic Conformal Map Scale Bar**: Live bottom-left cartographic scale bar (`├──── 25 km ────┤` / `|---- 25 km ----|`) that automatically adapts to viewport zoom (`0.2x`–`25.0x`) and center latitude.
+- **Live Station Departure & Arrival Boards (`railmon departures`)**: Headless CLI command querying real-time train departures and arrivals for any Greek railway station with Greek/Latin diacritic-tolerant fuzzy search, service type filtering, and `--json` export.
 - **Historical Telemetry Recording & Analytics**:
   - Embedded zero-dependency SQLite persistence with Write-Ahead Logging (WAL) for non-blocking concurrent reading and writing.
   - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.
@@ -133,6 +134,13 @@ railmon --demo         # Windows
 # View today's scheduled trips
 ./railmon schedules    # Linux / macOS
 railmon schedules      # Windows
+
+# Query live station departure & arrival boards
+./railmon departures Athens            # Departures from Athens Central
+railmon departures SKA --arrivals      # Arrivals at SKA Hub
+railmon departures Larissa --limit 10  # Truncate to top 10 movements
+railmon departures Athens --json       # Output structured JSON
+railmon departures Athens --demo       # Offline mock simulation
 ```
 
 ### Historical Recording & Terminal Analytics

@@ -3,7 +3,7 @@ Terminal output formatters and text table renderers for railmon CLI commands.
 Zero external dependencies; pure Python standard library.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from storage.models import (
     CorridorPunctualitySummary,
@@ -242,4 +242,152 @@ def format_sessions_table(sessions: List[RecordingSessionDB]) -> str:
 
     lines.append("-" * 95)
     lines.append(f"Total sessions: {len(sessions)}")
+    return "\n".join(lines)
+
+
+def _format_board_title_name(station: Any, is_ascii: bool) -> str:
+    """Format the station header display name."""
+    sid = getattr(station, "id", "")
+    name_el = getattr(station, "name_el", "")
+    name_en = getattr(station, "name_en", "")
+
+    if not hasattr(station, "name_en"):
+        return str(station)
+
+    if is_ascii or not name_el or name_el == name_en:
+        return f"{name_en} [{sid}]" if sid else name_en
+    return f"{name_el} / {name_en} [{sid}]" if sid else f"{name_el} / {name_en}"
+
+
+def _extract_board_target_name(
+    rec: Dict[str, Any],
+    is_arrivals: bool,
+    is_ascii: bool,
+    empty_dash: str,
+) -> str:
+    """Extract origin or destination display name from a board record."""
+    target_dict = rec.get("origin") if is_arrivals else rec.get("destination")
+    if isinstance(target_dict, dict):
+        if is_ascii:
+            return (
+                target_dict.get("nameEnglish")
+                or target_dict.get("nameGreek")
+                or target_dict.get("id")
+                or empty_dash
+            )
+        t_el = target_dict.get("nameGreek")
+        t_en = target_dict.get("nameEnglish")
+        if t_el and t_en and t_el != t_en:
+            return f"{t_el} / {t_en}"
+        return t_el or t_en or target_dict.get("id") or empty_dash
+
+    if isinstance(target_dict, str):
+        return target_dict
+
+    return str(
+        rec.get("target_station")
+        or rec.get("destination_name")
+        or rec.get("origin_name")
+        or empty_dash
+    )
+
+
+def _extract_board_delay_and_status(rec: Dict[str, Any]) -> Tuple[str, str]:
+    """Extract formatted delay and status indicators from a board record."""
+    raw_delay = rec.get("delayMinutes") if rec.get("delayMinutes") is not None else rec.get("delay")
+    try:
+        delay_min = int(raw_delay) if raw_delay is not None else 0
+    except (ValueError, TypeError):
+        delay_min = 0
+
+    delay_str = f"+{delay_min}m" if delay_min > 0 else f"{delay_min}m"
+
+    raw_status = rec.get("status")
+    if raw_status:
+        status_str = str(raw_status).replace("_", " ").upper()
+    elif delay_min > 0:
+        status_str = "DELAYED"
+    else:
+        status_str = "ON TIME"
+
+    return delay_str, status_str
+
+
+def format_station_board_table(
+    station: Any,
+    records: List[Dict[str, Any]],
+    is_arrivals: bool = False,
+    is_ascii: bool = False,
+    data_source: str = "railway.gov.gr",
+    timestamp_str: Optional[str] = None,
+) -> str:
+    """Format station departure or arrival board records into a clean CLI terminal table.
+
+    Args:
+        station: StationNode instance or station name string.
+        records: List of departure or arrival dictionaries.
+        is_arrivals: True if rendering arrival board, False for departure board.
+        is_ascii: True if 7-bit ASCII characters should be enforced.
+        data_source: Source label for footer metadata (e.g. 'railway.gov.gr').
+        timestamp_str: Optional timestamp string for header (e.g. '14:30:00').
+
+    Returns:
+        Clean multi-line terminal string table.
+    """
+    title_name = _format_board_title_name(station, is_ascii)
+    board_mode = "ARRIVAL" if is_arrivals else "DEPARTURE"
+    board_title = f"STATION {board_mode} BOARD"
+    target_col = "ORIGIN" if is_arrivals else "DESTINATION"
+    divider_char = "="
+    sub_divider_char = "-"
+    empty_dash = "-" if is_ascii else "—"
+
+    ts_part = f" ({timestamp_str})" if timestamp_str else ""
+    header_title = f"{board_title}: {title_name}{ts_part}"
+
+    width = 100
+    lines = [
+        divider_char * width,
+        header_title,
+        divider_char * width,
+    ]
+
+    if not records:
+        plural_mode = "arrivals" if is_arrivals else "departures"
+        lines.append(f"No upcoming {plural_mode} scheduled.")
+        lines.append(divider_char * width)
+        return "\n".join(lines)
+
+    lines.append(
+        f"{'TIME':<7} {'TRAIN':<7} {'TYPE':<12} {target_col:<34} {'PLAT':^5} {'STATUS':<12} {'DELAY':>8}"
+    )
+    lines.append(sub_divider_char * width)
+
+    for rec in records:
+        train_no = str(rec.get("trainNumber") or rec.get("train_number") or rec.get("id") or "N/A")
+        service_type = str(rec.get("serviceType") or rec.get("service_type") or "Passenger")
+
+        raw_time = str(
+            rec.get("scheduledTime")
+            or rec.get("scheduled_time")
+            or rec.get("departureTime")
+            or rec.get("arrivalTime")
+            or rec.get("time")
+            or "--:--"
+        )
+        time_val = raw_time.split("T")[-1].replace("Z", "")[:5] if "T" in raw_time else raw_time[:5]
+        target_name = _extract_board_target_name(rec, is_arrivals, is_ascii, empty_dash)
+
+        plat_raw = rec.get("platform")
+        platform = str(plat_raw) if plat_raw is not None and str(plat_raw).strip() else empty_dash
+
+        delay_str, status_str = _extract_board_delay_and_status(rec)
+
+        lines.append(
+            f"{time_val:<7} {train_no[:6]:<7} {service_type[:11]:<12} {target_name[:33]:<34} {platform[:4]:^5} {status_str[:11]:<12} {delay_str:>8}"
+        )
+
+    lines.append(divider_char * width)
+    plural_label = "arrivals" if is_arrivals else "departures"
+    lines.append(f"Total {plural_label}: {len(records)} | Data source: {data_source}")
     return "\n".join(lines)

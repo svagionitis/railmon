@@ -23,7 +23,14 @@ from tui.geo import (
     ScaleBarSpec,
     haversine_distance_km,
 )
-from tui.mock_engine import StationNode, TrackPolyline, calculate_bearing, snap_to_track_network
+from tui.mock_engine import (
+    StationNode,
+    TrackPolyline,
+    build_station_index,
+    calculate_bearing,
+    normalize_station_key,
+    snap_to_track_network,
+)
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
@@ -565,59 +572,8 @@ def format_telemetry_age(
         return f"{age_str} (#{update_count})", PAIR_DEFAULT
 
 
-def normalize_station_key(name: str) -> str:
-    """Normalize a station identifier or Greek/Latin name for diacritic-insensitive lookup.
-
-    Strips Unicode combining accents/tonos (NFD category 'Mn'), converts to lowercase,
-    and collapses surrounding whitespace.
-
-    Args:
-        name: Raw station name, code, or identifier.
-
-    Returns:
-        Normalized lookup key string.
-    """
-    if not name:
-        return ""
-    decomposed = unicodedata.normalize("NFD", name.strip())
-    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
-    return unicodedata.normalize("NFC", stripped).casefold().strip()
-
-
-def _build_station_index(stations: Sequence[StationNode]) -> Dict[str, StationNode]:
-    """Build a multi-key lookup dictionary mapping Greek, English, ID, and alias keys to StationNode.
-
-    Args:
-        stations: Sequence of StationNode objects.
-
-    Returns:
-        Dictionary mapping normalized keys to their corresponding StationNode.
-    """
-    index: Dict[str, StationNode] = {}
-    for stn in stations:
-        candidates: List[str] = [stn.id, stn.code, stn.name_el, stn.name_en]
-        for raw_name in (stn.name_el, stn.name_en):
-            if "(" in raw_name:
-                base = raw_name.split("(", 1)[0].strip()
-                if base:
-                    candidates.append(base)
-            if "-" in raw_name:
-                for part in raw_name.split("-"):
-                    part_clean = part.strip()
-                    if len(part_clean) >= 3:
-                        candidates.append(part_clean)
-
-        for candidate in candidates:
-            key = normalize_station_key(candidate)
-            if key and key not in index:
-                index[key] = stn
-
-        if stn.id.upper() == "AIA":
-            for alias in ("αεροδρομιο", "airport", "athens airport"):
-                if alias not in index:
-                    index[alias] = stn
-
-    return index
+# Alias build_station_index for backward compatibility with existing tests
+_build_station_index = build_station_index
 
 
 def format_next_station_eta(

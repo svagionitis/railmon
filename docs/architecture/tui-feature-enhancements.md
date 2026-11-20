@@ -10,7 +10,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 
 ### Feature Summary Matrix
 
-| Tier | Feature ID | Feature Name | Keybinding | Status | Primary Modules Affected |
+| Tier | Feature ID | Feature Name | Keybinding / CLI | Status | Primary Modules Affected |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 1 (Parity)** | **F-1.1** | Dynamic Train Roster Sorting (`ID`, `Speed`, `Delay`) | `s` / `S` | **Implemented** | [`tui/state.py`](../../tui/state.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py) |
 | **Tier 1 (Parity)** | **F-1.2** | Historical Breadcrumb Trail Mode Toggle (`All`, `Selected`, `Off`) | `b` / `B` | **Implemented** | [`tui/state.py`](../../tui/state.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py) |
@@ -22,6 +22,21 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../../tui/renderer.py), [`tui/geo.py`](../../tui/geo.py) |
 | **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` / `E` | **Implemented** | [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`storage/repository.py`](../../storage/repository.py) |
 | **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | **Implemented** | [`tui/app.py`](../../tui/app.py), [`tui/stream_worker.py`](../../tui/stream_worker.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 5 (Safety)** | **F-5.1** | Corridor Headway & Opposing Train Conflict Watchdog | *(Auto / Bell)* | Planned | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 5 (Safety)** | **F-5.2** | Telemetry Drop & Sensor Freezing Watchdog | *(Auto)* | Planned | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py) |
+| **Tier 5 (Safety)** | **F-5.3** | Corridor Speed Limit Exceedance & Slow-Order Alerts | *(Auto)* | Planned | [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
+| **Tier 6 (Commuter)** | **F-6.1** | CLI Station Departure & Arrival Boards | `railmon departures` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
+| **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/db.py`](../../storage/db.py) |
+| **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py) |
+| **Tier 8 (DevOps)** | **F-8.3** | GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter | `railmon export --gtfs-rt` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py) |
+| **Tier 9 (Analytics)** | **F-9.1** | Corridor Bottleneck & Station Dwell Delay Heatmaps | `railmon history bottlenecks` | Planned | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
+| **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* | Planned | [`storage/repository.py`](../../storage/repository.py), [`tui/renderer.py`](../../tui/renderer.py) |
 
 ---
 
@@ -524,7 +539,349 @@ sequenceDiagram
 
 ---
 
-## 7. Consolidated Controls Reference
+## 7. Tier 5: Safety, Dispatch & Anomaly Watchdogs
+
+Operational rail safety and anomaly detection provide automated surveillance over active trains, identifying dangerous network conditions, track conflicts, and sensor dropouts in real time.
+
+---
+
+### F-5.1: Corridor Headway & Opposing Train Conflict Watchdog — *Planned*
+
+#### Overview
+On the Greek rail network, sections of single-track infrastructure (such as portions of the Peloponnese network, regional spurs, and ongoing maintenance single-line operations on the PATHE corridor) require strict block occupancy. This feature introduces an automated headway and collision vector evaluation engine in [`tui/state.py`](../../tui/state.py) that continuously evaluates spatial distance and course vectors between trains on shared corridors.
+
+#### Conflict Classification
+1. **Head-on / Opposing Collision Risk (`CRITICAL`):**
+   Two trains assigned to the same corridor or track edge (`railwayId`) moving with reciprocal headings ($\Delta\theta \approx 180^\circ \pm 35^\circ$) whose projected distance $D < 10.0\text{ km}$ and closing velocity $V_{\text{close}} > 0$.
+2. **Headway Violation (`WARNING`):**
+   Two trains traveling in the same direction on the same corridor where spatial separation $D < 2.5\text{ km}$ (exceeding standard service braking curve limits).
+
+#### Visual & Audio Alerts
+- Status bar displays flashing alert: `[⚠ CONFLICT: IC52 <-> IC59 on PATHE (3.4km)]` (or `[! CONFLICT ...]` in `--ascii` mode).
+- Optional audible terminal bell (`\a`) fired once per conflict state transition.
+- Inspector pane displays a highlighted `CONFLICT WARNING` card with relative speed and distance.
+
+#### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as StreamWorker (tui/stream_worker.py)
+    participant S as TrainStateStore (tui/state.py)
+    participant C as ConflictWatchdog (tui/safety.py)
+    participant R as TUIRenderer (tui/renderer.py)
+
+    W->>S: update_positions(batch)
+    S->>C: evaluate_conflicts(active_records)
+    C-->>S: List[ConflictAlert]
+    S-->>R: StateSnapshot(conflicts=[...])
+    R->>R: Render [⚠ CONFLICT] banner & audio bell
+```
+
+#### ASCII Architecture Diagram
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Safety Conflict Watchdog Pipeline                          |
++-----------------------------------------------------------------------------------+
+
+   Active Train Snapshot
+     [IC52: 39.21N, 22.45E, course: 350°]
+     [IC59: 39.24N, 22.46E, course: 170°]
+                    |
+                    v
+   +------------------------------------+
+   |     Corridor Spatial Partition     |
+   |      (Group by corridor/track)     |
+   +------------------------------------+
+                    |
+                    v
+   +------------------------------------+
+   |   Pairwise Kinematic Evaluation    |
+   |   - Haversine Distance: 3.4 km     |
+   |   - Relative Bearing: Opposing     |
+   |   - Closing Speed: 240 km/h        |
+   +------------------------------------+
+                    |
+                    v  Condition: D < 10km & Opposing
+   +------------------------------------+
+   |   Conflict Alert Event Generated   |
+   |   Severity: CRITICAL               |
+   |   Action: Terminal Bell + UI Flash |
+   +------------------------------------+
+```
+
+---
+
+### F-5.2: Telemetry Drop & Sensor Freezing Watchdog — *Planned*
+
+#### Overview
+Locomotives traversing remote mountain passes (e.g., Mount Othrys, Kallidromo tunnels) occasionally lose cellular backhaul or Starlink satellite tracking. This engine monitors telemetry update intervals and kinematic continuity to distinguish between normal stationary halts and frozen or lost sensor streams.
+
+#### Sensor Health Tiers
+- **Normal Motion:** Updated $\le 30\text{s}$ ago, position actively advancing.
+- **Station Dwell:** Speed $0\text{ km/h}$, position within $250\text{m}$ of a known station centroid.
+- **Sensor Freeze (`[FROZEN]`):** Speed $> 0\text{ km/h}$, but coordinates unchanged for $> 45\text{s}$.
+- **Telemetry Drop (`[DROPPED]`):** No telemetry packet received for $> 120\text{s}$ while train was in active transit.
+
+---
+
+### F-5.3: Corridor Speed Limit Exceedance & Slow-Order Alerts — *Planned*
+
+#### Overview
+Maps train instantaneous speeds against maximum design speeds and temporary speed restrictions (TSR) across Greek rail corridors:
+- Athens–Thessaloniki High-Speed Sections: $160\text{ km/h}$
+- Urban / Suburban Segments (SKC–SKA–Oinoi): $90\text{--}120\text{ km/h}$
+- Mountain Pass Branches: $60\text{--}80\text{ km/h}$
+
+When speed exceeds the corridor threshold by $\ge 10\text{ km/h}$, the telemetry inspector highlights the speed value in `PAIR_TRAIN_ALERT` with an `[OVERSPEED]` tag.
+
+---
+
+## 8. Tier 6: Commuter & Route Operational Tools
+
+These features transform `railmon` from an analytical tracking utility into a daily terminal tool for passengers, commuters, and station dispatchers.
+
+---
+
+### F-6.1: CLI Station Departure & Arrival Boards (`railmon departures`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-6-1-cli-station-departure-and-arrival-boards-plan.md`](../plans/features/f-6-1-cli-station-departure-and-arrival-boards-plan.md)
+
+#### Overview
+Direct command-line interface accessing `/api/public/stations/{id}/departures` and `/api/public/stations/{id}/arrivals` to view live station departure boards without launching the interactive TUI.
+
+#### CLI Syntax & Usage
+```bash
+# View upcoming departures from Athens Central Station
+railmon departures Athens
+
+# View upcoming arrivals at Thessaloniki with limit of 10
+railmon departures Thessaloniki --arrivals --limit 10
+
+# Filter for suburban Proastiakos services at SKA
+railmon departures SKA --type suburban
+```
+
+#### Tabular Terminal Output Mockup
+```text
+================================================================================
+STATION DEPARTURE BOARD: ATHENS CENTRAL (Σ.Σ. ΛΑΡΙΣΗΣ) [14:25:00]
+================================================================================
+TIME   TRAIN   TYPE   DESTINATION          PLATFORM   STATUS      DELAY
+--------------------------------------------------------------------------------
+14:32  IC52    IC     Thessaloniki         1          ON TIME      0m
+14:45  1597    PR     Chalkida             3          DELAYED     +8m
+15:05  2236    PR     Athens Airport       2          ON TIME      0m
+15:22  IC54    IC     Kalambaka            1          ON TIME      0m
+================================================================================
+```
+
+---
+
+### F-6.2: Train Timetable & Intermediate Stop Inspector (`i` / `I` / CLI) — *Planned*
+
+#### Overview
+Inspects the full scheduled itinerary of a train, showing intermediate stations, planned versus actual arrival/departure times, scheduled dwell durations, and platform tracks.
+
+#### TUI & CLI Integration
+- **In-TUI:** Pressing `i` on any selected train opens an interactive scrollable modal window displaying the full stop timetable retrieved from `/api/public/train-schedules/by-train-number/{trainNumber}`.
+- **CLI Subcommand:** `railmon schedule 1597` outputs the timetable to stdout.
+
+#### Timetable Inspection Modal Mockup
+```text
++----------------------------------------------------------------------------+
+| TIMETABLE & ITINERARY: TRAIN 1597 (Athens -> Chalkida)                     |
++----------------------------------------------------------------------------+
+| STATION             SCHED ARR  ACTUAL ARR  SCHED DEP  ACTUAL DEP  PLAT  DLY |
+| Athens (Larissa)    --:--      --:--       14:28      14:36       3     +8m |
+| Agioi Anargyroi     14:34      14:42       14:35      14:43       2     +8m |
+| SKA Hub             14:41      14:50       14:42      14:51       4     +9m |
+| Acharnes            14:46      --:--       14:47      --:--       1     --- |
+| Oinoi               15:15      --:--       15:17      --:--       2     --- |
+| Chalkida            15:42      --:--       --:--      --:--       1     --- |
++----------------------------------------------------------------------------+
+| [Esc / i] Close Itinerary Modal    [▲ / ▼] Scroll Stops                    |
++----------------------------------------------------------------------------+
+```
+
+---
+
+### F-6.3: Proximity & Delay Push Alerting Engine (`railmon watch`) — *Planned*
+
+#### Overview
+A background terminal watchdog daemon that monitors a specific train trip or passenger journey and issues desktop notifications or webhook dispatches based on user-defined triggers:
+- Train departure confirmed.
+- Delay increases by more than $\Delta t$ minutes.
+- Train crosses within $R\text{ km}$ or $M\text{ minutes}$ of the user's destination station.
+
+#### Architecture
+```text
++-------------------------------------+
+|        railmon watch IC52           |
+|  --notify 15m --dest Thessaloniki   |
++-------------------------------------+
+                   |
+                   v
++-------------------------------------+
+|      Live Telemetry Monitor         |
+|  - Tracks IC52 progress & ETA       |
++-------------------------------------+
+                   |
+                   +---> Desktop Notification (notify-send / Windows Toast)
+                   +---> Terminal Bell (\a)
+                   +---> Webhook POST (Telegram / Discord / Slack)
+```
+
+---
+
+## 9. Tier 7: TUI Visual Enhancements & Infrastructure GIS
+
+Enhances spatial realism, infrastructure rendering, and visual ergonomics across terminal environments.
+
+---
+
+### F-7.1: Live Locomotive Forward Cab Video Stream Launcher (`w` / `W`) — *Planned*
+
+#### Overview
+Hellenic Railways operates forward-facing locomotive cameras on several modern trainsets, streaming via HLS at `/api/public/trains/{id}/stream`.
+Pressing `w` resolves the HLS `.m3u8` playlist URL for the currently selected train and launches an external lightweight video player (`mpv`, `ffplay`, or system browser) in a detached subprocess without interrupting TUI rendering.
+
+#### Subprocess Launch Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Operator
+    participant App as TUIApp (tui/app.py)
+    participant Client as RailwayGovClient (train_tracker.py)
+    participant MPV as mpv / ffplay Subprocess
+
+    U->>App: Press 'w' (Watch Cab View)
+    App->>Client: get_cab_stream_url(train_id)
+    Client-->>App: { streamType: "hls", playlistUrl: "..." }
+    App->>MPV: subprocess.Popen(["mpv", "--title=railmon: IC52", url])
+    App->>App: Show status bar toast: "[✓ Launched Cab Stream (mpv)]"
+```
+
+---
+
+### F-7.2: Infrastructure GIS Layers: Tunnels, Bridges & Signals (`g` / `G`) — *Planned*
+
+#### Overview
+Ingests infrastructure GeoJSON features from `/api/msd/geo?types=tunnel,bridge,signal` and overlays them onto the Braille canvas:
+- **Tunnels:** Rendered as shaded portal markers (`∩` / `[ ]`) showing mountain crossings (Callidromon, Platamonas, Tempi). When a train's coordinates fall inside a tunnel bounding polyline, an indicator `[TUNNEL]` appears in the inspector.
+- **Bridges / Viaducts:** Highlighted bridge markers (`═` / `∏`).
+- **Key Interlocking Signals:** Rendered at corridor junctions.
+- **Keybinding:** `g` / `G` cycles infrastructure overlay (`All` → `Tunnels & Bridges` → `Off`).
+
+---
+
+### F-7.3: Custom Terminal Color Theme Profiles (`F10` / `K`) — *Planned*
+
+#### Overview
+Adds switchable 16-color and 256-color palette presets in [`tui/renderer.py`](../../tui/renderer.py) to accommodate different terminal emulator backgrounds:
+1. **Hellenic Azure (Default):** Deep blue branding, bright cyan tracks, golden train glyphs.
+2. **Retro Amber CRT Phosphor:** Warm monochrome amber on black styling.
+3. **Matrix Green:** High-contrast phosphor green for night monitoring.
+4. **Solarized Dark:** Standard low-fatigue palette for terminal developers.
+5. **High-Contrast Monochrome:** Pure black-and-white for minimal/e-ink consoles.
+
+---
+
+### F-7.4: Dual Split-Screen Multi-Train Follow Viewport (`D`) — *Planned*
+
+#### Overview
+Enables split-screen viewport rendering where two opposing or interacting trains (e.g., `IC52` northbound and `IC53` southbound) are centered in dual sub-viewports simultaneously, tracking their convergence and crossing maneuvers in real time.
+
+---
+
+## 10. Tier 8: Integrations, Web Services & Observability
+
+Expands `railmon` into multi-user operations, third-party transit apps, and enterprise observability stacks.
+
+---
+
+### F-8.1: Embedded Zero-Dependency Web Map Daemon (`railmon serve`) — *Planned*
+
+#### Overview
+A lightweight headless service utilizing Python's built-in `http.server` and socket library to serve a responsive browser GIS dashboard on `http://localhost:8080`.
+- Serves an embedded Leaflet / MapLibre single-page web app with OpenStreetMap / CartoDB tiles.
+- Pushes live train positions and track geometry via WebSockets or Server-Sent Events (SSE).
+- Requires zero third-party dependencies (`pip install` not required).
+
+---
+
+### F-8.2: Prometheus & OpenMetrics Operational Exporter (`railmon metrics`) — *Planned*
+
+#### Overview
+Exposes an HTTP `/metrics` endpoint on port `9100` conforming to OpenMetrics and Prometheus standards for monitoring Greek rail operations in Grafana.
+
+#### Metrics Schema
+```text
+# HELP railmon_active_trains Total number of currently active trains
+# TYPE railmon_active_trains gauge
+railmon_active_trains{corridor="PATHE"} 6
+railmon_active_trains{corridor="PROASTIAKOS"} 8
+
+# HELP railmon_train_delay_minutes Current delay in minutes
+# TYPE railmon_train_delay_minutes gauge
+railmon_train_delay_minutes{train_number="IC52",type="IC"} 0
+railmon_train_delay_minutes{train_number="1597",type="PR"} 8
+
+# HELP railmon_train_speed_kmh Instantaneous train speed in km/h
+# TYPE railmon_train_speed_kmh gauge
+railmon_train_speed_kmh{train_number="IC52"} 142.0
+
+# HELP railmon_db_records_total Historical telemetry rows stored
+# TYPE railmon_db_records_total counter
+railmon_db_records_total 128450
+```
+
+---
+
+### F-8.3: GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter — *Planned*
+
+#### Overview
+Translates live `railway.gov.gr` train positions and delay packets into the standard **General Transit Feed Specification Realtime (GTFS-RT)** format (`FeedMessage` with `VehiclePositions` and `TripUpdates`). Allows third-party transit apps (Transit App, OpenTripPlanner, Google Maps) to consume real-time Greek rail telemetry directly.
+
+---
+
+## 11. Tier 9: Historical Analytics & Predictive Engine
+
+Leverages the embedded SQLite WAL database for deep operational analytics and machine-learning-assisted delay prediction.
+
+---
+
+### F-9.1: Corridor Bottleneck & Station Dwell Delay Heatmaps (`railmon history bottlenecks`) — *Planned*
+
+#### Overview
+Analyzes recorded telemetry to compute cumulative delay deltas per track block and station dwell. Outputs terminal ASCII heatmaps identifying infrastructure bottlenecks:
+```text
+================================================================================
+CORRIDOR BOTTLENECK ANALYSIS: ATHENS - THESSALONIKI (Last 30 Days)
+================================================================================
+SEGMENT / STATION         AVG DWELL   MEDIAN DELAY   MAX DELAY   BOTTLENECK INDEX
+--------------------------------------------------------------------------------
+Larissa Station           4m 12s      +7.4m          +42m        ██████████ (HIGH)
+Lianokladi Station        3m 45s      +4.1m          +28m        ██████ (MED)
+Domokos Pass              0m 00s      +3.8m          +35m        █████ (MED)
+Oinoi Junction            2m 10s      +1.2m          +14m        ██ (LOW)
+Platy Junction            1m 50s      +0.8m          +11m        █ (LOW)
+================================================================================
+```
+
+---
+
+### F-9.2: Empirical Segment Transit Time & ETA Engine — *Planned*
+
+#### Overview
+Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical segment transit durations compiled from historical runs. If a train is halted at Lianokladi with a red signal, the engine does not report `ETA: 0 min` or infinite time, but instead applies the historical 90th-percentile transit time across the Lianokladi–Domokos mountain section.
+
+---
+
+## 12. Consolidated Controls & CLI Reference
+
+### A. Interactive TUI Keybindings
 
 | Key | Mode | Action | Status |
 | :--- | :--- | :--- | :--- |
@@ -547,45 +904,74 @@ sequenceDiagram
 | **`e` / `E`** | **Normal** | **Export selected train trajectory to GeoJSON (`e`) / CSV (`E`) file** | **Implemented (Tier 4)** |
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Implemented (Tier 4)** |
 | **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Implemented (Tier 4)** |
+| **`i` / `I`** | **Normal** | **Open Train Timetable & Intermediate Stop Itinerary modal** | **Planned (Tier 6)** |
+| **`w` / `W`** | **Normal** | **Launch forward cab video stream in external media player (`mpv`)** | **Planned (Tier 7)** |
+| **`g` / `G`** | **Normal** | **Cycle infrastructure GIS layer (`All` → `Tunnels/Bridges` → `Off`)** | **Planned (Tier 7)** |
+| **`F10` / `K`** | **Normal** | **Cycle terminal color themes (Azure, Amber, Green, Solarized)** | **Planned (Tier 7)** |
+| **`D`** | **Normal** | **Toggle dual split-screen multi-train follow view** | **Planned (Tier 7)** |
 
 ---
 
-## 8. Phased Implementation & Verification Plan
+### B. Command-Line Interface (CLI) Commands
+
+| Command | Tier | Description |
+| :--- | :--- | :--- |
+| `railmon --tui` | Tier 0 | Launch interactive terminal map dashboard |
+| `railmon --tui --record` | Tier 4 | Launch TUI with concurrent SQLite telemetry recording |
+| `railmon --tui --replay <db>` | Tier 4 | Launch TUI historical DVR replay and timeline scrubber |
+| `railmon departures <station>` | **Tier 6** | Query upcoming departures and arrivals for a station |
+| `railmon schedule <train_num>` | **Tier 6** | Display full timetable stop itinerary for a train |
+| `railmon watch <train_num>` | **Tier 6** | Background watcher firing notifications on delay or proximity |
+| `railmon serve [--port 8080]` | **Tier 8** | Start zero-dependency local web map and SSE server |
+| `railmon metrics [--port 9100]` | **Tier 8** | Expose operational Prometheus / OpenMetrics endpoint |
+| `railmon history bottlenecks` | **Tier 9** | Output corridor dwell and delay bottleneck analysis |
+
+---
+
+## 13. Phased Implementation & Verification Plan
 
 ### Phase 1: Tier 1 Parity (`s` Sorting & `b` Breadcrumb Modes) — *Completed*
-1. **State & Comparators ([`tui/state.py`](../../tui/state.py#L40-L53)):**
-   - Added [`RosterSortMode`](../../tui/state.py#L40) (`TRAIN_ID`, `SPEED`, `DELAY`) and [`BreadcrumbMode`](../../tui/state.py#L48) (`ALL`, `SELECTED`, `OFF`) enums, plus `_natural_sort_key`, `_speed_sort_key`, and `_delay_sort_key` comparators ([`tui/state.py`](../../tui/state.py#L225-L244)).
-   - Added `sort_mode` and `breadcrumb_mode` fields to [`StateSnapshot`](../../tui/state.py#L128-L129) and implemented thread-safe `set_sort_mode`, `cycle_sort_mode`, `set_breadcrumb_mode`, and `cycle_breadcrumb_mode` on [`TrainStateStore`](../../tui/state.py#L485-L527).
-2. **Controller & Presentation ([`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py)):**
-   - Wired `s`/`S` (`TUIApp.cycle_sort`) and `b`/`B` (`TUIApp.cycle_breadcrumbs`) in [`TUIApp._handle_normal_input`](../../tui/app.py#L449-L455).
-   - Updated [`TUIRenderer.render_roster`](../../tui/renderer.py#L888-L895) to show `TRAIN▲`/`SPD▼`/`DLY▼` (and ASCII `TRAIN^`/`SPDv`/`DLYv`), [`TUIRenderer.render_map`](../../tui/renderer.py#L716-L771) to filter breadcrumb overlays and show `| Trails: ALL | SEL | OFF`, and updated the status bar and help modal ([`tui/renderer.py`](../../tui/renderer.py#L1093-L1169)).
-3. **Unit & Integration Test Suite:**
-   - Verified sort stability, natural ID tie-breaking, selection preservation across sort changes, keyboard mode isolation (`NORMAL` vs. `SEARCH`), and UTF-8/ASCII breadcrumb rendering in [`tests/test_tui_state.py`](../../tests/test_tui_state.py#L344-L442), [`tests/test_tui_controls.py`](../../tests/test_tui_controls.py#L697-L740), and [`tests/test_tui_renderer.py`](../../tests/test_tui_renderer.py#L954-L1084).
+- Added [`RosterSortMode`](../../tui/state.py#L40) and [`BreadcrumbMode`](../../tui/state.py#L48) enums and deterministic comparators in [`tui/state.py`](../../tui/state.py).
+- Wired `s`/`S` and `b`/`B` controls in [`tui/app.py`](../../tui/app.py) and [`tui/renderer.py`](../../tui/renderer.py).
+- Verified via unit test suites in [`tests/test_tui_state.py`](../../tests/test_tui_state.py), [`tests/test_tui_controls.py`](../../tests/test_tui_controls.py), and [`tests/test_tui_renderer.py`](../../tests/test_tui_renderer.py).
 
-### Phase 2: Tier 2 Inspector Analytics (Sparklines, Telemetry Age, Distance & ETA)
-
-#### A. F-2.1: Live Speed Sparkline & Telemetry Age Indicator — *Completed*
-1. **State Store & Velocity Tracking ([`tui/state.py`](../../tui/state.py)):**
-   - Added [`TrainRecord.get_speed_history`](../../tui/state.py#L106-L125) extracting chronological velocity samples from historical trail breadcrumbs and instantaneous position speed with non-negative clamping and `None` protection.
-   - Added defensive `float(pos.speed) if pos.speed is not None else 0.0` sanitization in [`append_breadcrumb`](../../tui/state.py#L88) and [`update_positions`](../../tui/state.py#L331).
-2. **Renderer Helpers & Inspector Integration ([`tui/renderer.py`](../../tui/renderer.py)):**
-   - Added `SPARKLINE_BARS_UTF8` / `SPARKLINE_BARS_ASCII` 8-level glyph sets and `TREND_*` arrows.
-   - Implemented [`format_speed_sparkline`](../../tui/renderer.py#L446-L495) with $V_{\max} = \max(160.0, \max(\text{speeds}))\text{ km/h}$ dynamic ceiling and kinematic trend detection.
-   - Implemented [`format_telemetry_age`](../../tui/renderer.py#L497-L536) with multi-tier alerts (`PAIR_DEFAULT` $\le 30$s, `PAIR_TRAIN_WARN` $31\text{--}120$s, `PAIR_TRAIN_ALERT` with `[STALE]` $> 120$s) and compact width formatting for 32-column sidebars.
-   - Reordered Inspector `rows` in [`render_inspector`](../../tui/renderer.py#L1120-L1145) to prioritize critical telemetry for standard $80 \times 24$ consoles (`inner_h = 9`).
-3. **Unit & Integration Test Suite:**
-   - Verified speed history extraction in [`tests/test_tui_state.py`](../../tests/test_tui_state.py#L795-L824).
-   - Verified sparkline glyphs, trend arrows, dynamic ceiling scaling, pure ASCII mode, age alert formatting, and curses inspector window attributes in [`tests/test_tui_renderer.py`](../../tests/test_tui_renderer.py#L301-L380).
-
-#### B. F-2.2: WGS84 Coordinate Readout, Next-Station Distance & ETA — *Completed*
-1. Added [`haversine_distance_km`](../../tui/geo.py#L121-L143) to [`tui/geo.py`](../../tui/geo.py).
-2. Added diacritic-insensitive station lookup index ([`normalize_station_key`](../../tui/renderer.py#L549-L565), [`_build_station_index`](../../tui/renderer.py#L568-L601), [`TUIRenderer.resolve_station`](../../tui/renderer.py#L728-L741)), [`format_next_station_eta`](../../tui/renderer.py#L604-L651), and [`format_wgs84_coords`](../../tui/renderer.py#L654-L683) to [`tui/renderer.py`](../../tui/renderer.py).
-3. Verified Haversine distances, station resolution, coordinate formatting, and ETA calculations via [`tests/test_tui_geo.py`](../../tests/test_tui_geo.py) and [`tests/test_tui_renderer.py`](../../tests/test_tui_renderer.py).
+### Phase 2: Tier 2 Inspector Analytics (Sparklines, Telemetry Age, Distance & ETA) — *Completed*
+- Implemented [`format_speed_sparkline`](../../tui/renderer.py#L446-L495) with dynamic ceiling and velocity history tracking in [`tui/state.py`](../../tui/state.py).
+- Implemented [`format_telemetry_age`](../../tui/renderer.py#L497-L536) and next-station Haversine distance and ETA calculations in [`tui/geo.py`](../../tui/geo.py) and [`tui/renderer.py`](../../tui/renderer.py).
 
 ### Phase 3: Tier 3 Interactive Map & Mouse Support — *Completed*
-1. Enabled `curses.mousemask` and coordinate hit-testing in [`tui/app.py`](../../tui/app.py) (`F-3.1`).
-2. Added dynamic scale bar calculation (`F-3.4`), station label mode `v` & corridor track colors `t` (`F-3.3`), and station proximity board `m` (`F-3.2`) in [`tui/renderer.py`](../../tui/renderer.py) and [`tui/geo.py`](../../tui/geo.py).
+- Added mouse click-to-select and scroll-wheel zoom support (`F-3.1`) in [`tui/app.py`](../../tui/app.py).
+- Added dynamic conformal scale bar (`F-3.4`), station labels mode (`F-3.3`), corridor track colors, and station departure board mode (`F-3.2`) in [`tui/renderer.py`](../../tui/renderer.py).
 
 ### Phase 4: Tier 4 Storage Export & Historical Replay — *Completed*
-1. **F-4.1 (*Completed*):** Wired `e` (GeoJSON) and `E` (CSV) in [`tui/app.py`](../../tui/app.py) to export dual-source trajectory snapshots (SQLite [`HistoricalRepository`](../../storage/repository.py) when `--record` is active, or in-memory [`TrainRecord.trail`](../../tui/state.py) via [`export_in_memory_geojson`](../../storage/repository.py) / [`export_in_memory_csv`](../../storage/repository.py)) with 4-second status bar toast notifications in [`tui/renderer.py`](../../tui/renderer.py).
-2. **F-4.2 (*Completed*):** Implemented [`ReplayWorker`](../../tui/stream_worker.py) virtual clock DVR engine, [`HistoricalRepository`](../../storage/repository.py) indexed time-window and point-in-time seek reconstruction queries (`get_replay_bounds`, `get_replay_observations`, `get_replay_snapshot_at`), `--replay <db>` and `--replay-speed` CLI options in [`train_tracker.py`](../../train_tracker.py), and interactive timeline scrubbing (`[` / `]`) and speed multiplier (`<` / `>`) controls in [`tui/app.py`](../../tui/app.py) and [`tui/renderer.py`](../../tui/renderer.py).
+- Added instant trajectory snapshot export (`e`/`E`) generating GeoJSON and CSV files directly from in-memory or SQLite records in [`storage/repository.py`](../../storage/repository.py).
+- Implemented SQLite DVR replay engine (`ReplayWorker`), timeline scrubbing (`[`/`]`), and speed multiplier (`<`/`>`) in [`tui/stream_worker.py`](../../tui/stream_worker.py) and [`tui/app.py`](../../tui/app.py).
+
+### Phase 5: Tier 5 Safety & Anomaly Watchdogs — *Planned*
+1. **Safety Engine Module ([`tui/safety.py`](../../tui/safety.py)):**
+   - Implement `evaluate_conflicts(active_records: List[TrainRecord]) -> List[ConflictAlert]` testing pairwise Haversine distances, corridor IDs, and heading convergence.
+   - Implement `evaluate_telemetry_drops(active_records: List[TrainRecord]) -> List[SensorAnomaly]`.
+2. **State Store & Presentation Integration:**
+   - Store active conflicts on [`StateSnapshot`](../../tui/state.py).
+   - Render flashing status alerts and optional terminal bell in [`TUIRenderer.render_status_bar`](../../tui/renderer.py).
+3. **Automated Verification:**
+   - Unit tests covering opposing vectors, same-direction safe spacing, stationary false positives, and audio bell rate-limiting.
+
+### Phase 6: Tier 6 Commuter & Route Services (F-6.1 Completed, F-6.2–F-6.3 Planned)
+1. **F-6.1 (*Completed*):** Added `departures` subparser in [`train_tracker.py`](../../train_tracker.py), multi-key diacritic-insensitive station resolution and suggestion engine in [`tui/mock_engine.py`](../../tui/mock_engine.py), responsive UTF-8 / ASCII tabular formatter in [`storage/cli_formatters.py`](../../storage/cli_formatters.py), offline `--demo` timetable synthesis, and automated test suite in [`tests/test_cli_departures.py`](../../tests/test_cli_departures.py).
+2. **F-6.2 (*Planned*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>`.
+3. **F-6.3 (*Planned*):** Implement `railmon watch <train_num>` background proximity and delay notification engine.
+
+### Phase 7: Tier 7 Visual Enhancements & GIS Layers — *Planned*
+1. Ingest tunnel and bridge GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`.
+2. Implement color palette switcher in [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`).
+3. Add cab stream launcher subprocess execution in [`tui/app.py`](../../tui/app.py) (`w`/`W`).
+
+### Phase 8: Tier 8 Integrations & DevOps — *Planned*
+1. Implement zero-dependency HTTP server in [`train_tracker.py`](../../train_tracker.py) for `railmon serve`.
+2. Implement Prometheus text-format exporter for `railmon metrics`.
+3. Build GTFS-RT feed generator.
+
+### Phase 9: Tier 9 Historical Analytics & Predictive Engine — *Planned*
+1. Add bottleneck and dwell analytical SQL queries in [`storage/repository.py`](../../storage/repository.py).
+2. Wire empirical transit duration matrix for enhanced ETA predictions.

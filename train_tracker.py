@@ -806,6 +806,8 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   railmon --tui                       # Launch live interactive terminal map
   railmon --tui --record              # Launch live terminal map and record to SQLite
+  railmon departures Athens           # View live departures for Athens Central
+  railmon departures SKA --arrivals   # View live arrivals at SKA Hub
   railmon record                      # Run headless telemetry recording daemon
   railmon record --demo               # Headless recording of synthetic demo feed
   railmon history trips               # Inspect recorded train trips in database
@@ -933,6 +935,56 @@ Examples:
     subparsers.add_parser(
         "schedules",
         help="Fetch and display today's upcoming train timetables.",
+    )
+
+    # 3. departures
+    p_dep = subparsers.add_parser(
+        "departures",
+        help="Query live station departure and arrival boards.",
+        description="Fetch and display upcoming departures or arrivals for any Greek railway station.",
+    )
+    p_dep.add_argument(
+        "station",
+        type=str,
+        help="Station name, Latin alias, numerical code, or 3-letter ID (e.g. 'Athens', 'Αθήνα', 'SKA', '1001').",
+    )
+    p_dep.add_argument(
+        "-a",
+        "--arrivals",
+        action="store_true",
+        help="Display upcoming station arrivals instead of departures.",
+    )
+    p_dep.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        default=15,
+        help="Maximum number of train movements to display (default: 15, range: 1-50).",
+    )
+    p_dep.add_argument(
+        "-t",
+        "--type",
+        type=str,
+        default="all",
+        choices=["all", "intercity", "suburban", "regional", "freight"],
+        help="Filter departures by service type (default: 'all').",
+    )
+    p_dep.add_argument(
+        "--json",
+        action="store_true",
+        help="Output structured JSON to stdout instead of tabular text.",
+    )
+    p_dep.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Run in offline mock mode with synthetic station timetables.",
+    )
+    p_dep.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
     )
 
     # Shared parser for subparsers accepting --db
@@ -1768,6 +1820,95 @@ def run_schedules_mode() -> int:
     return 0
 
 
+def run_departures_mode(args: argparse.Namespace) -> int:
+    """Fetch and display station departure or arrival board.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on failure).
+    """
+    from storage.cli_formatters import format_station_board_table
+    from tui.mock_engine import (
+        generate_mock_station_board,
+        load_stations,
+        resolve_station_for_cli,
+    )
+
+    query = getattr(args, "station", "")
+    stations = load_stations()
+    station_node, suggestions = resolve_station_for_cli(query, stations)
+
+    if station_node is None:
+        print(f"[Error] Station not found: '{query}'", file=sys.stderr)
+        if suggestions:
+            print("Did you mean:", file=sys.stderr)
+            for sugg in suggestions:
+                print(f"  • {sugg}", file=sys.stderr)
+        return 1
+
+    is_arrivals = bool(getattr(args, "arrivals", False))
+    limit = max(1, min(50, int(getattr(args, "limit", 15))))
+    service_type = str(getattr(args, "type", "all")).strip().lower()
+    is_demo = bool(getattr(args, "demo", False))
+    is_json = bool(getattr(args, "json", False))
+    is_ascii = bool(getattr(args, "ascii", False))
+
+    if is_demo:
+        records = generate_mock_station_board(station_node, is_arrivals=is_arrivals, limit=limit)
+        data_source = "synthetic simulation (--demo)"
+    else:
+        client = RailwayGovClient()
+        try:
+            if is_arrivals:
+                records = client.get_station_arrivals(station_node.id, limit=limit)
+            else:
+                records = client.get_station_departures(station_node.id, limit=limit)
+        except (RailwayAPIError, urllib.error.URLError, TimeoutError, OSError) as err:
+            print(f"[Error] Failed to fetch station timetable: {err}", file=sys.stderr)
+            return 1
+        data_source = "railway.gov.gr"
+
+    if service_type != "all":
+        records = [
+            r
+            for r in records
+            if service_type in str(r.get("serviceType") or r.get("service_type") or "").strip().lower()
+        ]
+
+    if is_json:
+        payload = {
+            "station": {
+                "id": station_node.id,
+                "code": station_node.code,
+                "name_el": station_node.name_el,
+                "name_en": station_node.name_en,
+                "corridor": station_node.corridor,
+                "lat": station_node.point.lat,
+                "lng": station_node.point.lng,
+            },
+            "mode": "arrivals" if is_arrivals else "departures",
+            "query": query,
+            "count": len(records),
+            "records": records,
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=is_ascii))
+        return 0
+
+    now_str = datetime.now().strftime("%H:%M:%S")
+    table_str = format_station_board_table(
+        station=station_node,
+        records=records,
+        is_arrivals=is_arrivals,
+        is_ascii=is_ascii,
+        data_source=data_source,
+        timestamp_str=now_str,
+    )
+    print(table_str)
+    return 0
+
+
 def _configure_win32_utf8_console() -> None:
     """Configure Windows console codepage and standard streams for UTF-8 output."""
     if sys.platform != "win32":
@@ -1832,6 +1973,9 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode == "departures":
+        return run_departures_mode(args)
+
     if args.mode == "schedules":
         ret = run_schedules_mode()
         return ret if isinstance(ret, int) else 0

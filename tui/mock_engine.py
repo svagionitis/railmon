@@ -6,16 +6,18 @@ and a multi-train simulation engine generating continuous TrainPosition telemetr
 """
 
 import bisect
+import difflib
 import json
 import math
 import random
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple
 
 from train_tracker import TrainPosition
 from tui.geo import GeoPoint
@@ -341,6 +343,307 @@ def load_stations(path: Optional[str] = None) -> Dict[str, StationNode]:
         stations[st.id] = st
 
     return stations
+
+
+def normalize_station_key(name: str) -> str:
+    """Normalize a station identifier or Greek/Latin name for diacritic-insensitive lookup.
+
+    Strips Unicode combining accents/tonos (NFD category 'Mn'), converts to lowercase,
+    and collapses surrounding whitespace.
+
+    Args:
+        name: Raw station name, code, or identifier.
+
+    Returns:
+        Normalized lookup key string.
+    """
+    if not name:
+        return ""
+    decomposed = unicodedata.normalize("NFD", name.strip())
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return unicodedata.normalize("NFC", stripped).casefold().strip()
+
+
+def build_station_index(stations: Sequence[StationNode]) -> Dict[str, StationNode]:
+    """Build a multi-key lookup dictionary mapping Greek, English, ID, and alias keys to StationNode.
+
+    Args:
+        stations: Sequence of StationNode objects.
+
+    Returns:
+        Dictionary mapping normalized keys to their corresponding StationNode.
+    """
+    index: Dict[str, StationNode] = {}
+    for stn in stations:
+        candidates: List[str] = [stn.id, stn.code, stn.name_el, stn.name_en]
+        for raw_name in (stn.name_el, stn.name_en):
+            if "(" in raw_name:
+                base = raw_name.split("(", 1)[0].strip()
+                if base:
+                    candidates.append(base)
+            if "-" in raw_name:
+                for part in raw_name.split("-"):
+                    part_clean = part.strip()
+                    if len(part_clean) >= 3:
+                        candidates.append(part_clean)
+
+        for candidate in candidates:
+            key = normalize_station_key(candidate)
+            if key and key not in index:
+                index[key] = stn
+
+        if stn.id.upper() == "AIA":
+            for alias in ("αεροδρομιο", "airport", "athens airport"):
+                if alias not in index:
+                    index[alias] = stn
+
+    return index
+
+
+def resolve_station_for_cli(
+    query: str,
+    stations: Optional[Dict[str, StationNode]] = None,
+) -> Tuple[Optional[StationNode], List[str]]:
+    """Resolve a user-provided station query to a canonical StationNode with suggestions on miss.
+
+    Resolution order:
+    1. Exact match in index (handles ID, code, normalized full Greek/English names, base names).
+    2. Prefix match across index keys (minimum 3 characters).
+    3. Substring match across Greek and Latin names.
+    4. Close matches via difflib as helpful suggestions.
+
+    Args:
+        query: User input query (Greek, Latin, ID, or code).
+        stations: Optional dictionary of station ID to StationNode. Loaded if None.
+
+    Returns:
+        Tuple of (matched_node, suggestions_list).
+    """
+    if not query or not query.strip():
+        return None, []
+
+    if stations is None:
+        stations = load_stations()
+
+    stn_list = list(stations.values())
+    index = build_station_index(stn_list)
+    norm_query = normalize_station_key(query)
+
+    # 1. Exact match in index
+    if norm_query in index:
+        return index[norm_query], []
+
+    # 2. Prefix match in index (minimum 3 characters)
+    if len(norm_query) >= 3:
+        for key, stn in index.items():
+            if key.startswith(norm_query):
+                return stn, []
+
+    # 3. Substring match across station English and Greek names
+    if len(norm_query) >= 3:
+        for stn in stn_list:
+            norm_en = normalize_station_key(stn.name_en)
+            norm_el = normalize_station_key(stn.name_el)
+            if norm_query in norm_en or norm_query in norm_el:
+                return stn, []
+
+    # 4. Generate suggestions if not matched
+    norm_to_display: Dict[str, str] = {}
+    for stn in stn_list:
+        display = f"{stn.name_en} [{stn.id}]"
+        norm_to_display[normalize_station_key(stn.name_en)] = display
+        norm_to_display[normalize_station_key(stn.name_el)] = f"{stn.name_el} / {stn.name_en} [{stn.id}]"
+        norm_to_display[stn.id.lower()] = display
+
+    close_keys = difflib.get_close_matches(norm_query, list(norm_to_display.keys()), n=5, cutoff=0.4)
+    suggestions: List[str] = []
+    for k in close_keys:
+        disp = norm_to_display[k]
+        if disp not in suggestions:
+            suggestions.append(disp)
+
+    # Fallback to hub stations if no close suggestions
+    if not suggestions:
+        suggestions = [f"{stn.name_en} [{stn.id}]" for stn in stn_list if stn.is_hub][:5]
+
+    return None, suggestions
+
+
+def generate_mock_station_board(
+    station: StationNode,
+    is_arrivals: bool = False,
+    limit: int = 15,
+) -> List[Dict[str, Any]]:
+    """Synthesize realistic scheduled departures or arrivals for offline demonstration.
+
+    Args:
+        station: Target StationNode.
+        is_arrivals: True for arrival board, False for departure board.
+        limit: Maximum records to return.
+
+    Returns:
+        List of departure/arrival dictionary records.
+    """
+    sid = station.id.upper()
+    now_hour = 14
+    now_min = 25
+
+    # Realistic timetable template definitions per station hub/corridor
+    templates: List[Dict[str, Any]] = []
+
+    if sid in ("ATH", "PIR", "SKA", "SKG", "LAR", "LIA", "DOM", "KAI", "PAL", "PLA"):
+        # Mainline PATHE stations
+        templates.extend([
+            {
+                "trainNumber": "IC52",
+                "serviceType": "Intercity",
+                "offset_min": 7,
+                "origin": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "destination": {"id": "SKG", "nameGreek": "Θεσσαλονίκη", "nameEnglish": "Thessaloniki"},
+                "platform": "1",
+                "delayMinutes": 0,
+                "status": "ON_TIME",
+            },
+            {
+                "trainNumber": "1597",
+                "serviceType": "Suburban",
+                "offset_min": 20,
+                "origin": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "destination": {"id": "CHA", "nameGreek": "Χαλκίδα", "nameEnglish": "Chalkida"},
+                "platform": "3",
+                "delayMinutes": 8,
+                "status": "DELAYED",
+            },
+            {
+                "trainNumber": "2236",
+                "serviceType": "Suburban",
+                "offset_min": 40,
+                "origin": {"id": "ANO", "nameGreek": "Άνω Λιόσια", "nameEnglish": "Ano Liosia"},
+                "destination": {"id": "AIA", "nameGreek": "Αεροδρόμιο", "nameEnglish": "Athens Airport"},
+                "platform": "2",
+                "delayMinutes": 0,
+                "status": "ON_TIME",
+            },
+            {
+                "trainNumber": "IC54",
+                "serviceType": "Intercity",
+                "offset_min": 57,
+                "origin": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "destination": {"id": "KAL", "nameGreek": "Καλαμπάκα", "nameEnglish": "Kalambaka"},
+                "platform": "1",
+                "delayMinutes": 0,
+                "status": "ON_TIME",
+            },
+            {
+                "trainNumber": "1314",
+                "serviceType": "Suburban",
+                "offset_min": 70,
+                "origin": {"id": "PIR", "nameGreek": "Πειραιάς", "nameEnglish": "Piraeus"},
+                "destination": {"id": "KIA", "nameGreek": "Κιάτο", "nameEnglish": "Kiato"},
+                "platform": "4",
+                "delayMinutes": 0,
+                "status": "ON_TIME",
+            },
+            {
+                "trainNumber": "IC56",
+                "serviceType": "Intercity",
+                "offset_min": 95,
+                "origin": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "destination": {"id": "SKG", "nameGreek": "Θεσσαλονίκη", "nameEnglish": "Thessaloniki"},
+                "platform": "1",
+                "delayMinutes": 0,
+                "status": "BOARDING",
+            },
+            {
+                "trainNumber": "2240",
+                "serviceType": "Suburban",
+                "offset_min": 110,
+                "origin": {"id": "PIR", "nameGreek": "Πειραιάς", "nameEnglish": "Piraeus"},
+                "destination": {"id": "AIA", "nameGreek": "Αεροδρόμιο", "nameEnglish": "Athens Airport"},
+                "platform": "2",
+                "delayMinutes": 2,
+                "status": "ON_TIME",
+            },
+            {
+                "trainNumber": "1599",
+                "serviceType": "Suburban",
+                "offset_min": 140,
+                "origin": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "destination": {"id": "CHA", "nameGreek": "Χαλκίδα", "nameEnglish": "Chalkida"},
+                "platform": "3",
+                "delayMinutes": 4,
+                "status": "DELAYED",
+            },
+        ])
+    else:
+        # Generic corridor stations
+        templates.extend([
+            {
+                "trainNumber": "1302",
+                "serviceType": "Regional",
+                "offset_min": 15,
+                "origin": {"id": station.id, "nameGreek": station.name_el, "nameEnglish": station.name_en},
+                "destination": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "platform": "1",
+                "delayMinutes": 0,
+                "status": "ON_TIME",
+            },
+            {
+                "trainNumber": "1305",
+                "serviceType": "Regional",
+                "offset_min": 45,
+                "origin": {"id": "ATH", "nameGreek": "Αθήνα", "nameEnglish": "Athens"},
+                "destination": {"id": station.id, "nameGreek": station.name_el, "nameEnglish": station.name_en},
+                "platform": "2",
+                "delayMinutes": 5,
+                "status": "DELAYED",
+            },
+            {
+                "trainNumber": "2308",
+                "serviceType": "Suburban",
+                "offset_min": 75,
+                "origin": {"id": station.id, "nameGreek": station.name_el, "nameEnglish": station.name_en},
+                "destination": {"id": "SKG", "nameGreek": "Θεσσαλονίκη", "nameEnglish": "Thessaloniki"},
+                "platform": "1",
+                "delayMinutes": 0,
+                "status": "ON_TIME",
+            },
+        ])
+
+    results: List[Dict[str, Any]] = []
+    for tmpl in templates[:limit]:
+        total_min = now_hour * 60 + now_min + tmpl["offset_min"]
+        sched_h = (total_min // 60) % 24
+        sched_m = total_min % 60
+        sched_str = f"{sched_h:02d}:{sched_m:02d}"
+
+        delay = tmpl["delayMinutes"]
+        est_min = total_min + delay
+        est_h = (est_min // 60) % 24
+        est_m = est_min % 60
+        est_str = f"{est_h:02d}:{est_m:02d}"
+
+        # If departures and origin == station, or if arrivals and destination == station, adapt appropriately
+        orig = tmpl["origin"]
+        dest = tmpl["destination"]
+        if is_arrivals and orig["id"] == station.id:
+            orig, dest = dest, orig
+        elif not is_arrivals and dest["id"] == station.id:
+            orig, dest = dest, orig
+
+        results.append({
+            "trainNumber": tmpl["trainNumber"],
+            "serviceType": tmpl["serviceType"],
+            "scheduledTime": sched_str,
+            "estimatedTime": est_str,
+            "origin": orig,
+            "destination": dest,
+            "platform": tmpl["platform"],
+            "delayMinutes": delay,
+            "status": tmpl["status"],
+        })
+
+    return results
 
 
 def load_tracks(path: Optional[str] = None) -> Dict[str, TrackPolyline]:
