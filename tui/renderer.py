@@ -1972,16 +1972,16 @@ class TUIRenderer:
         help_sections = [
             ("NAVIGATION & VIEWPORT", [
                 ("h/j/k/l, Arrows", "Pan viewport West / South / North / East"),
-                ("+ / =, - / _", "Zoom In / Zoom Out (0.2x to 25.0x)"),
+                ("+ / =, - / _, Wheel", "Zoom In / Zoom Out (0.2x to 25.0x)"),
                 ("0, 1, 2, 3", "Presets (0: Greece, 1: Suburban, 2: PATHE, 3: North)"),
                 ("v / V, t / T", "Cycle station labels / Toggle corridor track colors"),
             ]),
             ("TRAIN SELECTION & TRACKING", [
-                ("Tab, n / p", "Select Next / Previous train in active roster"),
+                ("Tab, n / p, Click", "Select Next / Previous or click train / station"),
                 ("s / S", "Cycle train roster sorting (Train ID, Speed, Delay)"),
                 ("b / B", "Cycle breadcrumb trails (All, Selected, Off)"),
                 ("m / M", "Cycle station departure board / Return to train view"),
-                ("f / F", "Toggle real-time auto-follow camera lock"),
+                ("f / F, Dbl-Click", "Toggle auto-follow camera lock (or recenter map)"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),
             ("SEARCH & SYSTEM CONTROLS", [

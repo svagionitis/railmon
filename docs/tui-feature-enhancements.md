@@ -16,7 +16,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 1 (Parity)** | **F-1.2** | Historical Breadcrumb Trail Mode Toggle (`All`, `Selected`, `Off`) | `b` / `B` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 2 (Inspector)** | **F-2.1** | Live Speed Sparkline & Telemetry Age Indicator | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/state.py`](../tui/state.py) |
 | **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
-| **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | **Implemented** | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / `M` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
@@ -349,7 +349,9 @@ While the map viewport title displays the camera center coordinates, the Selecte
 
 ---
 
-### F-3.1: Terminal Mouse Interaction (Click-to-Select & Scroll Zoom)
+### F-3.1: Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) — *Implemented*
+
+> **Detailed Implementation Plan:** [`docs/f-3-1-terminal-mouse-interaction-plan.md`](./f-3-1-terminal-mouse-interaction-plan.md)
 
 #### Overview
 Modern terminal emulators (Windows Terminal, iTerm2, Kitty, Alacritty, GNOME Terminal, xterm) report mouse clicks and wheel events through `curses.getmouse()`. Adding mouse support makes spatial exploration and train selection instantaneous while keeping keyboard navigation 100% functional.
@@ -537,6 +539,7 @@ sequenceDiagram
 | **`v` / `V`** | **Normal** | **Cycle station labels (`All` → `Hubs Only` → `Markers Only`)** | **Implemented (Tier 3)** |
 | **`t` / `T`** | **Normal** | **Toggle corridor-colored Braille track rendering** | **Implemented (Tier 3)** |
 | **`m` / `M`** | **Normal** | **Cycle Station Departure Board / Return to Train Telemetry** | **Implemented (Tier 3)** |
+| **Mouse Click / Wheel** | **Normal** | **Click-to-select train or station, double-click follow/recenter, wheel zoom/scroll** | **Implemented (Tier 3)** |
 | **`e`** | **Normal** | **Export selected train trajectory to GeoJSON file** | **Proposed (Tier 4)** |
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Proposed (Tier 4)** |
 | **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Proposed (Tier 4)** |
@@ -575,9 +578,9 @@ sequenceDiagram
 2. Added diacritic-insensitive station lookup index ([`normalize_station_key`](../tui/renderer.py#L549-L565), [`_build_station_index`](../tui/renderer.py#L568-L601), [`TUIRenderer.resolve_station`](../tui/renderer.py#L728-L741)), [`format_next_station_eta`](../tui/renderer.py#L604-L651), and [`format_wgs84_coords`](../tui/renderer.py#L654-L683) to [`tui/renderer.py`](../tui/renderer.py).
 3. Verified Haversine distances, station resolution, coordinate formatting, and ETA calculations via [`tests/test_tui_geo.py`](../tests/test_tui_geo.py) and [`tests/test_tui_renderer.py`](../tests/test_tui_renderer.py).
 
-### Phase 3: Tier 3 Interactive Map & Mouse Support
-1. Enable `curses.mousemask` and coordinate hit-testing in [`tui/app.py`](../tui/app.py).
-2. Add dynamic scale bar calculation, station label mode `v`, corridor track colors `t`, and station proximity board `m` in [`tui/renderer.py`](../tui/renderer.py).
+### Phase 3: Tier 3 Interactive Map & Mouse Support — *Completed*
+1. Enabled `curses.mousemask` and coordinate hit-testing in [`tui/app.py`](../tui/app.py) (`F-3.1`).
+2. Added dynamic scale bar calculation (`F-3.4`), station label mode `v` & corridor track colors `t` (`F-3.3`), and station proximity board `m` (`F-3.2`) in [`tui/renderer.py`](../tui/renderer.py) and [`tui/geo.py`](../tui/geo.py).
 
 ### Phase 4: Tier 4 Storage Export & Historical Replay
 1. Wire `e` in [`tui/app.py`](../tui/app.py) to export GeoJSON snapshots with status bar toast notifications.

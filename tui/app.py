@@ -20,6 +20,7 @@ logger = logging.getLogger("railmon." + __name__)
 
 from tui.geo import (
     BoundingBox,
+    BrailleCanvas,
     GREECE_PRESET,
     NORTHERN_GREECE_PRESET,
     PATHE_PRESET,
@@ -29,8 +30,21 @@ from tui.geo import (
     Viewport,
     haversine_distance_km,
 )
-from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_tracks
-from tui.renderer import HelpOverlay, PaneGeometry, PlaybackState, TUIRenderer
+from tui.mock_engine import (
+    StationNode,
+    TrackPolyline,
+    load_stations,
+    load_tracks,
+    snap_to_track_network,
+)
+from tui.renderer import (
+    HelpOverlay,
+    PaneGeometry,
+    PlaybackState,
+    TUIRenderer,
+    calculate_scroll_offset,
+    compute_station_board_entries,
+)
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
@@ -118,6 +132,21 @@ NUMPAD_CHAR_MAP: Dict[int, str] = {
     )
     if k is not None
 }
+
+# Platform-safe curses mouse event bitmasks
+MOUSE_LEFT_CLICK_MASK: int = (
+    getattr(curses, "BUTTON1_CLICKED", 0)
+    | getattr(curses, "BUTTON1_PRESSED", 0)
+)
+MOUSE_LEFT_DOUBLE_CLICK_MASK: int = getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0)
+MOUSE_SCROLL_UP_MASK: int = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(
+    curses, "BUTTON4_CLICKED", 0
+)
+# Note: Some older ncurses Python builds omit BUTTON5_PRESSED; 0x200000 is standard NCURSES_BUTTON_PRESSED(5)
+MOUSE_SCROLL_DOWN_MASK: int = (
+    getattr(curses, "BUTTON5_PRESSED", 0x200000)
+    | getattr(curses, "BUTTON5_CLICKED", 0)
+)
 
 
 class TUIApp:
@@ -214,6 +243,13 @@ class TUIApp:
         curses.noecho()  # Do not echo key inputs
         self.stdscr.keypad(True)  # Enable arrow & function keys
         self.stdscr.nodelay(True)  # Non-blocking getch()
+        try:
+            mouse_mask = getattr(curses, "ALL_MOUSE_EVENTS", 0) | getattr(
+                curses, "REPORT_MOUSE_POSITION", 0
+            )
+            curses.mousemask(mouse_mask)
+        except curses.error:
+            pass  # Gracefully degrade on terminals without mouse support
         self.renderer.init_colors()
 
     def rebuild_windows(self) -> None:
@@ -620,8 +656,273 @@ class TUIApp:
 
         return True
 
+    # ------------------------------------------------------------------
+    # Mouse Interaction & Spatial Hit-Testing (F-3.1)
+    # ------------------------------------------------------------------
+
+    def _build_hit_test_canvas(self, inner_w: int, inner_h: int) -> BrailleCanvas:
+        """Construct a BrailleCanvas with rasterized tracks for accurate cell hit-testing."""
+        canvas = BrailleCanvas(
+            width_cells=max(1, inner_w),
+            height_cells=max(1, inner_h),
+            ascii_mode=self.ascii_mode,
+        )
+        for track in self.tracks:
+            sub_points = [self.projector.geo_to_subpixel(pt) for pt in track.points]
+            canvas.draw_polyline(sub_points)
+        return canvas
+
+    def _hit_test_map_train(
+        self,
+        snapshot: StateSnapshot,
+        col: int,
+        row: int,
+        inner_w: int,
+        inner_h: int,
+        canvas: BrailleCanvas,
+    ) -> Optional[str]:
+        """Hit-test inner map cell (col, row) against projected trains (Manhattan radius <= 1)."""
+        click_px = col * 2 + 1
+        click_py = row * 4 + 2
+        best_match: Optional[Tuple[int, int, int, str]] = None
+
+        for idx, record in enumerate(snapshot.filtered_trains):
+            pos = record.position
+            raw_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
+            snapped_pt = snap_to_track_network(
+                raw_pt, self.tracks, corridor_hint=pos.corridor
+            )
+            t_col, t_row = self.projector.resolve_track_cell(snapped_pt, canvas)
+            if not (0 <= t_col < inner_w and 0 <= t_row < inner_h):
+                continue
+
+            d_manhattan = abs(t_col - col) + abs(t_row - row)
+            if d_manhattan <= 1:
+                t_px, t_py = self.projector.geo_to_subpixel(snapped_pt)
+                d_sub_sq = (t_px - click_px) ** 2 + (t_py - click_py) ** 2
+                candidate = (d_manhattan, d_sub_sq, idx, pos.id)
+                if best_match is None or candidate < best_match:
+                    best_match = candidate
+
+        return best_match[3] if best_match is not None else None
+
+    def _hit_test_map_station(
+        self,
+        col: int,
+        row: int,
+        inner_w: int,
+        inner_h: int,
+        canvas: BrailleCanvas,
+    ) -> Optional[str]:
+        """Hit-test inner map cell (col, row) against projected StationNode markers (Manhattan radius <= 1)."""
+        click_px = col * 2 + 1
+        click_py = row * 4 + 2
+        best_match: Optional[Tuple[int, bool, int, str]] = None
+
+        for stn in self.stations:
+            s_col, s_row = self.projector.resolve_track_cell(stn.point, canvas)
+            if not (0 <= s_col < inner_w and 0 <= s_row < inner_h):
+                continue
+
+            d_manhattan = abs(s_col - col) + abs(s_row - row)
+            if d_manhattan <= 1:
+                s_px, s_py = self.projector.geo_to_subpixel(stn.point)
+                d_sub_sq = (s_px - click_px) ** 2 + (s_py - click_py) ** 2
+                candidate = (d_manhattan, not stn.is_hub, d_sub_sq, stn.id)
+                if best_match is None or candidate < best_match:
+                    best_match = candidate
+
+        return best_match[3] if best_match is not None else None
+
+    def _handle_roster_mouse(
+        self,
+        my: int,
+        bstate: int,
+        snapshot: StateSnapshot,
+    ) -> None:
+        """Handle mouse click, double-click, and scroll wheel events inside the Roster pane."""
+        if bstate & MOUSE_SCROLL_UP_MASK:
+            self.cycle_selection(CycleDirection.BACKWARD)
+            return
+        if bstate & MOUSE_SCROLL_DOWN_MASK:
+            self.cycle_selection(CycleDirection.FORWARD)
+            return
+
+        is_double = bool(bstate & MOUSE_LEFT_DOUBLE_CLICK_MASK)
+        is_click = is_double or bool(bstate & MOUSE_LEFT_CLICK_MASK)
+        if not is_click:
+            return
+
+        g = self.geometry
+        inner_h = g.roster_h - 2
+        visible_rows = max(0, inner_h - 1)
+        train_count = len(snapshot.filtered_trains)
+        if visible_rows <= 0 or train_count == 0:
+            return
+
+        r_idx = my - (g.roster_y + 2)
+        if not (0 <= r_idx < visible_rows):
+            return
+
+        offset = calculate_scroll_offset(snapshot.selected_index, train_count, visible_rows)
+        item_idx = offset + r_idx
+        if 0 <= item_idx < train_count:
+            train_id = snapshot.filtered_trains[item_idx].position.id
+            self.store.select_by_id(train_id)
+            if is_double:
+                self.store.set_follow_mode(True)
+
+    def _handle_map_mouse(
+        self,
+        mx: int,
+        my: int,
+        bstate: int,
+        snapshot: StateSnapshot,
+    ) -> None:
+        """Handle mouse click, double-click, and scroll wheel zoom inside the Map pane."""
+        if bstate & MOUSE_SCROLL_UP_MASK:
+            self.zoom(1.25)
+            return
+        if bstate & MOUSE_SCROLL_DOWN_MASK:
+            self.zoom(0.8)
+            return
+
+        is_double = bool(bstate & MOUSE_LEFT_DOUBLE_CLICK_MASK)
+        is_click = is_double or bool(bstate & MOUSE_LEFT_CLICK_MASK)
+        if not is_click:
+            return
+
+        g = self.geometry
+        if not (g.map_x < mx < g.map_x + g.map_w - 1 and g.map_y < my < g.map_y + g.map_h - 1):
+            return
+
+        inner_w = max(1, g.map_w - 2)
+        inner_h = max(1, g.map_h - 2)
+        col = mx - g.map_x - 1
+        row = my - g.map_y - 1
+
+        canvas = self._build_hit_test_canvas(inner_w, inner_h)
+        hit_train_id = self._hit_test_map_train(snapshot, col, row, inner_w, inner_h, canvas)
+
+        if is_double:
+            if hit_train_id is not None:
+                self.store.select_by_id(hit_train_id)
+                self.store.set_follow_mode(True)
+            else:
+                target_pt = self.projector.subpixel_to_geo(col * 2 + 1, row * 4 + 2)
+                new_lat = max(34.0, min(43.0, target_pt.lat))
+                new_lng = max(19.0, min(29.0, target_pt.lng))
+                self.projector.viewport.center = GeoPoint(lat=new_lat, lng=new_lng)
+                self.store.set_follow_mode(False)
+            return
+
+        if hit_train_id is not None:
+            self.store.select_by_id(hit_train_id)
+            return
+
+        hit_station_id = self._hit_test_map_station(col, row, inner_w, inner_h, canvas)
+        if hit_station_id is not None:
+            self.store.set_selected_station(hit_station_id)
+
+    def _handle_inspector_mouse(
+        self,
+        my: int,
+        bstate: int,
+        snapshot: StateSnapshot,
+    ) -> None:
+        """Handle mouse clicks and wheel scrolling in the Station Board Inspector pane."""
+        if snapshot.inspector_mode != InspectorMode.STATION or not snapshot.selected_station_id:
+            return
+
+        if bstate & (MOUSE_SCROLL_UP_MASK | MOUSE_SCROLL_DOWN_MASK):
+            self.cycle_station_inspector(exit_if_active=False)
+            return
+
+        is_double = bool(bstate & MOUSE_LEFT_DOUBLE_CLICK_MASK)
+        is_click = is_double or bool(bstate & MOUSE_LEFT_CLICK_MASK)
+        if not is_click:
+            return
+
+        station = self.renderer.resolve_station(snapshot.selected_station_id)
+        if station is None:
+            return
+
+        g = self.geometry
+        inner_h = g.inspector_h - 2
+        if inner_h <= 0:
+            return
+
+        sec_hdr_y = 4 if inner_h >= 10 else 3
+        rows_start_y = sec_hdr_y + 2
+        if rows_start_y > inner_h:
+            return
+
+        max_rows = max(0, (inner_h - rows_start_y) + 1)
+        row_idx = (my - g.inspector_y) - rows_start_y
+        if not (0 <= row_idx < max_rows):
+            return
+
+        selected_tid = snapshot.selected_train.position.id if snapshot.selected_train else None
+        entries = compute_station_board_entries(
+            station=station,
+            trains=snapshot.filtered_trains,
+            resolve_station_fn=self.renderer.resolve_station,
+            selected_train_id=selected_tid,
+        )
+        if 0 <= row_idx < len(entries):
+            target_tid = entries[row_idx].train_id
+            self.store.select_by_id(target_tid)
+            if is_double:
+                self.store.set_follow_mode(True)
+                self.store.set_inspector_mode(InspectorMode.TRAIN)
+
+    def _handle_mouse_input(self) -> bool:
+        """Decode curses mouse event and route to Roster, Map, or Inspector region handler."""
+        try:
+            _, mx, my, _, bstate = curses.getmouse()
+        except (curses.error, ValueError, TypeError):
+            return True
+
+        if self.input_mode == InputMode.HELP:
+            if bstate & (MOUSE_LEFT_CLICK_MASK | MOUSE_LEFT_DOUBLE_CLICK_MASK):
+                self.show_help = False
+                self.input_mode = InputMode.NORMAL
+            return True
+
+        g = self.geometry
+        if not g.is_valid:
+            return True
+
+        snapshot = self.store.get_snapshot()
+
+        # Region 1: Roster Pane
+        if (
+            g.roster_x <= mx < g.roster_x + g.roster_w
+            and g.roster_y <= my < g.roster_y + g.roster_h
+        ):
+            self._handle_roster_mouse(my, bstate, snapshot)
+            return True
+
+        # Region 2: Map Pane
+        if (
+            g.map_x <= mx < g.map_x + g.map_w
+            and g.map_y <= my < g.map_y + g.map_h
+        ):
+            self._handle_map_mouse(mx, my, bstate, snapshot)
+            return True
+
+        # Region 3: Inspector Pane
+        if (
+            g.inspector_x <= mx < g.inspector_x + g.inspector_w
+            and g.inspector_y <= my < g.inspector_y + g.inspector_h
+        ):
+            self._handle_inspector_mouse(my, bstate, snapshot)
+            return True
+
+        return True
+
     def process_input(self, key: int) -> bool:
-        """Route keyboard input event based on active InputMode.
+        """Route keyboard or mouse input event based on active InputMode.
 
         Args:
             key: Curses key code returned from getch().
@@ -632,6 +933,9 @@ class TUIApp:
         if key == curses.KEY_RESIZE:
             self.handle_resize()
             return True
+
+        if key == getattr(curses, "KEY_MOUSE", -2):
+            return self._handle_mouse_input()
 
         # In HELP mode, any key closes help dialog
         if self.input_mode == InputMode.HELP:

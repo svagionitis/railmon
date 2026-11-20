@@ -10,7 +10,15 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from train_tracker import TrainPosition
-from tui.app import PRESET_CONFIGS, InputMode, TUIApp
+from tui.app import (
+    MOUSE_LEFT_CLICK_MASK,
+    MOUSE_LEFT_DOUBLE_CLICK_MASK,
+    MOUSE_SCROLL_DOWN_MASK,
+    MOUSE_SCROLL_UP_MASK,
+    PRESET_CONFIGS,
+    InputMode,
+    TUIApp,
+)
 from tui.geo import (
     GREECE_PRESET,
     NORTHERN_GREECE_PRESET,
@@ -21,6 +29,7 @@ from tui.geo import (
     GeoProjector,
     Viewport,
 )
+from tui.mock_engine import StationNode
 from tui.renderer import PaneGeometry, TUIRenderer
 from tui.state import (
     BreadcrumbMode,
@@ -848,6 +857,268 @@ class TestTUIControls(unittest.TestCase):
             self.store.get_snapshot().track_color_mode,
             TrackColorMode.UNIFORM,
         )
+
+    # ------------------------------------------------------------------
+    # Terminal Mouse Interaction Tests (F-3.1)
+    # ------------------------------------------------------------------
+
+    @patch("tui.app.curses.mousemask")
+    @patch("tui.app.curses.curs_set")
+    @patch("tui.app.curses.cbreak")
+    @patch("tui.app.curses.noecho")
+    def test_setup_terminal_enables_mousemask_and_handles_curses_error(
+        self, _mock_noecho, _mock_cbreak, _mock_curs, mock_mousemask
+    ):
+        """TC-F31-01: Verify setup_terminal initializes curses.mousemask and degrades gracefully on curses.error."""
+        self.stdscr.keypad = MagicMock()
+        self.stdscr.nodelay = MagicMock()
+        self.app.renderer.init_colors = MagicMock()
+
+        self.app.setup_terminal()
+        expected_mask = getattr(curses, "ALL_MOUSE_EVENTS", 0) | getattr(
+            curses, "REPORT_MOUSE_POSITION", 0
+        )
+        mock_mousemask.assert_called_once_with(expected_mask)
+
+        # Simulate a terminal where mousemask raises curses.error
+        mock_mousemask.side_effect = curses.error("mouse not supported")
+        self.app.setup_terminal()  # Must not raise
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_roster_click_selects_train_with_scroll_offset(self, mock_getmouse):
+        """TC-F31-02: Verify left-clicking rows in the Roster pane selects the mapped train (including scroll offset)."""
+        g = self.app.geometry
+        # Filtered trains sorted naturally: index 0 -> '50' (t3), index 1 -> '1597' (t1), index 2 -> '2232' (t2)
+        # Click row 0 of roster table (my = g.roster_y + 2)
+        mock_getmouse.return_value = (0, g.roster_x + 3, g.roster_y + 2, 0, MOUSE_LEFT_CLICK_MASK)
+        self.assertTrue(self.app.process_input(curses.KEY_MOUSE))
+        self.assertEqual(self.store.get_snapshot().selected_train.position.id, "t3")
+
+        # Click row 2 of roster table (my = g.roster_y + 4) -> index 2 ('2232' / t2)
+        mock_getmouse.return_value = (0, g.roster_x + 3, g.roster_y + 4, 0, MOUSE_LEFT_CLICK_MASK)
+        self.assertTrue(self.app.process_input(curses.KEY_MOUSE))
+        self.assertEqual(self.store.get_snapshot().selected_train.position.id, "t2")
+        self.assertFalse(self.store.get_snapshot().follow_mode)
+
+        # Clicking table header (my = g.roster_y + 1) or out-of-range row does not change selection
+        mock_getmouse.return_value = (0, g.roster_x + 3, g.roster_y + 1, 0, MOUSE_LEFT_CLICK_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.store.get_snapshot().selected_train.position.id, "t2")
+
+        mock_getmouse.return_value = (0, g.roster_x + 3, g.roster_y + 10, 0, MOUSE_LEFT_CLICK_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.store.get_snapshot().selected_train.position.id, "t2")
+
+        # Populate 25 trains so scroll_offset > 0 when selecting near the bottom
+        extra_trains = [
+            create_test_position(f"tx-{i}", f"{3000 + i}", lat=38.5, lng=23.0)
+            for i in range(25)
+        ]
+        self.store.update_positions(extra_trains)
+        self.store.select_by_id("tx-20")
+        snap = self.store.get_snapshot()
+        visible_rows = max(0, (g.roster_h - 2) - 1)
+        from tui.renderer import calculate_scroll_offset
+        offset = calculate_scroll_offset(snap.selected_index, len(snap.filtered_trains), visible_rows)
+        self.assertGreater(offset, 0)
+
+        # Click visible row r_idx = 1 -> should select filtered_trains[offset + 1]
+        expected_id = snap.filtered_trains[offset + 1].position.id
+        mock_getmouse.return_value = (0, g.roster_x + 4, g.roster_y + 2 + 1, 0, MOUSE_LEFT_CLICK_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.store.get_snapshot().selected_train.position.id, expected_id)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_roster_double_click_selects_and_engages_follow_mode(self, mock_getmouse):
+        """TC-F31-03: Verify double-clicking a row in the Roster pane selects the train and engages follow mode."""
+        g = self.app.geometry
+        # Double-click row 1 (my = g.roster_y + 3 -> index 1 -> '1597' / t1)
+        mock_getmouse.return_value = (
+            0,
+            g.roster_x + 5,
+            g.roster_y + 3,
+            0,
+            MOUSE_LEFT_DOUBLE_CLICK_MASK,
+        )
+        self.assertTrue(self.app.process_input(curses.KEY_MOUSE))
+        snap = self.store.get_snapshot()
+        self.assertIsNotNone(snap.selected_train)
+        self.assertEqual(snap.selected_train.position.id, "t1")
+        self.assertTrue(snap.follow_mode)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_roster_scroll_wheel_cycles_selection(self, mock_getmouse):
+        """TC-F31-04: Verify scroll wheel up/down inside the Roster pane cycles train selection backward/forward."""
+        g = self.app.geometry
+        # Scroll wheel down -> selects index 0 ('50' / t3)
+        mock_getmouse.return_value = (0, g.roster_x + 2, g.roster_y + 2, 0, MOUSE_SCROLL_DOWN_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.store.get_snapshot().selected_index, 0)
+
+        # Scroll wheel down -> selects index 1 ('1597' / t1)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.store.get_snapshot().selected_index, 1)
+
+        # Scroll wheel up -> selects index 0 ('50' / t3)
+        mock_getmouse.return_value = (0, g.roster_x + 2, g.roster_y + 2, 0, MOUSE_SCROLL_UP_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.store.get_snapshot().selected_index, 0)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_map_click_hit_tests_train_within_manhattan_radius_1(self, mock_getmouse):
+        """TC-F31-05: Verify clicking on map within Manhattan radius <= 1 of a train selects it."""
+        g = self.app.geometry
+        # Compute projected cell (col, row) for train t3 (lat=40.5, lng=22.9)
+        t3_col, t3_row = self.app.projector.geo_to_cell(GeoPoint(lat=self.t3.lat, lng=self.t3.lng))
+        mx_exact = g.map_x + 1 + t3_col
+        my_exact = g.map_y + 1 + t3_row
+
+        # 1. Click at Manhattan distance 2 (should miss)
+        mock_getmouse.return_value = (0, mx_exact + 2, my_exact, 0, MOUSE_LEFT_CLICK_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertIsNone(self.store.get_snapshot().selected_train)
+
+        # 2. Click at Manhattan distance 1 (adjacent column mx_exact + 1, my_exact) -> hits t3
+        mock_getmouse.return_value = (0, mx_exact + 1, my_exact, 0, MOUSE_LEFT_CLICK_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertIsNotNone(self.store.get_snapshot().selected_train)
+        self.assertEqual(self.store.get_snapshot().selected_train.position.id, "t3")
+
+        # 3. Double-click directly on t1 (d_M = 0) -> selects t1 and enables follow mode
+        t1_col, t1_row = self.app.projector.geo_to_cell(GeoPoint(lat=self.t1.lat, lng=self.t1.lng))
+        mock_getmouse.return_value = (
+            0,
+            g.map_x + 1 + t1_col,
+            g.map_y + 1 + t1_row,
+            0,
+            MOUSE_LEFT_DOUBLE_CLICK_MASK,
+        )
+        self.app.process_input(curses.KEY_MOUSE)
+        snap = self.store.get_snapshot()
+        self.assertEqual(snap.selected_train.position.id, "t1")
+        self.assertTrue(snap.follow_mode)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_map_click_on_station_opens_station_departure_board_and_clicks_entry(self, mock_getmouse):
+        """TC-F31-06: Verify clicking a StationNode marker on the map engages InspectorMode.STATION."""
+        lar_station = StationNode(
+            id="LAR",
+            code="1001",
+            name_el="Λάρισα",
+            name_en="Larissa",
+            point=GeoPoint(lat=39.6385, lng=22.4222),
+            corridor="PATHE",
+            is_hub=True,
+        )
+        self.app.stations = [lar_station]
+        self.app.renderer.stations = [lar_station]
+        from tui.renderer import _build_station_index
+        self.app.renderer.station_index = _build_station_index([lar_station])
+
+        g = self.app.geometry
+        s_col, s_row = self.app.projector.geo_to_cell(lar_station.point)
+        mock_getmouse.return_value = (
+            0,
+            g.map_x + 1 + s_col,
+            g.map_y + 1 + s_row,
+            0,
+            MOUSE_LEFT_CLICK_MASK,
+        )
+        self.app.process_input(curses.KEY_MOUSE)
+        snap = self.store.get_snapshot()
+        self.assertEqual(snap.inspector_mode, InspectorMode.STATION)
+        self.assertEqual(snap.selected_station_id, "LAR")
+
+        # Add a train near Larissa and click its row in the Station Board Inspector pane
+        t_lar = create_test_position("t-lar", "1598", lat=39.6390, lng=22.4222)
+        self.store.update_positions([t_lar])
+        inner_h = g.inspector_h - 2
+        sec_hdr_y = 4 if inner_h >= 10 else 3
+        first_entry_y = g.inspector_y + sec_hdr_y + 2
+        mock_getmouse.return_value = (
+            0,
+            g.inspector_x + 4,
+            first_entry_y,
+            0,
+            MOUSE_LEFT_DOUBLE_CLICK_MASK,
+        )
+        self.app.process_input(curses.KEY_MOUSE)
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(snap2.selected_train.position.id, "t-lar")
+        self.assertTrue(snap2.follow_mode)
+        self.assertEqual(snap2.inspector_mode, InspectorMode.TRAIN)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_map_double_click_empty_canvas_recenters_viewport_and_disengages_follow(
+        self, mock_getmouse
+    ):
+        """TC-F31-07: Verify double-clicking empty map canvas recenters via subpixel_to_geo and disables follow."""
+        self.store.select_by_id("t1")
+        self.store.set_follow_mode(True)
+        self.assertTrue(self.store.get_snapshot().follow_mode)
+
+        g = self.app.geometry
+        # Pick an empty cell in the top-left corner of the map canvas (col=3, row=3) far from any train
+        target_col, target_row = 3, 3
+        expected_geo = self.app.projector.subpixel_to_geo(target_col * 2 + 1, target_row * 4 + 2)
+
+        mock_getmouse.return_value = (
+            0,
+            g.map_x + 1 + target_col,
+            g.map_y + 1 + target_row,
+            0,
+            MOUSE_LEFT_DOUBLE_CLICK_MASK,
+        )
+        self.app.process_input(curses.KEY_MOUSE)
+
+        self.assertFalse(self.store.get_snapshot().follow_mode)
+        new_center = self.app.projector.viewport.center
+        self.assertAlmostEqual(new_center.lat, expected_geo.lat, places=4)
+        self.assertAlmostEqual(new_center.lng, expected_geo.lng, places=4)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_map_scroll_wheel_zooms_in_and_out(self, mock_getmouse):
+        """TC-F31-08: Verify scroll wheel up/down inside the Map pane zooms in (1.25x) and out (0.8x)."""
+        g = self.app.geometry
+        z0 = self.app.projector.viewport.zoom
+
+        # Wheel up on map -> zoom(1.25)
+        mock_getmouse.return_value = (0, g.map_x + 10, g.map_y + 5, 0, MOUSE_SCROLL_UP_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertAlmostEqual(self.app.projector.viewport.zoom, z0 * 1.25, places=4)
+
+        # Wheel down on map -> zoom(0.8)
+        mock_getmouse.return_value = (0, g.map_x + 10, g.map_y + 5, 0, MOUSE_SCROLL_DOWN_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertAlmostEqual(self.app.projector.viewport.zoom, z0, places=4)
+
+    @patch("tui.app.curses.getmouse")
+    def test_mouse_events_in_help_and_search_modes_handled_safely(self, mock_getmouse):
+        """TC-F31-09: Verify mouse clicks close HELP modal and never corrupt search_buffer in SEARCH mode."""
+        # 1. Open HELP mode, click to dismiss
+        self.app.process_input(ord("?"))
+        self.assertEqual(self.app.input_mode, InputMode.HELP)
+        self.assertTrue(self.app.show_help)
+
+        mock_getmouse.return_value = (0, 20, 10, 0, MOUSE_LEFT_CLICK_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.app.input_mode, InputMode.NORMAL)
+        self.assertFalse(self.app.show_help)
+
+        # 2. Enter SEARCH mode, type 'IC', trigger KEY_MOUSE -> search_buffer remains 'IC'
+        self.app.process_input(ord("/"))
+        self.app.process_input(ord("I"))
+        self.app.process_input(ord("C"))
+        self.assertEqual(self.app.search_buffer, "IC")
+
+        g = self.app.geometry
+        mock_getmouse.return_value = (0, g.map_x + 10, g.map_y + 5, 0, MOUSE_SCROLL_UP_MASK)
+        self.app.process_input(curses.KEY_MOUSE)
+        self.assertEqual(self.app.search_buffer, "IC")
+
+        # 3. If curses.getmouse() raises curses.error, process_input returns True gracefully
+        mock_getmouse.side_effect = curses.error("empty mouse queue")
+        self.assertTrue(self.app.process_input(curses.KEY_MOUSE))
 
 
 if __name__ == "__main__":
