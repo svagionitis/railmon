@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Generator, List, Optional
+from typing import Any, Dict, FrozenSet, Generator, List, Optional, Tuple
 
 __version__ = "1.0.0"
 __author__ = "Hellenic Train Tracking Contributors"
@@ -276,7 +276,7 @@ class RailwayAPIError(IOError):
         message: str,
         status_code: Optional[int] = None,
         retry_after: Optional[float] = None,
-    ):
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retry_after = retry_after
@@ -487,7 +487,7 @@ class TrainPosition:
 class RailwayGovClient:
     """Client for the Hellenic Railways train-tracker APIs."""
 
-    def __init__(self, base_url: str = BASE_URL):
+    def __init__(self, base_url: str = BASE_URL) -> None:
         self.base_url = validate_base_url(base_url)
         self.ssl_ctx = ssl.create_default_context()
 
@@ -614,6 +614,111 @@ class RailwayGovClient:
         res = self._get("/api/msd/geo", {"mode": "public", "types": types, "limit": limit})
         return res if isinstance(res, dict) else {}
 
+    @staticmethod
+    def _decode_sse_positions(payload_str: str) -> Optional[List[TrainPosition]]:
+        """Parse and validate a JSON SSE event payload into a list of TrainPosition items."""
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError as exc:
+            logger.debug("Skipping malformed SSE JSON payload: %s", exc)
+            return None
+
+        if not isinstance(payload, dict):
+            logger.debug("Skipping non-dict SSE JSON payload: %r", payload)
+            return None
+
+        raw_positions = payload.get("positions", [])
+        if not isinstance(raw_positions, list):
+            logger.debug(
+                "Expected 'positions' list in payload, got %s",
+                type(raw_positions).__name__,
+            )
+            return None
+
+        trains: List[TrainPosition] = []
+        for p in raw_positions:
+            if not isinstance(p, dict):
+                logger.debug("Skipping non-dict position item: %r", p)
+                continue
+            try:
+                trains.append(TrainPosition.from_dict(p))
+            except (ValueError, TypeError) as exc:
+                logger.debug("Skipping invalid train position record: %s", exc)
+        return trains
+
+    @staticmethod
+    def _compute_sse_reconnect_wait(
+        err: Exception,
+        reconnect_delay: float,
+        attempt: int,
+        consecutive_failures: int,
+    ) -> Tuple[float, int]:
+        """Compute reconnect wait time and updated attempt counter for an SSE stream interruption."""
+        log_fn = logger.warning if consecutive_failures == 0 else logger.debug
+        prefix = (
+            "SSE connection"
+            if consecutive_failures == 0
+            else f"SSE reconnect attempt {consecutive_failures + 1}"
+        )
+
+        if isinstance(err, urllib.error.HTTPError) and err.code == 429:
+            retry_header = err.headers.get("Retry-After") if err.headers else None
+            wait_time = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
+            log_fn(
+                "%s rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
+                prefix,
+                err,
+                wait_time,
+            )
+            return wait_time, 0
+
+        jitter = random.uniform(0.8, 1.2)
+        wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
+        if isinstance(err, urllib.error.HTTPError) and 500 <= err.code < 600:
+            log_fn(
+                "%s server error (HTTP %d %s): %s. Reconnecting in %.1fs...",
+                prefix,
+                err.code,
+                err.reason,
+                err,
+                wait_time,
+            )
+        else:
+            log_fn(
+                "%s interrupted: %s. Reconnecting in %.1fs...",
+                prefix,
+                err,
+                wait_time,
+            )
+        return wait_time, attempt + 1
+
+    def _iter_sse_payloads(
+        self,
+        resp: Any,
+        event_filter: str,
+        stop_event: Optional[threading.Event],
+    ) -> Generator[List[TrainPosition], None, None]:
+        """Iterate over raw SSE HTTP response lines and yield decoded TrainPosition batches."""
+        current_event = "message"
+        data_buffer: List[str] = []
+
+        for raw_line in resp:
+            if stop_event is not None and stop_event.is_set():
+                return
+
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line:
+                if data_buffer and current_event == event_filter:
+                    trains = self._decode_sse_positions("".join(data_buffer))
+                    if trains is not None:
+                        yield trains
+                data_buffer = []
+                current_event = "message"
+            elif line.startswith("event:"):
+                current_event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data_buffer.append(line.split(":", 1)[1].strip())
+
     def stream_train_positions(
         self,
         event_filter: str = "trainPositionsUx",
@@ -642,73 +747,19 @@ class RailwayGovClient:
             try:
                 req = urllib.request.Request(stream_url, headers=headers)
                 with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=timeout) as resp:
-                    current_event = "message"
-                    data_buffer: List[str] = []
+                    for trains in self._iter_sse_payloads(resp, event_filter, stop_event):
+                        if consecutive_failures > 0 and disconnect_time is not None:
+                            logger.info(
+                                "Upstream SSE connection re-established after %.1fs outage.",
+                                time.monotonic() - disconnect_time,
+                            )
+                            consecutive_failures = 0
+                            disconnect_time = None
+                        yield trains
+                        attempt = 0
 
-                    for raw_line in resp:
-                        if stop_event is not None and stop_event.is_set():
-                            return
-
-                        line = raw_line.decode("utf-8", errors="ignore").strip()
-
-                        if not line:
-                            # End of event block
-                            if data_buffer:
-                                payload_str = "".join(data_buffer)
-                                data_buffer = []
-
-                                if current_event == event_filter:
-                                    try:
-                                        payload = json.loads(payload_str)
-                                    except json.JSONDecodeError as exc:
-                                        logger.debug("Skipping malformed SSE JSON payload: %s", exc)
-                                        current_event = "message"
-                                        continue
-
-                                    if not isinstance(payload, dict):
-                                        logger.debug("Skipping non-dict SSE JSON payload: %r", payload)
-                                        current_event = "message"
-                                        continue
-
-                                    raw_positions = payload.get("positions", [])
-                                    if not isinstance(raw_positions, list):
-                                        logger.debug(
-                                            "Expected 'positions' list in payload, got %s",
-                                            type(raw_positions).__name__,
-                                        )
-                                        current_event = "message"
-                                        continue
-
-                                    trains: List[TrainPosition] = []
-                                    for p in raw_positions:
-                                        if not isinstance(p, dict):
-                                            logger.debug("Skipping non-dict position item: %r", p)
-                                            continue
-                                        try:
-                                            trains.append(TrainPosition.from_dict(p))
-                                        except (ValueError, TypeError) as exc:
-                                            logger.debug("Skipping invalid train position record: %s", exc)
-
-                                    if consecutive_failures > 0 and disconnect_time is not None:
-                                        outage_dur = time.monotonic() - disconnect_time
-                                        logger.info(
-                                            "Upstream SSE connection re-established after %.1fs outage.",
-                                            outage_dur,
-                                        )
-                                        consecutive_failures = 0
-                                        disconnect_time = None
-
-                                    yield trains
-                                    attempt = 0
-                            current_event = "message"
-                            continue
-
-                        if line.startswith("event:"):
-                            current_event = line.split(":", 1)[1].strip()
-                        elif line.startswith("data:"):
-                            data_buffer.append(line.split(":", 1)[1].strip())
-
-                    # If upstream closed the response stream cleanly without stop_event
+                    if stop_event is not None and stop_event.is_set():
+                        return
                     if reconnect_delay <= 0:
                         return
 
@@ -721,62 +772,9 @@ class RailwayGovClient:
                 if consecutive_failures == 0:
                     disconnect_time = time.monotonic()
 
-                if isinstance(e, urllib.error.HTTPError) and e.code == 429:
-                    retry_header = e.headers.get("Retry-After") if e.headers else None
-                    wait_time = parse_retry_after(retry_header, default_delay=30.0, min_delay=30.0)
-                    if consecutive_failures == 0:
-                        logger.warning(
-                            "SSE connection rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
-                            e,
-                            wait_time,
-                        )
-                    else:
-                        logger.debug(
-                            "SSE reconnect attempt %d rate limited (HTTP 429): %s. Backing off for %.1fs (Retry-After)...",
-                            consecutive_failures + 1,
-                            e,
-                            wait_time,
-                        )
-                    attempt = 0
-                elif isinstance(e, urllib.error.HTTPError) and 500 <= e.code < 600:
-                    jitter = random.uniform(0.8, 1.2)
-                    wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
-                    if consecutive_failures == 0:
-                        logger.warning(
-                            "SSE connection server error (HTTP %d %s): %s. Reconnecting in %.1fs...",
-                            e.code,
-                            e.reason,
-                            e,
-                            wait_time,
-                        )
-                    else:
-                        logger.debug(
-                            "SSE reconnect attempt %d server error (HTTP %d %s): %s. Reconnecting in %.1fs...",
-                            consecutive_failures + 1,
-                            e.code,
-                            e.reason,
-                            e,
-                            wait_time,
-                        )
-                    attempt += 1
-                else:
-                    jitter = random.uniform(0.8, 1.2)
-                    wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
-                    if consecutive_failures == 0:
-                        logger.warning(
-                            "SSE connection interrupted: %s. Reconnecting in %.1fs...",
-                            e,
-                            wait_time,
-                        )
-                    else:
-                        logger.debug(
-                            "SSE reconnect attempt %d interrupted: %s. Reconnecting in %.1fs...",
-                            consecutive_failures + 1,
-                            e,
-                            wait_time,
-                        )
-                    attempt += 1
-
+                wait_time, attempt = self._compute_sse_reconnect_wait(
+                    e, reconnect_delay, attempt, consecutive_failures
+                )
                 consecutive_failures += 1
 
                 if stop_event is not None:
@@ -1023,6 +1021,105 @@ def is_tty_supported() -> bool:
     return bool(hasattr(sys.stdout, "isatty") and sys.stdout.isatty())
 
 
+def _normalize_mode_enums(
+    source: Any,
+    recording: Any = RecordingMode.DISABLED,
+    deadband: Any = DeadbandFilterMode.ENABLED,
+    glyph_mode: Any = GlyphMode.AUTO,
+    verbosity: Any = OutputVerbosity.NORMAL,
+    *,
+    demo: Optional[bool] = None,
+    record: Optional[bool] = None,
+    enable_deadband: Optional[bool] = None,
+    ascii_mode: Optional[bool] = None,
+    quiet: Optional[bool] = None,
+) -> Tuple[TelemetrySource, RecordingMode, DeadbandFilterMode, GlyphMode, OutputVerbosity]:
+    """Normalize enum arguments and legacy boolean compatibility flags."""
+    if demo is not None or isinstance(source, bool):
+        flag = demo if demo is not None else bool(source)
+        norm_source = TelemetrySource.DEMO if flag else TelemetrySource.LIVE
+    else:
+        norm_source = source
+
+    if record is not None or isinstance(recording, bool):
+        flag = record if record is not None else bool(recording)
+        norm_rec = RecordingMode.ENABLED if flag else RecordingMode.DISABLED
+    else:
+        norm_rec = recording
+
+    if enable_deadband is not None or isinstance(deadband, bool):
+        flag = enable_deadband if enable_deadband is not None else bool(deadband)
+        norm_db = DeadbandFilterMode.ENABLED if flag else DeadbandFilterMode.DISABLED
+    else:
+        norm_db = deadband
+
+    if ascii_mode is not None or isinstance(glyph_mode, bool):
+        flag = ascii_mode if ascii_mode is not None else bool(glyph_mode)
+        norm_glyph = GlyphMode.ASCII if flag else GlyphMode.UTF8
+    else:
+        norm_glyph = glyph_mode
+
+    if quiet is not None or isinstance(verbosity, bool):
+        flag = quiet if quiet is not None else bool(verbosity)
+        norm_verb = OutputVerbosity.QUIET if flag else OutputVerbosity.NORMAL
+    else:
+        norm_verb = verbosity
+
+    return norm_source, norm_rec, norm_db, norm_glyph, norm_verb
+
+
+def _start_optional_recorder(
+    recording: RecordingMode,
+    db_path: str,
+    source: TelemetrySource,
+    deadband: DeadbandFilterMode,
+    retention_days: Optional[int],
+    archive_path: Optional[str],
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """Initialize and start SQLite Database and TelemetryRecorder when recording is enabled."""
+    if recording != RecordingMode.ENABLED:
+        return None, None
+
+    from storage.db import Database
+    from storage.recorder import RecorderConfig, TelemetryRecorder
+
+    db = Database(db_path)
+    db.init_schema()
+    recorder = TelemetryRecorder(
+        db,
+        RecorderConfig(
+            mode="demo" if source == TelemetrySource.DEMO else "live",
+            enable_deadband=(deadband == DeadbandFilterMode.ENABLED),
+            retention_days=retention_days,
+            archive_path=archive_path,
+        ),
+    )
+    recorder.start()
+    return db, recorder
+
+
+def _format_plain_train_line(t: TrainPosition) -> str:
+    """Format a single TrainPosition row for plain-text CLI stream output."""
+    route = (
+        f"{t.origin or '—'} -> {t.destination or '—'}"
+        if (t.origin or t.destination)
+        else (t.corridor or "Shunting/Yard")
+    )
+    delay_str = (
+        f"+{t.delay}m"
+        if t.delay > 0
+        else (f"{t.delay}m" if t.delay < 0 else "On-time")
+    )
+    return (
+        f"{t.train_number:<8} "
+        f"{(t.service_type or t.train_type or 'N/A')[:11]:<12} "
+        f"{route[:30]:<32} "
+        f"{t.speed:>5.1f} km/h "
+        f"{delay_str:<8} "
+        f"({t.lat:.4f}, {t.lng:.4f})"
+    )
+
+
 def run_tui_mode(
     source: TelemetrySource = TelemetrySource.LIVE,
     fps: float = 15.0,
@@ -1044,41 +1141,17 @@ def run_tui_mode(
     If standard output is not a TTY or curses initialization fails (e.g. missing
     terminfo database, container environment, or missing windows-curses), automatically
     falls back to plain-text streaming mode.
-
-    Args:
-        source: Telemetry source stream (LIVE or DEMO).
-        fps: Target frames per second for curses refresh loop.
-        reconnect_delay: Initial reconnect delay in seconds for live stream interruptions.
-        recording: SQLite persistence state (DISABLED or ENABLED).
-        db_path: Destination SQLite database file path when recording is active.
-        deadband: Deadband filter state (ENABLED or DISABLED).
-        retention_days: Optional telemetry retention window in days.
-        archive_path: Optional target SQLite database for archived telemetry.
-        glyph_mode: Terminal character set rendering mode (AUTO, UTF8, or ASCII).
-        demo: Legacy boolean flag for mock simulation mode.
-        record: Legacy boolean flag for recording mode.
-        enable_deadband: Legacy boolean flag for deadband filtering.
-        ascii_mode: Legacy boolean flag for ASCII mode.
     """
-    if demo is not None:
-        source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
-    elif isinstance(source, bool):
-        source = TelemetrySource.DEMO if source else TelemetrySource.LIVE
-
-    if record is not None:
-        recording = RecordingMode.ENABLED if record else RecordingMode.DISABLED
-    elif isinstance(recording, bool):
-        recording = RecordingMode.ENABLED if recording else RecordingMode.DISABLED
-
-    if enable_deadband is not None:
-        deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
-    elif isinstance(deadband, bool):
-        deadband = DeadbandFilterMode.ENABLED if deadband else DeadbandFilterMode.DISABLED
-
-    if ascii_mode is not None:
-        glyph_mode = GlyphMode.ASCII if ascii_mode else GlyphMode.UTF8
-    elif isinstance(glyph_mode, bool):
-        glyph_mode = GlyphMode.ASCII if glyph_mode else GlyphMode.UTF8
+    source, recording, deadband, glyph_mode, _ = _normalize_mode_enums(
+        source,
+        recording,
+        deadband,
+        glyph_mode,
+        demo=demo,
+        record=record,
+        enable_deadband=enable_deadband,
+        ascii_mode=ascii_mode,
+    )
 
     if not is_tty_supported():
         logger.warning(
@@ -1129,24 +1202,9 @@ def run_tui_mode(
             return
         raise
 
-    db = None
-    recorder = None
-    if recording == RecordingMode.ENABLED:
-        from storage.db import Database
-        from storage.recorder import RecorderConfig, TelemetryRecorder
-
-        db = Database(db_path)
-        db.init_schema()
-        recorder = TelemetryRecorder(
-            db,
-            RecorderConfig(
-                mode="demo" if source == TelemetrySource.DEMO else "live",
-                enable_deadband=(deadband == DeadbandFilterMode.ENABLED),
-                retention_days=retention_days,
-                archive_path=archive_path,
-            ),
-        )
-        recorder.start()
+    db, recorder = _start_optional_recorder(
+        recording, db_path, source, deadband, retention_days, archive_path
+    )
 
     # 1. Initialize thread-safe state store
     store = TrainStateStore()
@@ -1159,13 +1217,11 @@ def run_tui_mode(
 
     # 3. Configure ingestion worker
     if source == TelemetrySource.DEMO:
-        engine = MockTelemetryEngine()
-        worker = StreamWorker(store=store, mock_engine=engine, recorder=recorder)
+        worker = StreamWorker(store=store, mock_engine=MockTelemetryEngine(), recorder=recorder)
     else:
-        client = RailwayGovClient()
         worker = StreamWorker(
             store=store,
-            client=client,
+            client=RailwayGovClient(),
             base_backoff_sec=reconnect_delay,
             recorder=recorder,
         )
@@ -1174,13 +1230,11 @@ def run_tui_mode(
     worker.start()
 
     # 5. Resolve ASCII fallback mode
-    if glyph_mode == GlyphMode.ASCII:
-        use_ascii = True
-    elif glyph_mode == GlyphMode.UTF8:
-        use_ascii = False
-    else:
-        use_ascii = not is_utf8_supported(sys.stdout)
-
+    use_ascii = (
+        True
+        if glyph_mode == GlyphMode.ASCII
+        else (False if glyph_mode == GlyphMode.UTF8 else not is_utf8_supported(sys.stdout))
+    )
     if use_ascii:
         logger.info("Non-UTF-8 environment or --ascii specified; enabling 7-bit ASCII fallback matrix.")
 
@@ -1242,65 +1296,28 @@ def run_plain_stream_mode(
     record: Optional[bool] = None,
     enable_deadband: Optional[bool] = None,
 ) -> None:
-    """Stream train positions to stdout in formatted tabular text.
-
-    Args:
-        source: Telemetry source stream (LIVE or DEMO).
-        reconnect_delay: Reconnection interval for live SSE feed.
-        recording: SQLite persistence state (DISABLED or ENABLED).
-        db_path: Destination SQLite database file path when recording is active.
-        deadband: Deadband filter state (ENABLED or DISABLED).
-        retention_days: Optional telemetry retention window in days.
-        archive_path: Optional target SQLite database for archived telemetry.
-        stop_event: Optional threading.Event to signal shutdown.
-        demo: Legacy boolean flag for mock simulation mode.
-        record: Legacy boolean flag for recording mode.
-        enable_deadband: Legacy boolean flag for deadband filtering.
-    """
-    if demo is not None:
-        source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
-    elif isinstance(source, bool):
-        source = TelemetrySource.DEMO if source else TelemetrySource.LIVE
-
-    if record is not None:
-        recording = RecordingMode.ENABLED if record else RecordingMode.DISABLED
-    elif isinstance(recording, bool):
-        recording = RecordingMode.ENABLED if recording else RecordingMode.DISABLED
-
-    if enable_deadband is not None:
-        deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
-    elif isinstance(deadband, bool):
-        deadband = DeadbandFilterMode.ENABLED if deadband else DeadbandFilterMode.DISABLED
+    """Stream train positions to stdout in formatted tabular text."""
+    source, recording, deadband, _, _ = _normalize_mode_enums(
+        source,
+        recording,
+        deadband,
+        demo=demo,
+        record=record,
+        enable_deadband=enable_deadband,
+    )
 
     with install_signal_handlers(stop_event) as stop_event:
-        db = None
-        recorder = None
-        if recording == RecordingMode.ENABLED:
-            from storage.db import Database
-            from storage.recorder import RecorderConfig, TelemetryRecorder
-
-            db = Database(db_path)
-            db.init_schema()
-            recorder = TelemetryRecorder(
-                db,
-                RecorderConfig(
-                    mode="demo" if source == TelemetrySource.DEMO else "live",
-                    enable_deadband=(deadband == DeadbandFilterMode.ENABLED),
-                    retention_days=retention_days,
-                    archive_path=archive_path,
-                ),
-            )
-            recorder.start()
+        db, recorder = _start_optional_recorder(
+            recording, db_path, source, deadband, retention_days, archive_path
+        )
 
         if source == TelemetrySource.DEMO:
             from tui.mock_engine import MockTelemetryEngine
 
-            engine = MockTelemetryEngine()
-            stream = engine.stream_positions(interval_sec=1.0, stop_event=stop_event)
+            stream = MockTelemetryEngine().stream_positions(interval_sec=1.0, stop_event=stop_event)
             source_label = "Offline Mock Simulation"
         else:
-            client = RailwayGovClient()
-            stream = client.stream_train_positions(
+            stream = RailwayGovClient().stream_train_positions(
                 reconnect_delay=reconnect_delay,
                 stop_event=stop_event,
             )
@@ -1329,24 +1346,7 @@ def run_plain_stream_mode(
                 print("-" * 95)
 
                 for t in batch:
-                    route = (
-                        f"{t.origin or '—'} -> {t.destination or '—'}"
-                        if (t.origin or t.destination)
-                        else (t.corridor or "Shunting/Yard")
-                    )
-                    delay_str = (
-                        f"+{t.delay}m"
-                        if t.delay > 0
-                        else (f"{t.delay}m" if t.delay < 0 else "On-time")
-                    )
-                    print(
-                        f"{t.train_number:<8} "
-                        f"{(t.service_type or t.train_type or 'N/A')[:11]:<12} "
-                        f"{route[:30]:<32} "
-                        f"{t.speed:>5.1f} km/h "
-                        f"{delay_str:<8} "
-                        f"({t.lat:.4f}, {t.lng:.4f})"
-                    )
+                    print(_format_plain_train_line(t))
                 sys.stdout.flush()
                 if stop_event.wait(timeout=1.0):
                     break
@@ -1360,6 +1360,14 @@ def run_plain_stream_mode(
                 recorder.stop()
             if db:
                 db.close()
+
+
+def _safe_file_size(path: str) -> int:
+    """Return file size in bytes or 0 on OSError."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
 
 
 def run_record_mode(
@@ -1378,40 +1386,15 @@ def run_record_mode(
     enable_deadband: Optional[bool] = None,
     quiet: Optional[bool] = None,
 ) -> int:
-    """Execute dedicated headless recording daemon with terminal metrics display.
-
-    Args:
-        db_path: Destination SQLite database file path.
-        source: Telemetry source stream (LIVE or DEMO).
-        deadband: Deadband filter state (ENABLED or DISABLED).
-        batch_size: Maximum buffer size before batch commit.
-        flush_interval_sec: Maximum latency in seconds before buffer commit.
-        verbosity: Console output verbosity (NORMAL or QUIET).
-        reconnect_delay: Reconnection interval for live SSE feed.
-        retention_days: Optional telemetry retention window in days.
-        archive_path: Optional target SQLite database for archived telemetry.
-        stop_event: Optional threading.Event to signal shutdown.
-        demo: Legacy boolean flag for mock simulation mode.
-        enable_deadband: Legacy boolean flag for deadband filtering.
-        quiet: Legacy boolean flag for quiet console output.
-
-    Returns:
-        Exit code (0 on success).
-    """
-    if demo is not None:
-        source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
-    elif isinstance(source, bool):
-        source = TelemetrySource.DEMO if source else TelemetrySource.LIVE
-
-    if enable_deadband is not None:
-        deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
-    elif isinstance(deadband, bool):
-        deadband = DeadbandFilterMode.ENABLED if deadband else DeadbandFilterMode.DISABLED
-
-    if quiet is not None:
-        verbosity = OutputVerbosity.QUIET if quiet else OutputVerbosity.NORMAL
-    elif isinstance(verbosity, bool):
-        verbosity = OutputVerbosity.QUIET if verbosity else OutputVerbosity.NORMAL
+    """Execute dedicated headless recording daemon with terminal metrics display."""
+    source, _, deadband, _, verbosity = _normalize_mode_enums(
+        source,
+        deadband=deadband,
+        verbosity=verbosity,
+        demo=demo,
+        enable_deadband=enable_deadband,
+        quiet=quiet,
+    )
 
     from storage.cli_formatters import format_file_size
     from storage.db import Database
@@ -1455,11 +1438,9 @@ def run_record_mode(
             if source == TelemetrySource.DEMO:
                 from tui.mock_engine import MockTelemetryEngine
 
-                engine = MockTelemetryEngine()
-                stream = engine.stream_positions(interval_sec=1.0, stop_event=stop_event)
+                stream = MockTelemetryEngine().stream_positions(interval_sec=1.0, stop_event=stop_event)
             else:
-                client = RailwayGovClient()
-                stream = client.stream_train_positions(
+                stream = RailwayGovClient().stream_train_positions(
                     reconnect_delay=reconnect_delay,
                     stop_event=stop_event,
                 )
@@ -1478,10 +1459,7 @@ def run_record_mode(
                     stats = recorder.get_stats()
                     filter_stats = stats.get("filter") or {}
                     ratio = filter_stats.get("suppression_ratio_pct", 0.0)
-                    try:
-                        db_size = os.path.getsize(db_path)
-                    except OSError:
-                        db_size = 0
+                    db_size = _safe_file_size(db_path)
                     ts_str = time.strftime("%H:%M:%S")
                     print(
                         f" {ts_str:<11} | {len(batch):>6} | {len(batch):>10} | "
@@ -1501,10 +1479,7 @@ def run_record_mode(
             filter_stats = stats.get("filter") or {}
             suppressed = filter_stats.get("suppressed_count", 0)
             ratio = filter_stats.get("suppression_ratio_pct", 0.0)
-            try:
-                db_size = os.path.getsize(db_path)
-            except OSError:
-                db_size = 0
+            db_size = _safe_file_size(db_path)
 
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Session #{recorder.session_id} finalized.")
             print(f"  - Duration: {duration:.1f}s")
@@ -1709,6 +1684,103 @@ def run_schedules_mode() -> int:
     return 0
 
 
+def _configure_win32_utf8_console() -> None:
+    """Configure Windows console codepage and standard streams for UTF-8 output."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except (ImportError, AttributeError, OSError):
+        pass
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _attach_optional_retention_kwargs(args: argparse.Namespace, target_kwargs: Dict[str, Any]) -> None:
+    """Attach optional --retention-days and --archive-db arguments if present."""
+    if getattr(args, "retention_days", None) is not None:
+        target_kwargs["retention_days"] = args.retention_days
+    if getattr(args, "archive_db", None) is not None:
+        target_kwargs["archive_path"] = args.archive_db
+
+
+def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
+    """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode == "schedules":
+        ret = run_schedules_mode()
+        return ret if isinstance(ret, int) else 0
+
+    if args.mode == "history":
+        return run_history_mode(args)
+
+    enable_deadband = not getattr(args, "no_filter_deadband", False)
+    deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
+    source = TelemetrySource.DEMO if getattr(args, "demo", False) else TelemetrySource.LIVE
+    db_path = getattr(args, "db", "railway_history.db")
+
+    if args.mode == "record":
+        verbosity = OutputVerbosity.QUIET if getattr(args, "quiet", False) else OutputVerbosity.NORMAL
+        rec_kwargs: Dict[str, Any] = {
+            "db_path": db_path,
+            "source": source,
+            "deadband": deadband,
+            "batch_size": getattr(args, "batch_size", 50),
+            "flush_interval_sec": getattr(args, "flush_interval", 2.0),
+            "verbosity": verbosity,
+            "reconnect_delay": getattr(args, "reconnect_delay", 3.0),
+        }
+        _attach_optional_retention_kwargs(args, rec_kwargs)
+        return run_record_mode(**rec_kwargs)
+
+    is_rec = bool(getattr(args, "record", False))
+    if is_tui:
+        glyph_mode = GlyphMode.ASCII if getattr(args, "ascii", False) else GlyphMode.AUTO
+        if is_rec:
+            tui_kwargs: Dict[str, Any] = {
+                "source": source,
+                "fps": args.fps,
+                "reconnect_delay": args.reconnect_delay,
+                "recording": RecordingMode.ENABLED,
+                "db_path": db_path,
+                "deadband": deadband,
+                "glyph_mode": glyph_mode,
+            }
+            _attach_optional_retention_kwargs(args, tui_kwargs)
+            run_tui_mode(**tui_kwargs)
+        else:
+            run_tui_mode(
+                source=source,
+                fps=args.fps,
+                reconnect_delay=args.reconnect_delay,
+                glyph_mode=glyph_mode,
+            )
+        return 0
+
+    if is_rec:
+        stream_kwargs: Dict[str, Any] = {
+            "source": source,
+            "reconnect_delay": args.reconnect_delay,
+            "recording": RecordingMode.ENABLED,
+            "db_path": db_path,
+            "deadband": deadband,
+        }
+        _attach_optional_retention_kwargs(args, stream_kwargs)
+        run_plain_stream_mode(**stream_kwargs)
+    else:
+        run_plain_stream_mode(
+            source=source,
+            reconnect_delay=args.reconnect_delay,
+        )
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main CLI entry point.
 
@@ -1718,27 +1790,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     Returns:
         Exit code (0 for clean execution).
     """
-    if sys.platform == "win32":
-        # Ensure Greek characters and unicode box/Braille symbols output cleanly on Windows console
-        try:
-            import ctypes
-            ctypes.windll.kernel32.SetConsoleCP(65001)
-            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-        except Exception:
-            pass
-        try:
-            if hasattr(sys.stdout, "reconfigure"):
-                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            if hasattr(sys.stderr, "reconfigure"):
-                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+    _configure_win32_utf8_console()
 
     parser = build_parser()
     args = parser.parse_args(argv)
 
     log_level = "DEBUG" if getattr(args, "debug", False) else getattr(args, "log_level", "INFO")
-    is_tui = bool(getattr(args, "tui", False) and not (getattr(args, "headless", False) or getattr(args, "daemon", False)))
+    is_tui = bool(
+        getattr(args, "tui", False)
+        and not (getattr(args, "headless", False) or getattr(args, "daemon", False))
+    )
     setup_logging(
         log_file=getattr(args, "log_file", None),
         log_level=log_level,
@@ -1747,82 +1808,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     try:
-        if args.mode == "schedules":
-            ret = run_schedules_mode()
-            return ret if isinstance(ret, int) else 0
-        elif args.mode == "record":
-            enable_deadband = not getattr(args, "no_filter_deadband", False)
-            source = TelemetrySource.DEMO if getattr(args, "demo", False) else TelemetrySource.LIVE
-            deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
-            verbosity = OutputVerbosity.QUIET if getattr(args, "quiet", False) else OutputVerbosity.NORMAL
-            rec_kwargs: Dict[str, Any] = {
-                "db_path": getattr(args, "db", "railway_history.db"),
-                "source": source,
-                "deadband": deadband,
-                "batch_size": getattr(args, "batch_size", 50),
-                "flush_interval_sec": getattr(args, "flush_interval", 2.0),
-                "verbosity": verbosity,
-                "reconnect_delay": getattr(args, "reconnect_delay", 3.0),
-            }
-            if getattr(args, "retention_days", None) is not None:
-                rec_kwargs["retention_days"] = args.retention_days
-            if getattr(args, "archive_db", None) is not None:
-                rec_kwargs["archive_path"] = args.archive_db
-            return run_record_mode(**rec_kwargs)
-        elif args.mode == "history":
-            return run_history_mode(args)
-        elif args.tui and not (getattr(args, "headless", False) or getattr(args, "daemon", False)):
-            is_rec = getattr(args, "record", False)
-            source = TelemetrySource.DEMO if args.demo else TelemetrySource.LIVE
-            glyph_mode = GlyphMode.ASCII if getattr(args, "ascii", False) else GlyphMode.AUTO
-            if is_rec:
-                enable_deadband = not getattr(args, "no_filter_deadband", False)
-                deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
-                tui_kwargs: Dict[str, Any] = {
-                    "source": source,
-                    "fps": args.fps,
-                    "reconnect_delay": args.reconnect_delay,
-                    "recording": RecordingMode.ENABLED,
-                    "db_path": getattr(args, "db", "railway_history.db"),
-                    "deadband": deadband,
-                    "glyph_mode": glyph_mode,
-                }
-                if getattr(args, "retention_days", None) is not None:
-                    tui_kwargs["retention_days"] = args.retention_days
-                if getattr(args, "archive_db", None) is not None:
-                    tui_kwargs["archive_path"] = args.archive_db
-                run_tui_mode(**tui_kwargs)
-            else:
-                run_tui_mode(
-                    source=source,
-                    fps=args.fps,
-                    reconnect_delay=args.reconnect_delay,
-                    glyph_mode=glyph_mode,
-                )
-        else:
-            is_rec = getattr(args, "record", False)
-            source = TelemetrySource.DEMO if args.demo else TelemetrySource.LIVE
-            if is_rec:
-                enable_deadband = not getattr(args, "no_filter_deadband", False)
-                deadband = DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
-                stream_kwargs: Dict[str, Any] = {
-                    "source": source,
-                    "reconnect_delay": args.reconnect_delay,
-                    "recording": RecordingMode.ENABLED,
-                    "db_path": getattr(args, "db", "railway_history.db"),
-                    "deadband": deadband,
-                }
-                if getattr(args, "retention_days", None) is not None:
-                    stream_kwargs["retention_days"] = args.retention_days
-                if getattr(args, "archive_db", None) is not None:
-                    stream_kwargs["archive_path"] = args.archive_db
-                run_plain_stream_mode(**stream_kwargs)
-            else:
-                run_plain_stream_mode(
-                    source=source,
-                    reconnect_delay=args.reconnect_delay,
-                )
-        return 0
+        return _dispatch_cli_mode(args, is_tui)
     except KeyboardInterrupt:
         print("\nProcess interrupted by user.")
         return 0

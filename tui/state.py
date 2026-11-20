@@ -182,6 +182,48 @@ class StateSnapshot:
     track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
 
 
+# Known Hellenic Railways corridor keywords and aliases
+_PROAST_CORRIDORS: Tuple[str, ...] = (
+    "PROASTIAKOS", "PROASTIAKOS_ATH", "PIRAIR", "KIATO", "AERODROMIO", "AIRPORT", "CHALKIDA"
+)
+_PATHE_CORRIDORS: Tuple[str, ...] = ("PATHE", "E85", "MAINLINE")
+_NORTHERN_CORRIDORS: Tuple[str, ...] = ("NORTHERN", "MACEDONIA", "THRACE", "STRYMONAS", "ALEX", "IDOMENI")
+_THESSALY_CORRIDORS: Tuple[str, ...] = ("THESSALY", "VOLOS", "KALAMBAKA")
+_PROAST_STATIONS: Tuple[str, ...] = ("ΑΕΡΟΔΡΟΜΙΟ", "ΚΙΑΤΟ", "ΧΑΛΚΙΔΑ", "ΛΙΟΣΙΑ", "ΝΕΡΑΤΖΙΩΤΙΣΣΑ")
+_NORTHERN_STATIONS: Tuple[str, ...] = (
+    "ΣΕΡΡΕΣ", "ΔΡΑΜΑ", "ΞΑΝΘΗ", "ΚΟΜΟΤΗΝΗ", "ΑΛΕΞΑΝΔΡΟΥΠΟΛΗ", "ΦΛΩΡΙΝΑ", "ΕΔΕΣΣΑ"
+)
+_THESSALY_STATIONS: Tuple[str, ...] = ("ΒΟΛΟΣ", "ΚΑΛΑΜΠΑΚΑ", "ΚΑΡΔΙΤΣΑ", "ΤΡΙΚΑΛΑ")
+
+
+def _matches_explicit_corridor_tag(corridor: str, target: str) -> bool:
+    """Match when telemetry record includes an explicit corridor string."""
+    if target in corridor:
+        return True
+    if any(c in corridor for c in _PROAST_CORRIDORS):
+        return target in ("PROASTIAKOS", "PROASTIAKOS_ATH", "SUBURBAN")
+    if any(c in corridor for c in _PATHE_CORRIDORS):
+        return target in ("PATHE", "PATHE_MAINLINE", "MAINLINE")
+    if any(c in corridor for c in _NORTHERN_CORRIDORS):
+        return target in ("NORTHERN", "NORTHERN_GREECE", "NORTH")
+    if any(c in corridor for c in _THESSALY_CORRIDORS):
+        return target in ("THESSALY",)
+    return False
+
+
+def _has_station_keyword(
+    origin: str,
+    destination: str,
+    next_station: str,
+    keywords: Tuple[str, ...],
+) -> bool:
+    """Return True if any station keyword appears in origin, destination, or next_station."""
+    return any(
+        st in origin or st in destination or st in next_station
+        for st in keywords
+    )
+
+
 def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
     """Check if train position belongs to target corridor filter.
 
@@ -194,83 +236,42 @@ def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
     """
     target = target.strip().upper()
     corridor = (p.corridor or "").strip().upper()
+
+    # 1. When raw corridor string is present, use explicit corridor tag routing
+    if corridor:
+        return _matches_explicit_corridor_tag(corridor, target)
+
+    # 2. When raw corridor is absent (real-world SSE telemetry), infer from metadata & geography
     service_type = (p.service_type or "").strip().upper()
     train_type = (p.train_type or "").strip().upper()
     origin = (p.origin or "").strip().upper()
     destination = (p.destination or "").strip().upper()
     next_station = (p.next_station or "").strip().upper()
 
-    # Known corridor keywords and aliases
-    proast_corridors = ("PROASTIAKOS", "PROASTIAKOS_ATH", "PIRAIR", "KIATO", "AERODROMIO", "AIRPORT", "CHALKIDA")
-    pathe_corridors = ("PATHE", "E85", "MAINLINE")
-    northern_corridors = ("NORTHERN", "MACEDONIA", "THRACE", "STRYMONAS", "ALEX", "IDOMENI")
-    thessaly_corridors = ("THESSALY", "VOLOS", "KALAMBAKA")
-
-    # 1. When raw corridor string is present, use explicit corridor tag routing
-    if corridor:
-        if target in corridor:
-            return True
-        if any(c in corridor for c in proast_corridors):
-            return target in ("PROASTIAKOS", "PROASTIAKOS_ATH", "SUBURBAN")
-        if any(c in corridor for c in pathe_corridors):
-            return target in ("PATHE", "PATHE_MAINLINE", "MAINLINE")
-        if any(c in corridor for c in northern_corridors):
-            return target in ("NORTHERN", "NORTHERN_GREECE", "NORTH")
-        if any(c in corridor for c in thessaly_corridors):
-            return target in ("THESSALY",)
-        return False
-
-    # 2. When raw corridor is absent (real-world SSE telemetry), infer from metadata & geography
-    has_coords = (p.lat != 0.0 or p.lng != 0.0)
+    has_coords = (abs(p.lat) > 1e-9 or abs(p.lng) > 1e-9)
     pt = GeoPoint(lat=p.lat, lng=p.lng) if has_coords else None
 
+    combined_type = f"{service_type} {train_type}"
     is_suburban = (
-        "SUBURBAN" in service_type
-        or "PROAST" in service_type
-        or "SUBURBAN" in train_type
-        or "PROAST" in train_type
-        or any(st in origin or st in destination or st in next_station for st in ("ΑΕΡΟΔΡΟΜΙΟ", "ΚΙΑΤΟ", "ΧΑΛΚΙΔΑ", "ΛΙΟΣΙΑ", "ΝΕΡΑΤΖΙΩΤΙΣΣΑ"))
+        "SUBURBAN" in combined_type
+        or "PROAST" in combined_type
+        or _has_station_keyword(origin, destination, next_station, _PROAST_STATIONS)
     )
-    is_intercity = (
-        "INTERCITY" in service_type
-        or "IC" in service_type
-        or "INTERCITY" in train_type
-        or "IC" in train_type
-    )
+    is_intercity = "INTERCITY" in combined_type or "IC" in service_type or "IC" in train_type
 
     if target in ("PROASTIAKOS", "PROASTIAKOS_ATH", "SUBURBAN"):
-        if is_suburban:
-            return True
-        if is_intercity:
-            return False
-        if pt and PROASTIAKOS_PRESET.contains(pt):
-            return True
-        return False
+        return is_suburban or (not is_intercity and pt is not None and PROASTIAKOS_PRESET.contains(pt))
 
     if target in ("PATHE", "PATHE_MAINLINE", "MAINLINE"):
-        if is_intercity:
-            return True
-        if is_suburban:
-            return False
-        if pt and PATHE_PRESET.contains(pt):
-            return True
-        return False
+        return is_intercity or (not is_suburban and pt is not None and PATHE_PRESET.contains(pt))
 
-    if target in ("NORTHERN", "NORTHERN_GREECE", "NORTH"):
-        if is_suburban:
-            return False
-        if any(st in origin or st in destination or st in next_station for st in ("ΣΕΡΡΕΣ", "ΔΡΑΜΑ", "ΞΑΝΘΗ", "ΚΟΜΟΤΗΝΗ", "ΑΛΕΞΑΝΔΡΟΥΠΟΛΗ", "ΦΛΩΡΙΝΑ", "ΕΔΕΣΣΑ")):
-            return True
-        if pt and NORTHERN_GREECE_PRESET.contains(pt):
-            return True
-        return False
+    if target in ("NORTHERN", "NORTHERN_GREECE", "NORTH") and not is_suburban:
+        return _has_station_keyword(origin, destination, next_station, _NORTHERN_STATIONS) or (
+            pt is not None and NORTHERN_GREECE_PRESET.contains(pt)
+        )
 
-    if target in ("THESSALY",):
-        if is_suburban:
-            return False
-        if any(st in origin or st in destination or st in next_station for st in ("ΒΟΛΟΣ", "ΚΑΛΑΜΠΑΚΑ", "ΚΑΡΔΙΤΣΑ", "ΤΡΙΚΑΛΑ")):
-            return True
-        return False
+    if target in ("THESSALY",) and not is_suburban:
+        return _has_station_keyword(origin, destination, next_station, _THESSALY_STATIONS)
 
     return False
 
@@ -299,7 +300,7 @@ def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
 class TrainStateStore:
     """Thread-safe state repository for live train positions and UI view state."""
 
-    def __init__(self, stale_timeout_sec: float = 1800.0, max_trail_len: int = 15):
+    def __init__(self, stale_timeout_sec: float = 1800.0, max_trail_len: int = 15) -> None:
         self._lock = threading.RLock()
         self._stale_timeout_sec = stale_timeout_sec
         self._max_trail_len = max_trail_len

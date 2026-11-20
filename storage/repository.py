@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from pathlib import PurePath
-from typing import Any, Dict, Generator, List, Optional, TextIO, Union
+from typing import Any, Dict, Generator, List, Optional, TextIO, Tuple, Union
 
 from storage.db import Database
 
@@ -95,7 +95,7 @@ class HistoricalRepository:
     Thread-safe for concurrent read execution under SQLite WAL mode.
     """
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database) -> None:
         self.db = db
 
     # -------------------------------------------------------------------------
@@ -857,6 +857,146 @@ class HistoricalRepository:
                 raise ValueError("archive_path cannot be identical to the active database path")
         return resolved
 
+    @staticmethod
+    def _iso_or_str(val: Any) -> str:
+        """Normalize datetime or raw value to UTC ISO-8601 string with Z suffix."""
+        return val.isoformat().replace("+00:00", "Z") if hasattr(val, "isoformat") else str(val)
+
+    @staticmethod
+    def _iso_or_raw(val: Any) -> Any:
+        """Normalize datetime to UTC ISO-8601 string or preserve raw/None value."""
+        return val.isoformat().replace("+00:00", "Z") if hasattr(val, "isoformat") else val
+
+    def _collect_archive_payload(
+        self,
+        cutoff_clean: str,
+        cutoff_date: str,
+    ) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
+        """Read aged telemetry rows and referenced parent records from hot database."""
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                        track_heading, altitude, delay_min, status, progress, chainage_m,
+                        dist_to_dest_m, next_station, corridor
+                    FROM telemetry_history
+                    WHERE recorded_at < ?
+                    ORDER BY recorded_at ASC, id ASC;
+                    """,
+                    (cutoff_clean,),
+                )
+                telemetry_rows = [tuple(r) for r in cur.fetchall()]
+                if not telemetry_rows:
+                    return [], [], [], []
+
+                train_numbers = sorted({str(r[1]) for r in telemetry_rows if r[1] is not None})
+                schedule_ids = {str(r[2]) for r in telemetry_rows if r[2] is not None}
+
+                if len(cutoff_date) == 10:
+                    cur.execute(
+                        """
+                        SELECT schedule_id, train_number
+                        FROM scheduled_trips
+                        WHERE service_date < ?;
+                        """,
+                        (cutoff_date,),
+                    )
+                    for row in cur.fetchall():
+                        schedule_ids.add(str(row[0]))
+                        if row[1] is not None:
+                            train_numbers.append(str(row[1]))
+                    train_numbers = sorted(set(train_numbers))
+
+                train_rows = self._fetch_trains_for_archive(cur, train_numbers)
+                trip_rows, stop_rows = self._fetch_schedules_for_archive(cur, sorted(schedule_ids))
+            finally:
+                cur.close()
+
+        normalized_telemetry = [
+            (
+                r[0], r[1], r[2], self._iso_or_str(r[3]), r[4], r[5], r[6], r[7],
+                r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16],
+            )
+            for r in telemetry_rows
+        ]
+        return normalized_telemetry, train_rows, trip_rows, stop_rows
+
+    def _fetch_trains_for_archive(
+        self,
+        cur: Any,
+        train_numbers: List[str],
+    ) -> List[Any]:
+        """Fetch referenced train records for archival."""
+        if not train_numbers:
+            return []
+        placeholders = ",".join("?" for _ in train_numbers)
+        cur.execute(
+            f"""
+            SELECT
+                train_number, locomotive_number, default_name, train_type,
+                service_type, first_observed_at, last_observed_at
+            FROM trains
+            WHERE train_number IN ({placeholders});
+            """,
+            train_numbers,
+        )
+        return [
+            (r[0], r[1], r[2], r[3], r[4], self._iso_or_str(r[5]), self._iso_or_str(r[6]))
+            for r in cur.fetchall()
+        ]
+
+    def _fetch_schedules_for_archive(
+        self,
+        cur: Any,
+        sorted_schedule_ids: List[str],
+    ) -> Tuple[List[Any], List[Any]]:
+        """Fetch referenced scheduled_trips and schedule_stops for archival."""
+        if not sorted_schedule_ids:
+            return [], []
+        sched_placeholders = ",".join("?" for _ in sorted_schedule_ids)
+        cur.execute(
+            f"""
+            SELECT
+                schedule_id, train_number, origin, destination, corridor,
+                service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
+            FROM scheduled_trips
+            WHERE schedule_id IN ({sched_placeholders});
+            """,
+            sorted_schedule_ids,
+        )
+        trip_rows = [
+            (
+                r[0], r[1], r[2], r[3], r[4], r[5],
+                self._iso_or_raw(r[6]), self._iso_or_raw(r[7]), r[8], self._iso_or_raw(r[9]),
+            )
+            for r in cur.fetchall()
+        ]
+
+        cur.execute(
+            f"""
+            SELECT
+                schedule_id, stop_sequence, station_id, station_name,
+                scheduled_arrival, scheduled_departure, actual_arrival,
+                actual_departure, platform, delay_sec
+            FROM schedule_stops
+            WHERE schedule_id IN ({sched_placeholders})
+            ORDER BY schedule_id ASC, stop_sequence ASC;
+            """,
+            sorted_schedule_ids,
+        )
+        stop_rows = [
+            (
+                r[0], r[1], r[2], r[3],
+                self._iso_or_raw(r[4]), self._iso_or_raw(r[5]),
+                self._iso_or_raw(r[6]), self._iso_or_raw(r[7]), r[8], r[9],
+            )
+            for r in cur.fetchall()
+        ]
+        return trip_rows, stop_rows
+
     def archive_before(
         self,
         cutoff_iso: str,
@@ -882,110 +1022,11 @@ class HistoricalRepository:
         target_archive_path = self.resolve_archive_path(archive_path)
 
         # 1. Read aged telemetry rows and referenced parent records from hot database
-        with self.db.connection() as conn:
-            cur = conn.cursor()
-            try:
-                cur.execute(
-                    """
-                    SELECT
-                        id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
-                        track_heading, altitude, delay_min, status, progress, chainage_m,
-                        dist_to_dest_m, next_station, corridor
-                    FROM telemetry_history
-                    WHERE recorded_at < ?
-                    ORDER BY recorded_at ASC, id ASC;
-                    """,
-                    (cutoff_clean,),
-                )
-                telemetry_rows = [tuple(r) for r in cur.fetchall()]
-                if not telemetry_rows:
-                    return 0
-
-                train_numbers = sorted({str(r[1]) for r in telemetry_rows if r[1] is not None})
-                schedule_ids = {str(r[2]) for r in telemetry_rows if r[2] is not None}
-
-                if len(cutoff_date) == 10:
-                    cur.execute(
-                        """
-                        SELECT schedule_id, train_number
-                        FROM scheduled_trips
-                        WHERE service_date < ?;
-                        """,
-                        (cutoff_date,),
-                    )
-                    for row in cur.fetchall():
-                        schedule_ids.add(str(row[0]))
-                        if row[1] is not None:
-                            train_numbers.append(str(row[1]))
-                    train_numbers = sorted(set(train_numbers))
-
-                train_rows: List[ Any ] = []
-                if train_numbers:
-                    placeholders = ",".join("?" for _ in train_numbers)
-                    cur.execute(
-                        f"""
-                        SELECT
-                            train_number, locomotive_number, default_name, train_type,
-                            service_type, first_observed_at, last_observed_at
-                        FROM trains
-                        WHERE train_number IN ({placeholders});
-                        """,
-                        train_numbers,
-                    )
-                    for r in cur.fetchall():
-                        first_obs = r[5].isoformat().replace("+00:00", "Z") if hasattr(r[5], "isoformat") else str(r[5])
-                        last_obs = r[6].isoformat().replace("+00:00", "Z") if hasattr(r[6], "isoformat") else str(r[6])
-                        train_rows.append((r[0], r[1], r[2], r[3], r[4], first_obs, last_obs))
-
-                trip_rows: List[Any] = []
-                stop_rows: List[Any] = []
-                sorted_schedule_ids = sorted(schedule_ids)
-                if sorted_schedule_ids:
-                    sched_placeholders = ",".join("?" for _ in sorted_schedule_ids)
-                    cur.execute(
-                        f"""
-                        SELECT
-                            schedule_id, train_number, origin, destination, corridor,
-                            service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
-                        FROM scheduled_trips
-                        WHERE schedule_id IN ({sched_placeholders});
-                        """,
-                        sorted_schedule_ids,
-                    )
-                    for r in cur.fetchall():
-                        s_dep = r[6].isoformat().replace("+00:00", "Z") if hasattr(r[6], "isoformat") else r[6]
-                        s_arr = r[7].isoformat().replace("+00:00", "Z") if hasattr(r[7], "isoformat") else r[7]
-                        c_at = r[9].isoformat().replace("+00:00", "Z") if hasattr(r[9], "isoformat") else r[9]
-                        trip_rows.append((r[0], r[1], r[2], r[3], r[4], r[5], s_dep, s_arr, r[8], c_at))
-
-                    cur.execute(
-                        f"""
-                        SELECT
-                            schedule_id, stop_sequence, station_id, station_name,
-                            scheduled_arrival, scheduled_departure, actual_arrival,
-                            actual_departure, platform, delay_sec
-                        FROM schedule_stops
-                        WHERE schedule_id IN ({sched_placeholders})
-                        ORDER BY schedule_id ASC, stop_sequence ASC;
-                        """,
-                        sorted_schedule_ids,
-                    )
-                    for r in cur.fetchall():
-                        sa = r[4].isoformat().replace("+00:00", "Z") if hasattr(r[4], "isoformat") else r[4]
-                        sd = r[5].isoformat().replace("+00:00", "Z") if hasattr(r[5], "isoformat") else r[5]
-                        aa = r[6].isoformat().replace("+00:00", "Z") if hasattr(r[6], "isoformat") else r[6]
-                        ad = r[7].isoformat().replace("+00:00", "Z") if hasattr(r[7], "isoformat") else r[7]
-                        stop_rows.append((r[0], r[1], r[2], r[3], sa, sd, aa, ad, r[8], r[9]))
-            finally:
-                cur.close()
-
-        normalized_telemetry = []
-        for r in telemetry_rows:
-            rec_at = r[3].isoformat().replace("+00:00", "Z") if hasattr(r[3], "isoformat") else str(r[3])
-            normalized_telemetry.append((
-                r[0], r[1], r[2], rec_at, r[4], r[5], r[6], r[7],
-                r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16],
-            ))
+        normalized_telemetry, train_rows, trip_rows, stop_rows = self._collect_archive_payload(
+            cutoff_clean, cutoff_date
+        )
+        if not normalized_telemetry:
+            return 0
 
         # 2. Persist rows into Archive SQLite database first (Zero-Data-Loss guarantee)
         archive_db = Database(target_archive_path)

@@ -430,7 +430,7 @@ class SimulatedTrain:
     _initial_distance_m: float = field(default=0.0, init=False, repr=False)
     _initial_direction: int = field(default=1, init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._initial_distance_m = self.current_distance_m
         self._initial_direction = self.direction
         if self.motion_state == TrainMotionState.RUNNING and self.current_speed_kmh <= 0.0:
@@ -576,7 +576,7 @@ class MockTelemetryEngine:
         stations_path: Optional[str] = None,
         tracks_path: Optional[str] = None,
         time_scale: float = 1.0,
-    ):
+    ) -> None:
         """Initialize mock engine, load topology datasets, and spawn standard train roster."""
         self.stations: Dict[str, StationNode] = load_stations(stations_path)
         self.tracks: Dict[str, TrackPolyline] = load_tracks(tracks_path)

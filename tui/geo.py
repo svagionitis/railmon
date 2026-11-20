@@ -302,7 +302,7 @@ class GeoProjector:
         standard_parallel: Reference latitude in degrees for cosine correction.
     """
 
-    def __init__(self, viewport: Viewport, standard_parallel: float = 39.5):
+    def __init__(self, viewport: Viewport, standard_parallel: float = 39.5) -> None:
         """Initialize the projector with a viewport and standard parallel.
 
         Args:
@@ -577,7 +577,7 @@ class BrailleCanvas:
         sub_height: Canvas height in sub-pixels (height_cells * 4).
     """
 
-    def __init__(self, width_cells: int, height_cells: int, ascii_mode: bool = False):
+    def __init__(self, width_cells: int, height_cells: int, ascii_mode: bool = False) -> None:
         """Initialize the Braille canvas with dimensions in character cells.
 
         Args:

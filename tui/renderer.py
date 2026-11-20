@@ -1036,7 +1036,7 @@ class TUIRenderer:
         stations: Optional[Sequence[StationNode]] = None,
         tracks: Optional[Sequence[TrackPolyline]] = None,
         ascii_mode: bool = False,
-    ):
+    ) -> None:
         """Initialize renderer with static railway network vector data.
 
         Args:
@@ -1206,6 +1206,258 @@ class TUIRenderer:
         if time_x > left_w:
             safe_addstr(win, 0, time_x, time_str, dim_attr, ascii_mode=self.ascii_mode)
 
+    def _render_map_tracks(
+        self,
+        win: Any,
+        canvas: BrailleCanvas,
+        projector: GeoProjector,
+        inner_w: int,
+        inner_h: int,
+        track_color_mode: TrackColorMode,
+        track_attr: int,
+    ) -> None:
+        """Rasterize and blit railway track polylines onto the map curses window."""
+        if track_color_mode != TrackColorMode.CORRIDOR:
+            for track in self.tracks:
+                sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
+                canvas.draw_polyline(sub_points)
+            for r_idx, row_str in enumerate(canvas.render_rows()):
+                safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
+            return
+
+        cell_pairs: List[int] = [PAIR_TRACK] * (inner_w * inner_h)
+        for track in self.tracks:
+            sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
+            track_canvas = BrailleCanvas(
+                width_cells=inner_w, height_cells=inner_h, ascii_mode=self.ascii_mode
+            )
+            track_canvas.draw_polyline(sub_points)
+            pair = get_track_corridor_color_pair(track.corridor_id or track.name)
+            t_buf = track_canvas.buffer
+            c_buf = canvas.buffer
+            for idx, bits in enumerate(t_buf):
+                if bits:
+                    c_buf[idx] |= bits
+                    if pair != PAIR_TRACK or cell_pairs[idx] == PAIR_TRACK:
+                        cell_pairs[idx] = pair
+
+        pair_attr_map = {
+            PAIR_TRACK: track_attr,
+            PAIR_TRAIN_PROAST: safe_color_pair(PAIR_TRAIN_PROAST, curses.A_NORMAL),
+            PAIR_STATION_DIM: safe_color_pair(PAIR_STATION_DIM, curses.A_DIM) | curses.A_DIM,
+        }
+        for r_idx, row_str in enumerate(canvas.render_rows()):
+            self._blit_colored_track_row(
+                win, r_idx, row_str, cell_pairs, inner_w, pair_attr_map, track_attr
+            )
+
+    def _blit_colored_track_row(
+        self,
+        win: Any,
+        r_idx: int,
+        row_str: str,
+        cell_pairs: List[int],
+        inner_w: int,
+        pair_attr_map: Dict[int, int],
+        default_attr: int,
+    ) -> None:
+        """Blit a single rasterized Braille row using run-length color spans."""
+        row_offset = r_idx * inner_w
+        run_start = 0
+        run_pair = cell_pairs[row_offset] if inner_w > 0 else PAIR_TRACK
+        for c_idx in range(1, inner_w):
+            c_pair = cell_pairs[row_offset + c_idx]
+            if c_pair != run_pair:
+                safe_addstr(
+                    win,
+                    1 + r_idx,
+                    1 + run_start,
+                    row_str[run_start:c_idx],
+                    pair_attr_map.get(run_pair, default_attr),
+                    max_w=c_idx - run_start,
+                    ascii_mode=self.ascii_mode,
+                )
+                run_start = c_idx
+                run_pair = c_pair
+        if inner_w > run_start:
+            safe_addstr(
+                win,
+                1 + r_idx,
+                1 + run_start,
+                row_str[run_start:inner_w],
+                pair_attr_map.get(run_pair, default_attr),
+                max_w=inner_w - run_start,
+                ascii_mode=self.ascii_mode,
+            )
+
+    def _render_map_breadcrumbs(
+        self,
+        win: Any,
+        snapshot: StateSnapshot,
+        projector: GeoProjector,
+        canvas: BrailleCanvas,
+        inner_w: int,
+        inner_h: int,
+        breadcrumb_mode: BreadcrumbMode,
+        trail_attr: int,
+    ) -> None:
+        """Overlay historical breadcrumb trail dots onto the map window."""
+        if breadcrumb_mode == BreadcrumbMode.OFF:
+            return
+        if breadcrumb_mode == BreadcrumbMode.SELECTED:
+            sel = snapshot.selected_train
+            if sel is None or not any(r.position.id == sel.position.id for r in snapshot.filtered_trains):
+                return
+            trail_records: Sequence[TrainRecord] = (sel,)
+        else:
+            trail_records = snapshot.filtered_trains
+
+        trail_glyph = self.glyphs.trail_dot
+        for record in trail_records:
+            corridor_hint = record.position.corridor
+            for crumb in tuple(record.trail):
+                snapped_pt = snap_to_track_network(
+                    GeoPoint(lat=crumb.lat, lng=crumb.lng),
+                    self.tracks,
+                    corridor_hint=corridor_hint,
+                )
+                col, row = projector.resolve_track_cell(snapped_pt, canvas)
+                if 0 <= col < inner_w and 0 <= row < inner_h:
+                    try:
+                        win.addstr(1 + row, 1 + col, trail_glyph, trail_attr)
+                    except curses.error:
+                        pass
+
+    def _render_map_stations(
+        self,
+        win: Any,
+        snapshot: StateSnapshot,
+        projector: GeoProjector,
+        canvas: BrailleCanvas,
+        inner_w: int,
+        inner_h: int,
+        station_label_mode: StationLabelMode,
+        occupied_cells: Set[Tuple[int, int]],
+        station_attr: int,
+        station_dim_attr: int,
+    ) -> None:
+        """Overlay railway stations and labels with greedy collision avoidance."""
+        inspector_mode = getattr(snapshot, "inspector_mode", InspectorMode.TRAIN)
+        selected_stn_id = (
+            getattr(snapshot, "selected_station_id", None)
+            if inspector_mode == InspectorMode.STATION
+            else None
+        )
+        sorted_stations = sorted(
+            self.stations,
+            key=lambda s: (s.id != selected_stn_id, not s.is_hub),
+        )
+
+        for stn in sorted_stations:
+            col, row = projector.resolve_track_cell(stn.point, canvas)
+            if not (0 <= col < inner_w and 0 <= row < inner_h):
+                continue
+
+            is_active_station = selected_stn_id is not None and stn.id == selected_stn_id
+            glyph = self.glyphs.station_hub if stn.is_hub else self.glyphs.station_normal
+            marker_attr = (
+                (station_attr | curses.A_REVERSE | curses.A_BOLD)
+                if is_active_station
+                else station_attr
+            )
+            try:
+                win.addstr(1 + row, 1 + col, glyph, marker_attr)
+            except curses.error:
+                pass
+            occupied_cells.add((col, row))
+
+            should_draw_label = (
+                is_active_station
+                if station_label_mode == StationLabelMode.MARKERS_ONLY
+                else (
+                    (stn.is_hub or is_active_station)
+                    if station_label_mode == StationLabelMode.HUBS_ONLY
+                    else True
+                )
+            )
+            if not should_draw_label:
+                continue
+
+            name = stn.name_en or stn.name_el or stn.id
+            label = f" [{name}]" if is_active_station else f" {name}"
+            label_w = get_string_display_width(label)
+            label_start_x = col + 1
+
+            if label_start_x + label_w <= inner_w and not any(
+                (label_start_x + dx, row) in occupied_cells for dx in range(label_w)
+            ):
+                lbl_attr = (
+                    (station_attr | curses.A_REVERSE | curses.A_BOLD)
+                    if is_active_station
+                    else (station_attr if stn.is_hub else station_dim_attr)
+                )
+                safe_addstr(
+                    win,
+                    1 + row,
+                    1 + label_start_x,
+                    label,
+                    lbl_attr,
+                    max_w=inner_w - label_start_x,
+                    ascii_mode=self.ascii_mode,
+                )
+                for dx in range(label_w):
+                    occupied_cells.add((label_start_x + dx, row))
+
+    def _render_map_trains(
+        self,
+        win: Any,
+        snapshot: StateSnapshot,
+        projector: GeoProjector,
+        canvas: BrailleCanvas,
+        inner_w: int,
+        inner_h: int,
+    ) -> None:
+        """Overlay live train heading glyphs and selected train callout label."""
+        selected_record = snapshot.selected_train
+        for record in snapshot.filtered_trains:
+            pos = record.position
+            snapped_pt = snap_to_track_network(
+                GeoPoint(lat=pos.lat, lng=pos.lng),
+                self.tracks,
+                corridor_hint=pos.corridor,
+            )
+            col, row = projector.resolve_track_cell(snapped_pt, canvas)
+            if not (0 <= col < inner_w and 0 <= row < inner_h):
+                continue
+
+            is_selected = selected_record is not None and pos.id == selected_record.position.id
+            heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
+            glyph = get_heading_glyph(heading_deg, ascii_mode=self.ascii_mode)
+            train_attr = safe_color_pair(get_train_color_pair(record), curses.A_BOLD)
+            if is_selected:
+                train_attr |= curses.A_REVERSE | curses.A_BOLD
+
+            try:
+                win.addstr(1 + row, 1 + col, glyph, train_attr)
+            except curses.error:
+                pass
+
+            if is_selected:
+                tn = pos.train_number or pos.id
+                spd_str = f"{int(round(pos.speed or 0))}km/h"
+                dly_val = int(round(pos.delay or 0))
+                dly_str = f"+{dly_val}m" if dly_val > 0 else (f"{dly_val}m" if dly_val < 0 else "0m")
+                tag = f" {self.glyphs.callout_arrow} [{tn}] ({spd_str}, {dly_str})"
+                safe_addstr(
+                    win,
+                    1 + row,
+                    1 + col + 1,
+                    tag,
+                    train_attr,
+                    max_w=inner_w - (col + 1),
+                    ascii_mode=self.ascii_mode,
+                )
+
     def render_map(
         self,
         win: Any,
@@ -1230,7 +1482,6 @@ class TUIRenderer:
         station_dim_attr = safe_color_pair(PAIR_STATION_DIM, curses.A_NORMAL) | curses.A_DIM
         trail_attr = safe_color_pair(PAIR_TRAIL, curses.A_DIM) | curses.A_DIM
 
-        # Draw border
         try:
             if self.ascii_mode:
                 win.border(ord('|'), ord('|'), ord('-'), ord('-'), ord('+'), ord('+'), ord('+'), ord('+'))
@@ -1239,28 +1490,26 @@ class TUIRenderer:
         except curses.error:
             pass
 
-        # Title badge
         center = projector.viewport.center
         follow_str = ""
         if snapshot.follow_mode and snapshot.selected_train:
             tn = snapshot.selected_train.position.train_number or snapshot.selected_train.position.id
             follow_str = f" | Follow: #{tn}"
         breadcrumb_mode = getattr(snapshot, "breadcrumb_mode", BreadcrumbMode.ALL)
-        if breadcrumb_mode == BreadcrumbMode.SELECTED:
-            trails_label = "SEL"
-        elif breadcrumb_mode == BreadcrumbMode.OFF:
-            trails_label = "OFF"
-        else:
-            trails_label = "ALL"
+        trails_label = (
+            "SEL"
+            if breadcrumb_mode == BreadcrumbMode.SELECTED
+            else ("OFF" if breadcrumb_mode == BreadcrumbMode.OFF else "ALL")
+        )
         station_label_mode = getattr(
             snapshot, "station_label_mode", StationLabelMode.HUBS_AND_SECONDARY
         )
         track_color_mode = getattr(snapshot, "track_color_mode", TrackColorMode.UNIFORM)
-        layer_str = ""
-        if station_label_mode == StationLabelMode.HUBS_ONLY:
-            layer_str += " | Labels: HUBS"
-        elif station_label_mode == StationLabelMode.MARKERS_ONLY:
-            layer_str += " | Labels: OFF"
+        layer_str = (
+            " | Labels: HUBS"
+            if station_label_mode == StationLabelMode.HUBS_ONLY
+            else (" | Labels: OFF" if station_label_mode == StationLabelMode.MARKERS_ONLY else "")
+        )
         if track_color_mode == TrackColorMode.CORRIDOR:
             layer_str += " | Tracks: COLOR"
         d_sym = self.glyphs.degree_sym
@@ -1275,110 +1524,19 @@ class TUIRenderer:
 
         # 1. Rasterize tracks using BrailleCanvas
         canvas = BrailleCanvas(width_cells=inner_w, height_cells=inner_h, ascii_mode=self.ascii_mode)
-        if track_color_mode == TrackColorMode.CORRIDOR:
-            cell_pairs: List[int] = [PAIR_TRACK] * (inner_w * inner_h)
-            for track in self.tracks:
-                sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
-                track_canvas = BrailleCanvas(
-                    width_cells=inner_w, height_cells=inner_h, ascii_mode=self.ascii_mode
-                )
-                track_canvas.draw_polyline(sub_points)
-                pair = get_track_corridor_color_pair(track.corridor_id or track.name)
-                t_buf = track_canvas.buffer
-                c_buf = canvas.buffer
-                for idx in range(len(t_buf)):
-                    bits = t_buf[idx]
-                    if bits:
-                        c_buf[idx] |= bits
-                        if pair != PAIR_TRACK or cell_pairs[idx] == PAIR_TRACK:
-                            cell_pairs[idx] = pair
-
-            proast_track_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_NORMAL)
-            regional_track_attr = safe_color_pair(PAIR_STATION_DIM, curses.A_DIM) | curses.A_DIM
-            pair_attr_map = {
-                PAIR_TRACK: track_attr,
-                PAIR_TRAIN_PROAST: proast_track_attr,
-                PAIR_STATION_DIM: regional_track_attr,
-            }
-            rows = canvas.render_rows()
-            for r_idx, row_str in enumerate(rows):
-                row_offset = r_idx * inner_w
-                run_start = 0
-                run_pair = cell_pairs[row_offset] if inner_w > 0 else PAIR_TRACK
-                for c_idx in range(1, inner_w):
-                    c_pair = cell_pairs[row_offset + c_idx]
-                    if c_pair != run_pair:
-                        run_text = row_str[run_start:c_idx]
-                        safe_addstr(
-                            win,
-                            1 + r_idx,
-                            1 + run_start,
-                            run_text,
-                            pair_attr_map.get(run_pair, track_attr),
-                            max_w=c_idx - run_start,
-                            ascii_mode=self.ascii_mode,
-                        )
-                        run_start = c_idx
-                        run_pair = c_pair
-                if inner_w > run_start:
-                    run_text = row_str[run_start:inner_w]
-                    safe_addstr(
-                        win,
-                        1 + r_idx,
-                        1 + run_start,
-                        run_text,
-                        pair_attr_map.get(run_pair, track_attr),
-                        max_w=inner_w - run_start,
-                        ascii_mode=self.ascii_mode,
-                    )
-        else:
-            for track in self.tracks:
-                sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
-                canvas.draw_polyline(sub_points)
-
-            # Blit canvas rows to curses buffer
-            rows = canvas.render_rows()
-            for r_idx, row_str in enumerate(rows):
-                safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
+        self._render_map_tracks(win, canvas, projector, inner_w, inner_h, track_color_mode, track_attr)
 
         # 2. Overlay historical breadcrumbs
-        if breadcrumb_mode == BreadcrumbMode.OFF:
-            trail_records: Sequence[TrainRecord] = ()
-        elif breadcrumb_mode == BreadcrumbMode.SELECTED:
-            if snapshot.selected_train is not None and any(
-                r.position.id == snapshot.selected_train.position.id
-                for r in snapshot.filtered_trains
-            ):
-                trail_records = (snapshot.selected_train,)
-            else:
-                trail_records = ()
-        else:
-            trail_records = snapshot.filtered_trains
+        self._render_map_breadcrumbs(
+            win, snapshot, projector, canvas, inner_w, inner_h, breadcrumb_mode, trail_attr
+        )
 
-        trail_glyph = self.glyphs.trail_dot
-        for record in trail_records:
-            corridor_hint = record.position.corridor
-            for crumb in tuple(record.trail):
-                raw_pt = GeoPoint(lat=crumb.lat, lng=crumb.lng)
-                snapped_pt = snap_to_track_network(
-                    raw_pt, self.tracks, corridor_hint=corridor_hint
-                )
-                col, row = projector.resolve_track_cell(snapped_pt, canvas)
-                if 0 <= col < inner_w and 0 <= row < inner_h:
-                    try:
-                        win.addstr(1 + row, 1 + col, trail_glyph, trail_attr)
-                    except curses.error:
-                        pass
-
-        # 3. Overlay Stations with greedy collision avoidance
+        # 3. Overlay scale bar reservation and stations
         occupied_cells: Set[Tuple[int, int]] = set()
         scale_bar_str: Optional[str] = None
-        scale_row_inner = inner_h - 1  # Window row y = max_y - 2
-        scale_col_inner = 1            # Window col x = 2
         if max_y >= 4 and max_x >= 16:
             max_bar_w = min(18, max_x - 4)
-            min_bar_w = min(12, max_bar_w)
-            scale_spec = projector.compute_scale_bar(min_cells=min_bar_w, max_cells=max_bar_w)
+            scale_spec = projector.compute_scale_bar(min_cells=min(12, max_bar_w), max_cells=max_bar_w)
             candidate_bar = format_scale_bar(
                 scale_spec.distance_km,
                 width_cells=scale_spec.width_cells,
@@ -1387,131 +1545,36 @@ class TUIRenderer:
             bar_w = get_string_display_width(candidate_bar)
             if bar_w <= max_x - 4:
                 scale_bar_str = candidate_bar
-                if 0 <= scale_row_inner < inner_h:
+                if 0 <= inner_h - 1 < inner_h:
                     for dx in range(bar_w):
-                        occupied_cells.add((scale_col_inner + dx, scale_row_inner))
+                        occupied_cells.add((1 + dx, inner_h - 1))
 
-        inspector_mode = getattr(snapshot, "inspector_mode", InspectorMode.TRAIN)
-        selected_stn_id = (
-            getattr(snapshot, "selected_station_id", None)
-            if inspector_mode == InspectorMode.STATION
-            else None
+        self._render_map_stations(
+            win,
+            snapshot,
+            projector,
+            canvas,
+            inner_w,
+            inner_h,
+            station_label_mode,
+            occupied_cells,
+            station_attr,
+            station_dim_attr,
         )
-        # Prioritize active selected station first, then hub stations over secondary ones
-        sorted_stations = sorted(
-            self.stations,
-            key=lambda s: (s.id != selected_stn_id, not s.is_hub),
-        )
 
-        for stn in sorted_stations:
-            col, row = projector.resolve_track_cell(stn.point, canvas)
-            if not (0 <= col < inner_w and 0 <= row < inner_h):
-                continue
-
-            is_active_station = selected_stn_id is not None and stn.id == selected_stn_id
-            # Draw station marker glyph
-            glyph = self.glyphs.station_hub if stn.is_hub else self.glyphs.station_normal
-            marker_attr = (
-                (station_attr | curses.A_REVERSE | curses.A_BOLD)
-                if is_active_station
-                else station_attr
-            )
-            try:
-                win.addstr(1 + row, 1 + col, glyph, marker_attr)
-            except curses.error:
-                pass
-            occupied_cells.add((col, row))
-
-            if station_label_mode == StationLabelMode.MARKERS_ONLY:
-                should_draw_label = is_active_station
-            elif station_label_mode == StationLabelMode.HUBS_ONLY:
-                should_draw_label = stn.is_hub or is_active_station
-            else:
-                should_draw_label = True
-
-            if not should_draw_label:
-                continue
-
-            # Determine label text and width
-            name = stn.name_en or stn.name_el or stn.id
-            label = f" [{name}]" if is_active_station else f" {name}"
-            label_w = get_string_display_width(label)
-            label_start_x = col + 1
-
-            # Check for collision with existing text
-            has_collision = False
-            for dx in range(label_w):
-                if (label_start_x + dx, row) in occupied_cells:
-                    has_collision = True
-                    break
-
-            if not has_collision and label_start_x + label_w <= inner_w:
-                if is_active_station:
-                    lbl_attr = station_attr | curses.A_REVERSE | curses.A_BOLD
-                elif stn.is_hub:
-                    lbl_attr = station_attr
-                else:
-                    lbl_attr = station_dim_attr
-                safe_addstr(
-                    win,
-                    1 + row,
-                    1 + label_start_x,
-                    label,
-                    lbl_attr,
-                    max_w=inner_w - label_start_x,
-                    ascii_mode=self.ascii_mode,
-                )
-                for dx in range(label_w):
-                    occupied_cells.add((label_start_x + dx, row))
-
-        # 3b. Overlay Dynamic Conformal Map Scale Bar at bottom-left (row max_y - 2, col 2)
         if scale_bar_str is not None:
-            scale_attr = border_attr | curses.A_BOLD
             safe_addstr(
                 win,
                 max_y - 2,
                 2,
                 scale_bar_str,
-                scale_attr,
+                border_attr | curses.A_BOLD,
                 max_w=max_x - 4,
                 ascii_mode=self.ascii_mode,
             )
 
         # 4. Overlay Live Trains and Directional Heading Glyphs
-        selected_record = snapshot.selected_train
-        for record in snapshot.filtered_trains:
-            pos = record.position
-            raw_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
-            snapped_pt = snap_to_track_network(
-                raw_pt, self.tracks, corridor_hint=pos.corridor
-            )
-            col, row = projector.resolve_track_cell(snapped_pt, canvas)
-            if not (0 <= col < inner_w and 0 <= row < inner_h):
-                continue
-
-            is_selected = selected_record is not None and record.position.id == selected_record.position.id
-            heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
-            glyph = get_heading_glyph(heading_deg, ascii_mode=self.ascii_mode)
-            pair = get_train_color_pair(record)
-            train_attr = safe_color_pair(pair, curses.A_BOLD)
-
-            if is_selected:
-                train_attr |= curses.A_REVERSE | curses.A_BOLD
-
-            try:
-                win.addstr(1 + row, 1 + col, glyph, train_attr)
-            except curses.error:
-                pass
-
-            # If selected, render callout label
-            if is_selected:
-                tn = pos.train_number or pos.id
-                spd_str = f"{int(round(pos.speed or 0))}km/h"
-                dly_val = int(round(pos.delay or 0))
-                dly_str = f"+{dly_val}m" if dly_val > 0 else (f"{dly_val}m" if dly_val < 0 else "0m")
-                arrow = self.glyphs.callout_arrow
-                tag = f" {arrow} [{tn}] ({spd_str}, {dly_str})"
-                safe_addstr(win, 1 + row, 1 + col + 1, tag, train_attr, max_w=inner_w - (col + 1), ascii_mode=self.ascii_mode)
+        self._render_map_trains(win, snapshot, projector, canvas, inner_w, inner_h)
 
     def render_roster(
         self,

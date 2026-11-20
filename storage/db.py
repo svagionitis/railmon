@@ -27,11 +27,11 @@ def _convert_timestamp(val: bytes) -> Any:
     s = val.decode("utf-8")
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         return datetime.fromisoformat(s.replace(" ", "T"))
-    except Exception:
+    except (ValueError, TypeError):
         return s
 
 
@@ -45,7 +45,7 @@ class Database:
     Configures Write-Ahead Logging (WAL) and memory pragmas for high-throughput ingestion.
     """
 
-    def __init__(self, db_path: str = "railway_history.db", auto_migrate: bool = True):
+    def __init__(self, db_path: str = "railway_history.db", auto_migrate: bool = True) -> None:
         self.db_path = db_path
         self._is_memory = (db_path == ":memory:") or db_path.startswith("file::memory:")
 

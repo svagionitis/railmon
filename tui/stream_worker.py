@@ -36,7 +36,7 @@ class StreamWorker:
         base_backoff_sec: float = 3.0,
         max_backoff_sec: float = 60.0,
         prune_interval_sec: float = 60.0,
-    ):
+    ) -> None:
         self.store = store
         self.client = client
         self.mock_engine = mock_engine

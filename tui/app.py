@@ -162,7 +162,7 @@ class TUIApp:
         target_fps: float = 15.0,
         stop_event: Optional[threading.Event] = None,
         ascii_mode: bool = False,
-    ):
+    ) -> None:
         """Initialize the TUI application controller.
 
         Args:

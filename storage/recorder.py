@@ -49,7 +49,7 @@ class TelemetryRecorder:
         self,
         db: Database,
         config: Optional[RecorderConfig] = None,
-    ):
+    ) -> None:
         self.db = db
         self.config = config or RecorderConfig()
         if self.config.retention_days is not None and self.config.retention_days <= 0:
@@ -505,5 +505,5 @@ class TelemetryRecorder:
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.stop()

@@ -46,7 +46,7 @@ class DeadbandFilter:
     to suppress uninformative stationary records and reduce storage volume by 40-60%.
     """
 
-    def __init__(self, config: Optional[DeadbandConfig] = None):
+    def __init__(self, config: Optional[DeadbandConfig] = None) -> None:
         self.config = config or DeadbandConfig()
         self._lock = threading.Lock()
         self._states: Dict[str, _LastRecordedState] = {}

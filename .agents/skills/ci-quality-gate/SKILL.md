@@ -17,6 +17,14 @@ Automates execution of all code quality, type safety, test coverage, and style c
 
 ## Quality Checks Procedure
 
+### 0. MISRA / AUTOSAR / NASA JPL Static Safety AST Gate
+Run the zero-dependency static safety AST auditor first:
+```bash
+python3 .agents/skills/static-safety-analyzer/scripts/safety_ast_audit.py
+```
+**Pass Criteria:**
+- Zero safety rule errors (`PY-MISRA-01` through `PY-MISRA-10`).
+
 ### 1. Test Suite & Coverage Verification
 Run the complete unit and integration test suite:
 ```bash
