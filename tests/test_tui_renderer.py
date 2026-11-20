@@ -12,6 +12,8 @@ from tui.mock_engine import StationNode, TrackPolyline, load_stations, load_trac
 from tui.renderer import (
     MIN_COLS,
     MIN_ROWS,
+    PAIR_STATION_DIM,
+    PAIR_TRACK,
     PAIR_TRAIN_ALERT,
     PAIR_TRAIN_FREIGHT,
     PAIR_TRAIN_HALTED,
@@ -35,6 +37,7 @@ from tui.renderer import (
     get_delay_color_pair,
     get_heading_glyph,
     get_string_display_width,
+    get_track_corridor_color_pair,
     get_train_color_pair,
     normalize_station_key,
     safe_addstr,
@@ -56,6 +59,8 @@ from tui.state import (
     InspectorMode,
     RosterSortMode,
     StateSnapshot,
+    StationLabelMode,
+    TrackColorMode,
     TrainRecord,
     TrainStateStore,
 )
@@ -1592,6 +1597,190 @@ class TestHighZoomTrainTrackAlignment(unittest.TestCase):
         for _, _, text, _ in win_ascii.strings:
             for ch in text:
                 self.assertLess(ord(ch), 128)
+
+    def test_get_track_corridor_color_pair_mapping(self):
+        """TC-F33-04: Verify get_track_corridor_color_pair maps PATHE, PROASTIAKOS, and regional corridors."""
+        self.assertEqual(get_track_corridor_color_pair("pathe-mainline"), PAIR_TRACK)
+        self.assertEqual(get_track_corridor_color_pair("PATHE"), PAIR_TRACK)
+        self.assertEqual(get_track_corridor_color_pair(None), PAIR_TRACK)
+        self.assertEqual(get_track_corridor_color_pair(""), PAIR_TRACK)
+
+        self.assertEqual(
+            get_track_corridor_color_pair("proastiakos-airport-kiato"),
+            PAIR_TRAIN_PROAST,
+        )
+        self.assertEqual(
+            get_track_corridor_color_pair("proastiakos-chalkida"),
+            PAIR_TRAIN_PROAST,
+        )
+        self.assertEqual(get_track_corridor_color_pair("SUBURBAN"), PAIR_TRAIN_PROAST)
+
+        for regional_id in (
+            "northern-corridor",
+            "thessaloniki-idomeni",
+            "thessaly-kalambaka",
+            "thessaly-volos",
+            "western-macedonia",
+            "NORTHERN",
+            "THESSALY",
+        ):
+            self.assertEqual(
+                get_track_corridor_color_pair(regional_id),
+                PAIR_STATION_DIM,
+                f"Expected PAIR_STATION_DIM for {regional_id}",
+            )
+
+    def test_render_map_station_label_modes_all_hubs_markers(self):
+        """TC-F33-05: Verify StationLabelMode (HUBS_AND_SECONDARY, HUBS_ONLY, MARKERS_ONLY) in render_map."""
+        win_h, win_w = 24, 80
+        viewport = Viewport(
+            center=GeoPoint(lat=39.00, lng=22.80),
+            zoom=1.5,
+            width_cells=win_w - 2,
+            height_cells=win_h - 2,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+
+        hub_stn = StationNode(
+            id="LAR",
+            code="1001",
+            name_el="Λάρισα",
+            name_en="Larissa",
+            point=GeoPoint(lat=39.6385, lng=22.4222),
+            corridor="PATHE",
+            is_hub=True,
+        )
+        sec_stn = StationNode(
+            id="THI",
+            code="1002",
+            name_el="Θήβα",
+            name_en="Thiva",
+            point=GeoPoint(lat=38.3242, lng=23.3186),
+            corridor="PATHE",
+            is_hub=False,
+        )
+
+        renderer = TUIRenderer(stations=[hub_stn, sec_stn], tracks=[], ascii_mode=False)
+        store = TrainStateStore()
+
+        # 1. Mode 1: HUBS_AND_SECONDARY (default) -> Both labels and both ◉ markers rendered
+        win_all = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_all, store.get_snapshot(), projector)
+        texts_all = " ".join(text for (_, _, text, _) in win_all.strings)
+        self.assertIn("Larissa", texts_all)
+        self.assertIn("Thiva", texts_all)
+        self.assertNotIn("Labels:", texts_all)
+        markers_all = [text for (_, _, text, _) in win_all.strings if text == "◉"]
+        self.assertEqual(len(markers_all), 2)
+
+        # 2. Mode 2: HUBS_ONLY -> Only Larissa label rendered, but both ◉ markers remain visible
+        store.cycle_station_label_mode()
+        win_hubs = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_hubs, store.get_snapshot(), projector)
+        texts_hubs = " ".join(text for (_, _, text, _) in win_hubs.strings)
+        self.assertIn("Larissa", texts_hubs)
+        self.assertNotIn("Thiva", texts_hubs)
+        self.assertIn("Labels: HUBS", texts_hubs)
+        markers_hubs = [text for (_, _, text, _) in win_hubs.strings if text == "◉"]
+        self.assertEqual(len(markers_hubs), 2)
+
+        # 3. Mode 3: MARKERS_ONLY -> Neither text label rendered, both ◉ markers remain visible
+        store.cycle_station_label_mode()
+        win_markers = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_markers, store.get_snapshot(), projector)
+        texts_markers = " ".join(text for (_, _, text, _) in win_markers.strings)
+        self.assertNotIn("Larissa", texts_markers)
+        self.assertNotIn("Thiva", texts_markers)
+        self.assertIn("Labels: OFF", texts_markers)
+        markers_only = [text for (_, _, text, _) in win_markers.strings if text == "◉"]
+        self.assertEqual(len(markers_only), 2)
+
+        # 4. If a station is actively inspected in InspectorMode.STATION, its callout remains visible even in MARKERS_ONLY
+        store.set_selected_station("THI")
+        win_active_stn = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_active_stn, store.get_snapshot(), projector)
+        texts_active = " ".join(text for (_, _, text, _) in win_active_stn.strings)
+        self.assertIn("[Thiva]", texts_active)
+        self.assertNotIn("Larissa", texts_active)
+
+    @patch("tui.renderer.curses.has_colors", return_value=True)
+    @patch("tui.renderer.curses.color_pair", side_effect=lambda p: p * 256)
+    def test_render_map_track_color_modes_uniform_vs_corridor(self, _mock_cp, _mock_hc):
+        """TC-F33-06 & TC-F33-07: Verify TrackColorMode (UNIFORM vs CORRIDOR) and shared junction Braille preservation."""
+        _INITIALIZED_COLOR_PAIRS.update({PAIR_TRACK, PAIR_TRAIN_PROAST, PAIR_STATION_DIM})
+        win_h, win_w = 24, 80
+        viewport = Viewport(
+            center=GeoPoint(lat=39.00, lng=23.00),
+            zoom=1.0,
+            width_cells=win_w - 2,
+            height_cells=win_h - 2,
+            aspect_ratio=2.0,
+        )
+        projector = GeoProjector(viewport)
+
+        # 3 distinct corridors + shared junction at (38.0744, 23.7381)
+        t_pathe = TrackPolyline.from_coordinates(
+            "pathe-mainline",
+            "PATHE Mainline",
+            [(38.0744, 23.7381), (39.0000, 22.5000)],
+        )
+        t_proast = TrackPolyline.from_coordinates(
+            "proastiakos-airport-kiato",
+            "Proastiakos",
+            [(38.0744, 23.7381), (37.9365, 23.9452)],
+        )
+        t_regional = TrackPolyline.from_coordinates(
+            "thessaly-volos",
+            "Thessaly Branch",
+            [(39.6385, 22.4222), (39.3625, 22.9361)],
+        )
+
+        renderer = TUIRenderer(
+            stations=[],
+            tracks=[t_pathe, t_proast, t_regional],
+            ascii_mode=False,
+        )
+        store = TrainStateStore()
+
+        # 1. UNIFORM mode: all track rows blitted with PAIR_TRACK attribute
+        win_uni = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_uni, store.get_snapshot(), projector)
+        uni_title = " ".join(text for (y, _, text, _) in win_uni.strings if y == 0)
+        self.assertNotIn("Tracks: COLOR", uni_title)
+        uni_track_attrs = {
+            attr for (y, _, text, attr) in win_uni.strings if 1 <= y <= win_h - 3 and any(ord(c) >= 0x2801 for c in text)
+        }
+        self.assertIn((PAIR_TRACK * 256) | curses.A_DIM, uni_track_attrs)
+        self.assertNotIn(PAIR_TRAIN_PROAST * 256, uni_track_attrs)
+
+        # 2. CORRIDOR mode: PATHE uses PAIR_TRACK, PROASTIAKOS uses PAIR_TRAIN_PROAST, THESSALY uses PAIR_STATION_DIM
+        store.cycle_track_color_mode()
+        win_corr = MockCursesWindow(win_h, win_w)
+        renderer.render_map(win_corr, store.get_snapshot(), projector)
+        corr_title = " ".join(text for (y, _, text, _) in win_corr.strings if y == 0)
+        self.assertIn("Tracks: COLOR", corr_title)
+
+        corr_track_attrs = {
+            attr for (y, _, text, attr) in win_corr.strings if 1 <= y <= win_h - 3 and any(ord(c) >= 0x2801 for c in text)
+        }
+        self.assertIn((PAIR_TRACK * 256) | curses.A_DIM, corr_track_attrs)
+        self.assertIn(PAIR_TRAIN_PROAST * 256, corr_track_attrs)
+        self.assertIn((PAIR_STATION_DIM * 256) | curses.A_DIM, corr_track_attrs)
+
+        # Verify the reconstructed Braille character grid in CORRIDOR mode is 100% identical to UNIFORM mode
+        def reconstruct_inner_rows(mock_win: MockCursesWindow) -> list:
+            grid = [[" "] * (win_w - 2) for _ in range(win_h - 2)]
+            for y, x, text, _ in mock_win.strings:
+                if 1 <= y <= win_h - 3:
+                    row_idx = y - 1
+                    for i, ch in enumerate(text):
+                        col_idx = (x - 1) + i
+                        if 0 <= col_idx < win_w - 2:
+                            grid[row_idx][col_idx] = ch
+            return ["".join(r) for r in grid]
+
+        self.assertEqual(reconstruct_inner_rows(win_uni), reconstruct_inner_rows(win_corr))
 
 
 if __name__ == "__main__":

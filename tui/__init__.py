@@ -35,6 +35,7 @@ from tui.renderer import (
     get_compass_bearing,
     get_delay_color_pair,
     get_heading_glyph,
+    get_track_corridor_color_pair,
     normalize_station_key,
 )
 from tui.state import (
@@ -44,6 +45,8 @@ from tui.state import (
     InspectorMode,
     RosterSortMode,
     StateSnapshot,
+    StationLabelMode,
+    TrackColorMode,
     TrainRecord,
     TrainStateStore,
 )
@@ -70,6 +73,8 @@ __all__ = [
     "RosterSortMode",
     "BreadcrumbMode",
     "InspectorMode",
+    "StationLabelMode",
+    "TrackColorMode",
     "HistoricalBreadcrumb",
     "TrainRecord",
     "StateSnapshot",
@@ -83,6 +88,7 @@ __all__ = [
     "get_heading_glyph",
     "get_compass_bearing",
     "get_delay_color_pair",
+    "get_track_corridor_color_pair",
     "format_progress_bar",
     "format_next_station_eta",
     "format_scale_bar",

@@ -38,6 +38,8 @@ from tui.state import (
     InspectorMode,
     RosterSortMode,
     StateSnapshot,
+    StationLabelMode,
+    TrackColorMode,
     TrainStateStore,
 )
 from tui.stream_worker import StreamWorker
@@ -385,6 +387,14 @@ class TUIApp:
         """Cycle historical breadcrumb trail visibility mode (ALL -> SELECTED -> OFF)."""
         return self.store.cycle_breadcrumb_mode()
 
+    def cycle_station_labels(self) -> StationLabelMode:
+        """Cycle station label visibility mode (HUBS_AND_SECONDARY -> HUBS_ONLY -> MARKERS_ONLY)."""
+        return self.store.cycle_station_label_mode()
+
+    def toggle_track_colors(self) -> TrackColorMode:
+        """Toggle corridor-colored Braille track rendering (UNIFORM <-> CORRIDOR)."""
+        return self.store.cycle_track_color_mode()
+
     def _get_candidate_stations(self, corridor_filter: Optional[str]) -> List[StationNode]:
         """Return ordered hub stations matching the active corridor filter (or all stations if none are hubs)."""
         if not self.stations:
@@ -531,6 +541,14 @@ class TUIApp:
         # Cycle historical breadcrumb trail mode (All, Selected, Off)
         elif key in (ord("b"), ord("B")):
             self.cycle_breadcrumbs()
+
+        # Cycle station label visibility mode (All, Hubs Only, Markers Only)
+        elif key in (ord("v"), ord("V")):
+            self.cycle_station_labels()
+
+        # Toggle corridor-colored Braille track rendering (Uniform, Corridor)
+        elif key in (ord("t"), ord("T")):
+            self.toggle_track_colors()
 
         # Cycle Station Departure Board & Proximity Inspector Mode
         elif key == ord("m"):

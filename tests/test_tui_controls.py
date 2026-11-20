@@ -27,6 +27,8 @@ from tui.state import (
     ConnectionStatus,
     InspectorMode,
     RosterSortMode,
+    StationLabelMode,
+    TrackColorMode,
     TrainStateStore,
 )
 from tui.stream_worker import StreamWorker
@@ -785,6 +787,67 @@ class TestTUIControls(unittest.TestCase):
         self.assertEqual(self.app.search_buffer, "m")
         self.assertEqual(self.store.get_snapshot().inspector_mode, InspectorMode.TRAIN)
         self.assertIsNone(self.store.get_snapshot().selected_station_id)
+
+    def test_key_v_cycles_station_label_mode_in_normal_mode(self):
+        """TC-F33-03a: Verify pressing 'v' / 'V' in NORMAL mode cycles StationLabelMode."""
+        self.assertEqual(
+            self.store.get_snapshot().station_label_mode,
+            StationLabelMode.HUBS_AND_SECONDARY,
+        )
+
+        self.assertTrue(self.app.process_input(ord("v")))
+        self.assertEqual(
+            self.store.get_snapshot().station_label_mode,
+            StationLabelMode.HUBS_ONLY,
+        )
+
+        self.assertTrue(self.app.process_input(ord("V")))
+        self.assertEqual(
+            self.store.get_snapshot().station_label_mode,
+            StationLabelMode.MARKERS_ONLY,
+        )
+
+        self.assertTrue(self.app.process_input(ord("v")))
+        self.assertEqual(
+            self.store.get_snapshot().station_label_mode,
+            StationLabelMode.HUBS_AND_SECONDARY,
+        )
+
+    def test_key_t_toggles_track_color_mode_in_normal_mode(self):
+        """TC-F33-03b: Verify pressing 't' / 'T' in NORMAL mode toggles TrackColorMode."""
+        self.assertEqual(
+            self.store.get_snapshot().track_color_mode,
+            TrackColorMode.UNIFORM,
+        )
+
+        self.assertTrue(self.app.process_input(ord("t")))
+        self.assertEqual(
+            self.store.get_snapshot().track_color_mode,
+            TrackColorMode.CORRIDOR,
+        )
+
+        self.assertTrue(self.app.process_input(ord("T")))
+        self.assertEqual(
+            self.store.get_snapshot().track_color_mode,
+            TrackColorMode.UNIFORM,
+        )
+
+    def test_keys_v_and_t_in_search_mode_append_characters_without_toggling_layers(self):
+        """TC-F33-03c: Verify 'v' and 't' in SEARCH mode append to search_buffer without changing map layers."""
+        self.app.process_input(ord("/"))
+        self.assertEqual(self.app.input_mode, InputMode.SEARCH)
+
+        self.app.process_input(ord("v"))
+        self.app.process_input(ord("t"))
+        self.assertEqual(self.app.search_buffer, "vt")
+        self.assertEqual(
+            self.store.get_snapshot().station_label_mode,
+            StationLabelMode.HUBS_AND_SECONDARY,
+        )
+        self.assertEqual(
+            self.store.get_snapshot().track_color_mode,
+            TrackColorMode.UNIFORM,
+        )
 
 
 if __name__ == "__main__":

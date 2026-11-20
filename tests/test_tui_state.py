@@ -20,6 +20,8 @@ from tui.state import (
     InspectorMode,
     RosterSortMode,
     StateSnapshot,
+    StationLabelMode,
+    TrackColorMode,
     TrainRecord,
     TrainStateStore,
 )
@@ -873,6 +875,79 @@ class TestStreamWorker(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             self.store.set_inspector_mode("STATION")  # type: ignore[arg-type]
+
+    def test_station_label_mode_cycling_and_explicit_set(self):
+        """TC-F33-01: Verify StationLabelMode cycling (HUBS_AND_SECONDARY -> HUBS_ONLY -> MARKERS_ONLY) and set_station_label_mode."""
+        snap0 = self.store.get_snapshot()
+        self.assertEqual(snap0.station_label_mode, StationLabelMode.HUBS_AND_SECONDARY)
+        v0 = snap0.version
+
+        # 1. Cycle to HUBS_ONLY
+        m1 = self.store.cycle_station_label_mode()
+        self.assertEqual(m1, StationLabelMode.HUBS_ONLY)
+        snap1 = self.store.get_snapshot()
+        self.assertEqual(snap1.station_label_mode, StationLabelMode.HUBS_ONLY)
+        self.assertEqual(snap1.version, v0 + 1)
+
+        # 2. Cycle to MARKERS_ONLY
+        m2 = self.store.cycle_station_label_mode()
+        self.assertEqual(m2, StationLabelMode.MARKERS_ONLY)
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(snap2.station_label_mode, StationLabelMode.MARKERS_ONLY)
+        self.assertEqual(snap2.version, v0 + 2)
+
+        # 3. Cycle wraps back to HUBS_AND_SECONDARY
+        m3 = self.store.cycle_station_label_mode()
+        self.assertEqual(m3, StationLabelMode.HUBS_AND_SECONDARY)
+        snap3 = self.store.get_snapshot()
+        self.assertEqual(snap3.station_label_mode, StationLabelMode.HUBS_AND_SECONDARY)
+        self.assertEqual(snap3.version, v0 + 3)
+
+        # 4. Idempotent explicit set does not increment version
+        self.store.set_station_label_mode(StationLabelMode.HUBS_AND_SECONDARY)
+        self.assertEqual(self.store.get_snapshot().version, v0 + 3)
+
+        # 5. Explicit set to MARKERS_ONLY increments version
+        self.store.set_station_label_mode(StationLabelMode.MARKERS_ONLY)
+        snap4 = self.store.get_snapshot()
+        self.assertEqual(snap4.station_label_mode, StationLabelMode.MARKERS_ONLY)
+        self.assertEqual(snap4.version, v0 + 4)
+
+        with self.assertRaises(TypeError):
+            self.store.set_station_label_mode("HUBS_ONLY")  # type: ignore[arg-type]
+
+    def test_track_color_mode_cycling_and_explicit_set(self):
+        """TC-F33-02: Verify TrackColorMode toggling (UNIFORM <-> CORRIDOR) and set_track_color_mode."""
+        snap0 = self.store.get_snapshot()
+        self.assertEqual(snap0.track_color_mode, TrackColorMode.UNIFORM)
+        v0 = snap0.version
+
+        # 1. Toggle to CORRIDOR
+        m1 = self.store.cycle_track_color_mode()
+        self.assertEqual(m1, TrackColorMode.CORRIDOR)
+        snap1 = self.store.get_snapshot()
+        self.assertEqual(snap1.track_color_mode, TrackColorMode.CORRIDOR)
+        self.assertEqual(snap1.version, v0 + 1)
+
+        # 2. Toggle back to UNIFORM
+        m2 = self.store.cycle_track_color_mode()
+        self.assertEqual(m2, TrackColorMode.UNIFORM)
+        snap2 = self.store.get_snapshot()
+        self.assertEqual(snap2.track_color_mode, TrackColorMode.UNIFORM)
+        self.assertEqual(snap2.version, v0 + 2)
+
+        # 3. Idempotent explicit set does not increment version
+        self.store.set_track_color_mode(TrackColorMode.UNIFORM)
+        self.assertEqual(self.store.get_snapshot().version, v0 + 2)
+
+        # 4. Explicit set to CORRIDOR increments version
+        self.store.set_track_color_mode(TrackColorMode.CORRIDOR)
+        snap3 = self.store.get_snapshot()
+        self.assertEqual(snap3.track_color_mode, TrackColorMode.CORRIDOR)
+        self.assertEqual(snap3.version, v0 + 3)
+
+        with self.assertRaises(TypeError):
+            self.store.set_track_color_mode("CORRIDOR")  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

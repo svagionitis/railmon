@@ -18,7 +18,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 2 (Inspector)** | **F-2.2** | WGS84 Coordinate Readout, Next-Station Distance & ETA | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 3 (Map & UX)** | **F-3.1** | Terminal Mouse Interaction (Click-to-Select & Scroll Zoom) | Mouse | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.2** | Station Departure Board & Proximity Inspector Mode | `m` / `M` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
-| **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | Proposed | [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
+| **Tier 3 (Map & UX)** | **F-3.3** | Map Layer Toggles (Station Labels & Corridor Colors) | `v` / `t` | **Implemented** | [`tui/state.py`](../tui/state.py), [`tui/app.py`](../tui/app.py), [`tui/renderer.py`](../tui/renderer.py) |
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../tui/renderer.py), [`tui/geo.py`](../tui/geo.py) |
 | **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py) |
 | **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | Proposed | [`tui/app.py`](../tui/app.py), [`storage/repository.py`](../storage/repository.py), [`train_tracker.py`](../train_tracker.py) |
@@ -410,22 +410,24 @@ Allow users to switch the bottom-right Inspector pane between **Train Telemetry 
 
 ---
 
-### F-3.3: Map Layer Toggles (`v` Station Labels / `t` Corridor Track Colors)
+### F-3.3: Map Layer Toggles (`v` Station Labels / `t` Corridor Track Colors) — *Implemented*
+
+> **Detailed Implementation Plan:** [`docs/f-3-3-map-layer-toggles-plan.md`](./f-3-3-map-layer-toggles-plan.md)
 
 #### Overview
 At low zoom levels (`0.5x`–`1.0x`), station labels can crowd narrow corridors, and monochromatic white Braille tracks make it harder to distinguish suburban lines from the mainline trunk.
 
 #### Technical Design
-1. **Station Label Visibility Mode (`v` key):**
+1. **Station Label Visibility Mode (`v` / `V` key & `StationLabelMode` in [`tui/state.py`](../tui/state.py)):**
    - Cycles through:
      1. `HUBS_AND_SECONDARY` (default: all stations with collision avoidance)
-     2. `HUBS_ONLY` (only `stn.is_hub == True` labels shown)
-     3. `MARKERS_ONLY` (draw `◉` glyphs without text labels for maximum track visibility)
-2. **Corridor-Colored Braille Tracks (`t` key):**
-   - Toggle between uniform dim-white tracks (`PAIR_TRACK`) and corridor-colored track layers:
+     2. `HUBS_ONLY` (only `stn.is_hub == True` labels shown, plus active inspected station in `InspectorMode.STATION`)
+     3. `MARKERS_ONLY` (draw `◉` / `#`/`+` glyphs without text labels for maximum track visibility)
+2. **Corridor-Colored Braille Tracks (`t` / `T` key & `TrackColorMode` in [`tui/state.py`](../tui/state.py)):**
+   - Toggle between uniform dim-white tracks (`TrackColorMode.UNIFORM`, `PAIR_TRACK`) and corridor-colored track layers (`TrackColorMode.CORRIDOR`) while preserving composite $2 \times 4$ Braille sub-pixel bitmasks at shared junctions:
      - `PATHE`: `PAIR_TRACK` (White)
      - `PROASTIAKOS`: `PAIR_TRAIN_PROAST` (Cyan)
-     - `NORTHERN` / `THESSALY`: `PAIR_STATION_DIM` (Yellow)
+     - `NORTHERN` / `THESSALY` / `MACEDONIA`: `PAIR_STATION_DIM` (Yellow)
 
 ---
 
@@ -532,8 +534,8 @@ sequenceDiagram
 | `q` / `Esc` | Normal | Clean exit from `railmon` TUI | Existing |
 | **`s` / `S`** | **Normal** | **Cycle roster sorting (`Train ID` → `Speed` → `Delay`)** | **Implemented (Tier 1)** |
 | **`b` / `B`** | **Normal** | **Cycle breadcrumb trails (`All` → `Selected` → `Off`)** | **Implemented (Tier 1)** |
-| **`v`** | **Normal** | **Cycle station labels (`All` → `Hubs Only` → `Markers Only`)** | **Proposed (Tier 3)** |
-| **`t`** | **Normal** | **Toggle corridor-colored Braille track rendering** | **Proposed (Tier 3)** |
+| **`v` / `V`** | **Normal** | **Cycle station labels (`All` → `Hubs Only` → `Markers Only`)** | **Implemented (Tier 3)** |
+| **`t` / `T`** | **Normal** | **Toggle corridor-colored Braille track rendering** | **Implemented (Tier 3)** |
 | **`m` / `M`** | **Normal** | **Cycle Station Departure Board / Return to Train Telemetry** | **Implemented (Tier 3)** |
 | **`e`** | **Normal** | **Export selected train trajectory to GeoJSON file** | **Proposed (Tier 4)** |
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Proposed (Tier 4)** |

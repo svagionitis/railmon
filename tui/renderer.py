@@ -30,6 +30,8 @@ from tui.state import (
     InspectorMode,
     RosterSortMode,
     StateSnapshot,
+    StationLabelMode,
+    TrackColorMode,
     TrainRecord,
 )
 
@@ -782,6 +784,47 @@ def format_corridor_display_name(corridor: Optional[str]) -> str:
     return corridor.strip().title()
 
 
+def get_track_corridor_color_pair(corridor_id: Optional[str]) -> int:
+    """Resolve the curses color pair for a track polyline corridor in TrackColorMode.CORRIDOR.
+
+    Mapping per F-3.3 specification:
+        - PATHE ('pathe', 'pathe-mainline', 'e85', 'mainline'): PAIR_TRACK (White)
+        - PROASTIAKOS ('proastiakos-*', 'suburban', 'pirair', 'kiato', 'chalkida'): PAIR_TRAIN_PROAST (Cyan)
+        - NORTHERN / THESSALY / Regional ('northern-*', 'thessaly-*', 'thessaloniki-idomeni',
+          'western-macedonia', 'macedonia', 'thrace'): PAIR_STATION_DIM (Yellow)
+
+    Args:
+        corridor_id: Corridor identifier or name from TrackPolyline.
+
+    Returns:
+        Curses color pair constant (PAIR_TRACK, PAIR_TRAIN_PROAST, or PAIR_STATION_DIM).
+    """
+    if not corridor_id or not corridor_id.strip():
+        return PAIR_TRACK
+    norm = corridor_id.strip().upper()
+    if any(
+        k in norm
+        for k in ("PROAST", "SUBURBAN", "PIRAIR", "KIATO", "AERODROMIO", "AIRPORT", "CHALKIDA")
+    ):
+        return PAIR_TRAIN_PROAST
+    if any(
+        k in norm
+        for k in (
+            "NORTHERN",
+            "THESSALY",
+            "MACEDONIA",
+            "THRACE",
+            "IDOMENI",
+            "VOLOS",
+            "KALAMBAKA",
+            "FLORINA",
+            "ALEX",
+        )
+    ):
+        return PAIR_STATION_DIM
+    return PAIR_TRACK
+
+
 def _natural_train_id_sort_key(train_number: str, train_id: str) -> Tuple[int, str]:
     """Natural alphanumeric sort key for train numbers on the station proximity board."""
     tn = (train_number or "").strip()
@@ -1209,10 +1252,21 @@ class TUIRenderer:
             trails_label = "OFF"
         else:
             trails_label = "ALL"
+        station_label_mode = getattr(
+            snapshot, "station_label_mode", StationLabelMode.HUBS_AND_SECONDARY
+        )
+        track_color_mode = getattr(snapshot, "track_color_mode", TrackColorMode.UNIFORM)
+        layer_str = ""
+        if station_label_mode == StationLabelMode.HUBS_ONLY:
+            layer_str += " | Labels: HUBS"
+        elif station_label_mode == StationLabelMode.MARKERS_ONLY:
+            layer_str += " | Labels: OFF"
+        if track_color_mode == TrackColorMode.CORRIDOR:
+            layer_str += " | Tracks: COLOR"
         d_sym = self.glyphs.degree_sym
         title = (
             f" Map Viewport: {center.lat:.2f}{d_sym}N, {center.lng:.2f}{d_sym}E"
-            f" | Zoom: {projector.viewport.zoom:.1f}x | Trails: {trails_label}{follow_str} "
+            f" | Zoom: {projector.viewport.zoom:.1f}x | Trails: {trails_label}{layer_str}{follow_str} "
         )
         safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
@@ -1221,14 +1275,71 @@ class TUIRenderer:
 
         # 1. Rasterize tracks using BrailleCanvas
         canvas = BrailleCanvas(width_cells=inner_w, height_cells=inner_h, ascii_mode=self.ascii_mode)
-        for track in self.tracks:
-            sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
-            canvas.draw_polyline(sub_points)
+        if track_color_mode == TrackColorMode.CORRIDOR:
+            cell_pairs: List[int] = [PAIR_TRACK] * (inner_w * inner_h)
+            for track in self.tracks:
+                sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
+                track_canvas = BrailleCanvas(
+                    width_cells=inner_w, height_cells=inner_h, ascii_mode=self.ascii_mode
+                )
+                track_canvas.draw_polyline(sub_points)
+                pair = get_track_corridor_color_pair(track.corridor_id or track.name)
+                t_buf = track_canvas.buffer
+                c_buf = canvas.buffer
+                for idx in range(len(t_buf)):
+                    bits = t_buf[idx]
+                    if bits:
+                        c_buf[idx] |= bits
+                        if pair != PAIR_TRACK or cell_pairs[idx] == PAIR_TRACK:
+                            cell_pairs[idx] = pair
 
-        # Blit canvas rows to curses buffer
-        rows = canvas.render_rows()
-        for r_idx, row_str in enumerate(rows):
-            safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
+            proast_track_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_NORMAL)
+            regional_track_attr = safe_color_pair(PAIR_STATION_DIM, curses.A_DIM) | curses.A_DIM
+            pair_attr_map = {
+                PAIR_TRACK: track_attr,
+                PAIR_TRAIN_PROAST: proast_track_attr,
+                PAIR_STATION_DIM: regional_track_attr,
+            }
+            rows = canvas.render_rows()
+            for r_idx, row_str in enumerate(rows):
+                row_offset = r_idx * inner_w
+                run_start = 0
+                run_pair = cell_pairs[row_offset] if inner_w > 0 else PAIR_TRACK
+                for c_idx in range(1, inner_w):
+                    c_pair = cell_pairs[row_offset + c_idx]
+                    if c_pair != run_pair:
+                        run_text = row_str[run_start:c_idx]
+                        safe_addstr(
+                            win,
+                            1 + r_idx,
+                            1 + run_start,
+                            run_text,
+                            pair_attr_map.get(run_pair, track_attr),
+                            max_w=c_idx - run_start,
+                            ascii_mode=self.ascii_mode,
+                        )
+                        run_start = c_idx
+                        run_pair = c_pair
+                if inner_w > run_start:
+                    run_text = row_str[run_start:inner_w]
+                    safe_addstr(
+                        win,
+                        1 + r_idx,
+                        1 + run_start,
+                        run_text,
+                        pair_attr_map.get(run_pair, track_attr),
+                        max_w=inner_w - run_start,
+                        ascii_mode=self.ascii_mode,
+                    )
+        else:
+            for track in self.tracks:
+                sub_points = [projector.geo_to_subpixel(pt) for pt in track.points]
+                canvas.draw_polyline(sub_points)
+
+            # Blit canvas rows to curses buffer
+            rows = canvas.render_rows()
+            for r_idx, row_str in enumerate(rows):
+                safe_addstr(win, 1 + r_idx, 1, row_str, track_attr, max_w=inner_w, ascii_mode=self.ascii_mode)
 
         # 2. Overlay historical breadcrumbs
         if breadcrumb_mode == BreadcrumbMode.OFF:
@@ -1310,6 +1421,16 @@ class TUIRenderer:
             except curses.error:
                 pass
             occupied_cells.add((col, row))
+
+            if station_label_mode == StationLabelMode.MARKERS_ONLY:
+                should_draw_label = is_active_station
+            elif station_label_mode == StationLabelMode.HUBS_ONLY:
+                should_draw_label = stn.is_hub or is_active_station
+            else:
+                should_draw_label = True
+
+            if not should_draw_label:
+                continue
 
             # Determine label text and width
             name = stn.name_en or stn.name_el or stn.id
@@ -1779,7 +1900,10 @@ class TUIRenderer:
 
         # Keybindings cheat sheet
         follow_str = "[f] Unfollow" if (snapshot.follow_mode and snapshot.selected_train) else "[f] Follow"
-        shortcuts = f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        shortcuts = (
+            f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
+            f"[v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+        )
         safe_addstr(win, 0, 0, shortcuts, status_attr, max_w=max(0, width - 24), ascii_mode=self.ascii_mode)
 
         # Connection status badge
@@ -1850,6 +1974,7 @@ class TUIRenderer:
                 ("h/j/k/l, Arrows", "Pan viewport West / South / North / East"),
                 ("+ / =, - / _", "Zoom In / Zoom Out (0.2x to 25.0x)"),
                 ("0, 1, 2, 3", "Presets (0: Greece, 1: Suburban, 2: PATHE, 3: North)"),
+                ("v / V, t / T", "Cycle station labels / Toggle corridor track colors"),
             ]),
             ("TRAIN SELECTION & TRACKING", [
                 ("Tab, n / p", "Select Next / Previous train in active roster"),

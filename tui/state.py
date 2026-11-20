@@ -60,6 +60,21 @@ class InspectorMode(Enum):
     STATION = auto()  # Station Departure Board & Proximity Inspector
 
 
+class StationLabelMode(Enum):
+    """Visibility policy for station text labels on the map canvas."""
+
+    HUBS_AND_SECONDARY = auto()  # Default: All stations labeled (with collision avoidance)
+    HUBS_ONLY = auto()  # Only major interchange/terminal hub labels (stn.is_hub)
+    MARKERS_ONLY = auto()  # Draw station markers without text labels
+
+
+class TrackColorMode(Enum):
+    """Colorization policy for Braille railway track polylines on the map canvas."""
+
+    UNIFORM = auto()  # Default: Uniform dim-white tracks (PAIR_TRACK)
+    CORRIDOR = auto()  # Corridor-colored tracks (PATHE=White, PROASTIAKOS=Cyan, Regional=Yellow)
+
+
 @dataclass(frozen=True)
 class HistoricalBreadcrumb:
     """A historical geographic point recorded during train movement."""
@@ -163,6 +178,8 @@ class StateSnapshot:
     breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL
     inspector_mode: InspectorMode = InspectorMode.TRAIN
     selected_station_id: Optional[str] = None
+    station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
+    track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
 
 
 def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
@@ -305,6 +322,8 @@ class TrainStateStore:
         self._inspector_mode: InspectorMode = InspectorMode.TRAIN
         self._selected_station_id: Optional[str] = None
         self._station_cycle_anchor_id: Optional[str] = None
+        self._station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
+        self._track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
         self._is_recording: bool = False
@@ -429,6 +448,8 @@ class TrainStateStore:
                 breadcrumb_mode=self._breadcrumb_mode,
                 inspector_mode=self._inspector_mode,
                 selected_station_id=self._selected_station_id,
+                station_label_mode=self._station_label_mode,
+                track_color_mode=self._track_color_mode,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -666,6 +687,49 @@ class TrainStateStore:
             self._selected_station_id = next_id
             self._version += 1
             return self._selected_station_id
+
+    def set_station_label_mode(self, mode: StationLabelMode) -> None:
+        """Explicitly set the active station label visibility mode."""
+        if not isinstance(mode, StationLabelMode):
+            raise TypeError(f"Expected StationLabelMode, got {type(mode).__name__}")
+        with self._lock:
+            if self._station_label_mode != mode:
+                self._station_label_mode = mode
+                self._version += 1
+
+    def cycle_station_label_mode(self) -> StationLabelMode:
+        """Cycle station label visibility: HUBS_AND_SECONDARY -> HUBS_ONLY -> MARKERS_ONLY -> HUBS_AND_SECONDARY."""
+        cycle_order = (
+            StationLabelMode.HUBS_AND_SECONDARY,
+            StationLabelMode.HUBS_ONLY,
+            StationLabelMode.MARKERS_ONLY,
+        )
+        with self._lock:
+            curr_idx = cycle_order.index(self._station_label_mode)
+            self._station_label_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
+            self._version += 1
+            return self._station_label_mode
+
+    def set_track_color_mode(self, mode: TrackColorMode) -> None:
+        """Explicitly set the active Braille track colorization mode."""
+        if not isinstance(mode, TrackColorMode):
+            raise TypeError(f"Expected TrackColorMode, got {type(mode).__name__}")
+        with self._lock:
+            if self._track_color_mode != mode:
+                self._track_color_mode = mode
+                self._version += 1
+
+    def cycle_track_color_mode(self) -> TrackColorMode:
+        """Toggle Braille track colorization mode: UNIFORM <-> CORRIDOR."""
+        cycle_order = (
+            TrackColorMode.UNIFORM,
+            TrackColorMode.CORRIDOR,
+        )
+        with self._lock:
+            curr_idx = cycle_order.index(self._track_color_mode)
+            self._track_color_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
+            self._version += 1
+            return self._track_color_mode
 
     def clear(self) -> None:
         """Reset state store completely."""
