@@ -26,7 +26,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 5 (Safety)** | **F-5.2** | Telemetry Drop & Sensor Freezing Watchdog | *(Auto)* | Planned | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py) |
 | **Tier 5 (Safety)** | **F-5.3** | Corridor Speed Limit Exceedance & Slow-Order Alerts | *(Auto)* | Planned | [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
 | **Tier 6 (Commuter)** | **F-6.1** | CLI Station Departure & Arrival Boards | `railmon departures` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
-| **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
@@ -679,7 +679,9 @@ TIME   TRAIN   TYPE   DESTINATION          PLATFORM   STATUS      DELAY
 
 ---
 
-### F-6.2: Train Timetable & Intermediate Stop Inspector (`i` / `I` / CLI) — *Planned*
+### F-6.2: Train Timetable & Intermediate Stop Inspector (`i` / `I` / CLI) — *Implemented*
+
+*(Detailed implementation plan: [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md))*
 
 #### Overview
 Inspects the full scheduled itinerary of a train, showing intermediate stations, planned versus actual arrival/departure times, scheduled dwell durations, and platform tracks.
@@ -959,7 +961,7 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 
 ### Phase 6: Tier 6 Commuter & Route Services (F-6.1 Completed, F-6.2–F-6.3 Planned)
 1. **F-6.1 (*Completed*):** Added `departures` subparser in [`train_tracker.py`](../../train_tracker.py), multi-key diacritic-insensitive station resolution and suggestion engine in [`tui/mock_engine.py`](../../tui/mock_engine.py), responsive UTF-8 / ASCII tabular formatter in [`storage/cli_formatters.py`](../../storage/cli_formatters.py), offline `--demo` timetable synthesis, and automated test suite in [`tests/test_cli_departures.py`](../../tests/test_cli_departures.py).
-2. **F-6.2 (*Planned*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>`.
+2. **F-6.2 (*Completed*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>` (see detailed plan in [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md)).
 3. **F-6.3 (*Planned*):** Implement `railmon watch <train_num>` background proximity and delay notification engine.
 
 ### Phase 7: Tier 7 Visual Enhancements & GIS Layers — *Planned*

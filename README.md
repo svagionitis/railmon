@@ -18,6 +18,7 @@
   - **Historical Breadcrumb Trails (`b`)**: Visualize train journey paths over time.
   - **Dynamic Conformal Map Scale Bar**: Live bottom-left cartographic scale bar (`├──── 25 km ────┤` / `|---- 25 km ----|`) that automatically adapts to viewport zoom (`0.2x`–`25.0x`) and center latitude.
 - **Live Station Departure & Arrival Boards (`railmon departures`)**: Headless CLI command querying real-time train departures and arrivals for any Greek railway station with Greek/Latin diacritic-tolerant fuzzy search, service type filtering, and `--json` export.
+- **Train Timetable & Intermediate Stop Inspector (`railmon schedule` / `i` in TUI)**: Inspect the complete scheduled itinerary of any commercial train, displaying intermediate calling points, planned versus actual times, scheduled dwell durations, and platform tracks.
 - **Historical Telemetry Recording & Analytics**:
   - Embedded zero-dependency SQLite persistence with Write-Ahead Logging (WAL) for non-blocking concurrent reading and writing.
   - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.
@@ -141,6 +142,13 @@ railmon departures SKA --arrivals      # Arrivals at SKA Hub
 railmon departures Larissa --limit 10  # Truncate to top 10 movements
 railmon departures Athens --json       # Output structured JSON
 railmon departures Athens --demo       # Offline mock simulation
+
+# Inspect train timetable & intermediate calling stops
+./railmon schedule 1597                # Itinerary for Train 1597
+railmon schedule "IC 52"               # Intercity Athens -> Thessaloniki
+railmon schedule 1597 --ascii          # 7-bit ASCII table fallback
+railmon schedule 1597 --json           # Output structured JSON
+railmon schedule 1597 --demo           # Offline mock simulation
 ```
 
 ### Historical Recording & Terminal Analytics
@@ -184,6 +192,7 @@ railmon departures Athens --demo       # Offline mock simulation
 | `c` | Cycle railway corridor filter (Mainline, Suburban, etc.) |
 | `b` | Toggle historical breadcrumb trails |
 | `s` | Cycle train roster sorting (Train ID, Speed, Delay) |
+| `i` / `I` | Inspect full timetable & intermediate stops for selected train |
 | `m` / `M` | Cycle Station Departure Board & Proximity Inspector / Return to train view |
 | `/` | Filter trains by number, name, or station query |
 | `?` | Show interactive Keyboard Controls modal |

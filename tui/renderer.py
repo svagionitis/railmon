@@ -1986,7 +1986,7 @@ class TUIRenderer:
             )
         return (
             f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
-            f"[e] Export  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+            f"[e] Export  [i] Timetable  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
         )
 
     def render_status_bar(
@@ -2136,6 +2136,7 @@ class TUIRenderer:
                 ("s / S", "Cycle train roster sorting (Train ID, Speed, Delay)"),
                 ("b / B", "Cycle breadcrumb trails (All, Selected, Off)"),
                 ("m / M", "Cycle station departure board / Return to train view"),
+                ("i / I", "Inspect timetable & intermediate stops for selected train"),
                 ("f / F, Dbl-Click", "Toggle auto-follow camera lock (or recenter map)"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),
@@ -2173,6 +2174,144 @@ class TUIRenderer:
         f_x = max(start_x + 2, start_x + (box_w - len(footer_msg)) // 2)
         safe_addstr(win, start_y + box_h - 1, f_x, footer_msg, dim_attr, ascii_mode=self.ascii_mode)
 
+    def render_timetable_modal(
+        self,
+        win: Any,
+        height: int,
+        width: int,
+        timetable: Any = None,
+        scroll_offset: int = 0,
+        is_loading: bool = False,
+        error_msg: Optional[str] = None,
+    ) -> None:
+        """Render centered train timetable and intermediate stop inspector modal dialog.
+
+        Args:
+            win: Root curses window to overlay onto.
+            height: Total terminal screen height.
+            width: Total terminal screen width.
+            timetable: Timetable dictionary or TrainTimetableDTO.
+            scroll_offset: Vertical stop scrolling offset.
+            is_loading: True if timetable is currently being fetched asynchronously.
+            error_msg: Optional error string if timetable retrieval failed.
+        """
+        box_h = min(22, max(12, height - 2))
+        box_w = min(82, max(46, width - 4))
+        start_y = max(1, (height - box_h) // 2)
+        start_x = max(1, (width - box_w) // 2)
+
+        border_attr = safe_color_pair(PAIR_BORDER, curses.A_BOLD) | curses.A_BOLD
+        header_attr = safe_color_pair(PAIR_HEADER, curses.A_BOLD) | curses.A_BOLD
+        text_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL)
+        dim_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL) | curses.A_DIM
+        current_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+        footer_attr = safe_color_pair(PAIR_ROSTER_SELECT, curses.A_BOLD) | curses.A_BOLD
+
+        # Background fill
+        for row in range(box_h):
+            safe_addstr(win, start_y + row, start_x, " " * box_w, text_attr, ascii_mode=self.ascii_mode)
+
+        # Border
+        top_border = "+" + "-" * (box_w - 2) + "+"
+        bot_border = "+" + "-" * (box_w - 2) + "+"
+        safe_addstr(win, start_y, start_x, top_border, border_attr, ascii_mode=self.ascii_mode)
+        safe_addstr(win, start_y + box_h - 1, start_x, bot_border, border_attr, ascii_mode=self.ascii_mode)
+        for r in range(1, box_h - 1):
+            safe_addstr(win, start_y + r, start_x, "|", border_attr, ascii_mode=self.ascii_mode)
+            safe_addstr(win, start_y + r, start_x + box_w - 1, "|", border_attr, ascii_mode=self.ascii_mode)
+
+        # Title
+        train_no = ""
+        orig_dest = ""
+        if timetable:
+            train_no = str(
+                getattr(timetable, "train_number", None)
+                or (timetable.get("trainNumber") if isinstance(timetable, dict) else "")
+                or ""
+            )
+            if isinstance(timetable, dict):
+                orig_raw = timetable.get("origin")
+                dest_raw = timetable.get("destination")
+                orig = orig_raw.get("nameEnglish", "") if isinstance(orig_raw, dict) else str(orig_raw or "")
+                dest = dest_raw.get("nameEnglish", "") if isinstance(dest_raw, dict) else str(dest_raw or "")
+            else:
+                orig = getattr(timetable, "origin_name", "")
+                dest = getattr(timetable, "destination_name", "")
+            orig_dest = f" ({orig} -> {dest})" if orig or dest else ""
+
+        title = f" TIMETABLE & ITINERARY: TRAIN {train_no}{orig_dest} "[: box_w - 4]
+        t_x = max(start_x + 2, start_x + (box_w - len(title)) // 2)
+        safe_addstr(win, start_y, t_x, title, header_attr, ascii_mode=self.ascii_mode)
+
+        if is_loading:
+            loading_txt = "Loading timetable from railway.gov.gr..."
+            safe_addstr(win, start_y + box_h // 2, max(start_x + 2, start_x + (box_w - len(loading_txt)) // 2), loading_txt, current_attr, ascii_mode=self.ascii_mode)
+            return
+
+        if error_msg:
+            err_txt = f"[Error: {error_msg}]"[: box_w - 4]
+            safe_addstr(win, start_y + box_h // 2, max(start_x + 2, start_x + (box_w - len(err_txt)) // 2), err_txt, current_attr, ascii_mode=self.ascii_mode)
+            return
+
+        stops = []
+        if isinstance(timetable, dict):
+            stops = timetable.get("stops", [])
+        elif hasattr(timetable, "stops"):
+            stops = list(getattr(timetable, "stops", []))
+
+        if not stops:
+            empty_txt = "No intermediate stops returned for this service."
+            safe_addstr(win, start_y + box_h // 2, max(start_x + 2, start_x + (box_w - len(empty_txt)) // 2), empty_txt, dim_attr, ascii_mode=self.ascii_mode)
+            return
+
+        # Header row
+        header_line = f" {'ST':<4} {'STATION':<20} {'SCHED ARR':^10} {'ACTUAL ARR':^11} {'SCHED DEP':^10} {'ACT DEP':^8} {'PLAT':^4}"[: box_w - 4]
+        safe_addstr(win, start_y + 1, start_x + 2, header_line, header_attr, ascii_mode=self.ascii_mode)
+        safe_addstr(win, start_y + 2, start_x + 1, "-" * (box_w - 2), border_attr, ascii_mode=self.ascii_mode)
+
+        # Stops
+        visible_rows = max(1, box_h - 5)
+        max_offset = max(0, len(stops) - visible_rows)
+        offset = max(0, min(max_offset, scroll_offset))
+        time_dash = "--:--"
+
+        for idx, stop in enumerate(stops[offset : offset + visible_rows]):
+            row_y = start_y + 3 + idx
+            if row_y >= start_y + box_h - 2:
+                break
+
+            # Indicator & status
+            if isinstance(stop, dict):
+                is_passed = stop.get("is_passed", False) or stop.get("status") == "DEPARTED"
+                is_current = stop.get("is_current", False) or stop.get("status") == "APPROACH"
+                stn_name = stop.get("stationNameEnglish") or stop.get("station_name_en") or stop.get("stationName") or stop.get("stationId", "")
+                sched_arr = stop.get("scheduledArrival") or time_dash
+                act_arr = stop.get("actualArrival") or time_dash
+                sched_dep = stop.get("scheduledDeparture") or time_dash
+                act_dep = stop.get("actualDeparture") or time_dash
+                plat = str(stop.get("platform") or "-")
+            else:
+                is_passed = getattr(stop, "is_passed", False)
+                is_current = getattr(stop, "is_current", False)
+                stn_name = getattr(stop, "station_name_en", None) or getattr(stop, "station_name", "") or getattr(stop, "station_id", "")
+                sched_arr = getattr(stop, "scheduled_arrival", None) or time_dash
+                act_arr = getattr(stop, "actual_arrival", None) or time_dash
+                sched_dep = getattr(stop, "scheduled_departure", None) or time_dash
+                act_dep = getattr(stop, "actual_departure", None) or time_dash
+                plat = str(getattr(stop, "platform", None) or "-")
+
+            ind = "[X]" if is_passed else ((" > " if self.ascii_mode else " ► ") if is_current else "   ")
+            row_attr = current_attr if is_current else (dim_attr if is_passed else text_attr)
+
+            stop_line = f" {ind:<4} {stn_name[:19]:<20} {sched_arr[:5]:^10} {act_arr[:5]:^11} {sched_dep[:5]:^10} {act_dep[:5]:^8} {plat:^4}"[: box_w - 4]
+            safe_addstr(win, row_y, start_x + 2, stop_line, row_attr, ascii_mode=self.ascii_mode)
+
+        # Footer
+        footer_divider = "-" * (box_w - 2)
+        safe_addstr(win, start_y + box_h - 2, start_x + 1, footer_divider, border_attr, ascii_mode=self.ascii_mode)
+        footer_txt = f" [Esc / i] Close    [▲ / ▼, j / k] Scroll ({offset + 1}/{len(stops)}) "[: box_w - 4]
+        safe_addstr(win, start_y + box_h - 2, start_x + 2, footer_txt, footer_attr, ascii_mode=self.ascii_mode)
+
     def render_all(
         self,
         windows: Dict[str, Any],
@@ -2190,6 +2329,11 @@ class TUIRenderer:
         search_mode: Optional[bool] = None,
         show_help: Optional[bool] = None,
         paused: Optional[bool] = None,
+        timetable_overlay: bool = False,
+        timetable_data: Any = None,
+        timetable_scroll_offset: int = 0,
+        timetable_loading: bool = False,
+        timetable_error: Optional[str] = None,
     ) -> None:
         """Render all dashboard panes to their respective subwindow buffers.
 
@@ -2252,3 +2396,13 @@ class TUIRenderer:
 
         if help_overlay == HelpOverlay.VISIBLE and "root" in windows:
             self.render_help_modal(windows["root"], geometry.term_height, geometry.term_width)
+        elif timetable_overlay and "root" in windows:
+            self.render_timetable_modal(
+                windows["root"],
+                geometry.term_height,
+                geometry.term_width,
+                timetable=timetable_data,
+                scroll_offset=timetable_scroll_offset,
+                is_loading=timetable_loading,
+                error_msg=timetable_error,
+            )

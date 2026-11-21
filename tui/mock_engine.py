@@ -646,6 +646,209 @@ def generate_mock_station_board(
     return results
 
 
+# -----------------------------------------------------------------------------
+# Train Timetable & Intermediate Stop Synthesis (F-6.2)
+# -----------------------------------------------------------------------------
+
+ACTIVE_MOCK_TRAIN_NUMBERS: Tuple[str, ...] = (
+    "IC 50",
+    "IC 51",
+    "IC 52",
+    "IC 53",
+    "IC 54",
+    "IC 56",
+    "1597",
+    "1314",
+    "2232",
+    "2236",
+    "1731",
+    "884",
+    "80512",
+)
+
+
+def get_active_mock_train_numbers() -> List[str]:
+    """Return all active commercial train numbers recognized by the mock engine."""
+    return list(ACTIVE_MOCK_TRAIN_NUMBERS)
+
+
+def _resolve_mock_station_sequence(
+    clean_num: str,
+    stations: Dict[str, StationNode],
+) -> Tuple[List[StationNode], str, str, str, str]:
+    """Resolve station sequence, train type, service type, origin and destination names."""
+    norm = clean_num.replace(" ", "").upper()
+
+    # 1. Proastiakos Chalkida (Athens -> Chalkida)
+    if norm.startswith("15") or norm.startswith("13") or "CHAL" in norm:
+        stn_ids = ["ATH", "SKA", "AFI", "SFE", "AVL", "INO", "OIN", "CHAL"]
+        seq = [stations[sid] for sid in stn_ids if sid in stations]
+        return seq, "Proastiakos", "Προαστιακός", "Athens", "Chalkida"
+
+    # 2. Proastiakos Airport - Kiato
+    if norm.startswith("22") or norm.startswith("12") or "AIA" in norm:
+        stn_ids = ["AIA", "KOR", "KAN", "PAL_SUB", "DPL", "KIF", "NER", "IRA", "SKA", "ALI", "ASP", "MAG", "MEG", "ATH_TH", "COR", "KIA"]
+        seq = [stations[sid] for sid in stn_ids if sid in stations]
+        return seq, "Proastiakos", "Προαστιακός", "Airport", "Kiato"
+
+    # 3. Thessaly Regional
+    if norm in ("1731", "VOL"):
+        stn_ids = ["LAR", "VEL", "VOL"]
+        seq = [stations[sid] for sid in stn_ids if sid in stations]
+        return seq, "Regional", "Περιφερειακό", "Larissa", "Volos"
+
+    # 4. Southbound Intercity (Thessaloniki -> Athens)
+    if norm in ("IC51", "IC53", "IC55", "51", "53", "55"):
+        stn_ids = ["SKG", "PLA", "KAT", "LAR", "PAL", "DOM", "LIA", "TIT", "LEV", "THI", "SKA", "ATH"]
+        seq = [stations[sid] for sid in stn_ids if sid in stations]
+        return seq, "IC", "Επιβατικά", "Thessaloniki", "Athens"
+
+    # 5. Default: Northbound Intercity (Athens -> Thessaloniki)
+    stn_ids = ["ATH", "SKA", "THI", "LEV", "TIT", "LIA", "DOM", "PAL", "LAR", "KAT", "PLA", "SKG"]
+    seq = [stations[sid] for sid in stn_ids if sid in stations]
+    t_type = "Freight" if norm.startswith("80") else "IC"
+    s_type = "Εμπορικά" if norm.startswith("80") else "Επιβατικά"
+    return seq, t_type, s_type, "Athens", "Thessaloniki"
+
+
+def generate_mock_train_schedule(
+    train_number: str,
+    stations: Optional[Dict[str, StationNode]] = None,
+    trains: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """Synthesize a complete timetable itinerary and intermediate stops for a train.
+
+    Args:
+        train_number: Commercial train number (e.g. '1597', 'IC52', 'IC 52').
+        stations: Optional dictionary mapping station ID to StationNode. Loaded if None.
+        trains: Optional list of active SimulatedTrain instances.
+
+    Returns:
+        Structured timetable dictionary matching /api/public/train-schedules schema.
+    """
+    if stations is None:
+        stations = load_stations()
+
+    clean_num = train_number.strip().upper()
+    seq, train_type, service_type, orig_name, dest_name = _resolve_mock_station_sequence(clean_num, stations)
+
+    if not seq:
+        # Fallback to default hub stations
+        seq = [s for s in stations.values() if s.is_hub][:8]
+
+    # Inspect if matching simulated train exists in active fleet
+    active_train: Optional[SimulatedTrain] = None
+    if trains is not None:
+        for t in trains:
+            if t.train_number.replace(" ", "").upper() == clean_num.replace(" ", ""):
+                active_train = t
+                break
+
+    delay_min = active_train.delay_minutes if active_train else (7 if "52" in clean_num else 0)
+    next_stn_name = active_train.next_station_name if active_train else None
+
+    # Base schedule timeline: 14:00 base anchor
+    base_hour = 14
+    base_min = 28 if "1597" in clean_num else 15
+    dwell_min = 2
+
+    # Determine split point for passed vs current vs upcoming stops
+    current_idx = 1
+    if next_stn_name:
+        for idx, stn in enumerate(seq):
+            if next_stn_name in stn.name_el or next_stn_name in stn.name_en:
+                current_idx = idx
+                break
+    else:
+        # Default ~25-30% progression
+        current_idx = max(1, min(len(seq) - 1, len(seq) // 3))
+
+    step_min = 18 if train_type in ("IC", "Freight") else 7
+    stops: List[Dict[str, Any]] = []
+
+    for i, stn in enumerate(seq):
+        sched_arr_total = base_min + i * step_min
+        sched_dep_total = sched_arr_total + dwell_min
+
+        arr_h = (base_hour + (sched_arr_total // 60)) % 24
+        arr_m = sched_arr_total % 60
+        dep_h = (base_hour + (sched_dep_total // 60)) % 24
+        dep_m = sched_dep_total % 60
+
+        sched_arr_str = None if i == 0 else f"{arr_h:02d}:{arr_m:02d}"
+        sched_dep_str = None if i == len(seq) - 1 else f"{dep_h:02d}:{dep_m:02d}"
+
+        is_passed = i < current_idx
+        is_current = i == current_idx
+
+        if is_passed:
+            status = "DEPARTED"
+            act_arr_total = sched_arr_total + delay_min
+            act_dep_total = sched_dep_total + delay_min
+            act_arr_h = (base_hour + (act_arr_total // 60)) % 24
+            act_arr_m = act_arr_total % 60
+            act_dep_h = (base_hour + (act_dep_total // 60)) % 24
+            act_dep_m = act_dep_total % 60
+            act_arr_str = None if i == 0 else f"{act_arr_h:02d}:{act_arr_m:02d}"
+            act_dep_str = None if i == len(seq) - 1 else f"{act_dep_h:02d}:{act_dep_m:02d}"
+            stop_delay = delay_min
+        elif is_current:
+            status = "APPROACH"
+            act_arr_total = sched_arr_total + delay_min
+            act_arr_h = (base_hour + (act_arr_total // 60)) % 24
+            act_arr_m = act_arr_total % 60
+            act_arr_str = f"{act_arr_h:02d}:{act_arr_m:02d}"
+            act_dep_str = None
+            stop_delay = delay_min
+        else:
+            status = "SCHEDULED"
+            act_arr_str = None
+            act_dep_str = None
+            stop_delay = 0
+
+        # Alternate platform track 1..4 based on index
+        plat_num = str(((i + hash(clean_num)) % 4) + 1)
+
+        stops.append({
+            "stopSequence": i + 1,
+            "stationId": stn.id,
+            "stationNameGreek": stn.name_el,
+            "stationNameEnglish": stn.name_en,
+            "scheduledArrival": sched_arr_str,
+            "actualArrival": act_arr_str,
+            "scheduledDeparture": sched_dep_str,
+            "actualDeparture": act_dep_str,
+            "platform": plat_num,
+            "delayMinutes": stop_delay,
+            "status": status,
+            "is_passed": is_passed,
+            "is_current": is_current,
+        })
+
+    origin_stn = seq[0]
+    dest_stn = seq[-1]
+
+    return {
+        "scheduleId": f"sch-mock-{clean_num}",
+        "trainNumber": clean_num,
+        "trainType": train_type,
+        "serviceType": service_type,
+        "origin": {
+            "id": origin_stn.id,
+            "nameGreek": origin_stn.name_el,
+            "nameEnglish": origin_stn.name_en,
+        },
+        "destination": {
+            "id": dest_stn.id,
+            "nameGreek": dest_stn.name_el,
+            "nameEnglish": dest_stn.name_en,
+        },
+        "corridor": origin_stn.corridor,
+        "delayMinutes": delay_min,
+        "stops": stops,
+    }
+
+
 def load_tracks(path: Optional[str] = None) -> Dict[str, TrackPolyline]:
     """Load and parse railway track corridors from JSON file.
 

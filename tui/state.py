@@ -35,6 +35,7 @@ class InputMode(Enum):
     NORMAL = auto()  # General navigation, camera pan/zoom, presets, selection
     SEARCH = auto()  # Interactive live filter text input in status bar
     HELP = auto()  # Fullscreen keybinding reference dialog overlay
+    TIMETABLE = auto()  # Intermediate Stop & Timetable Modal Overlay (F-6.2)
 
 
 class RosterSortMode(Enum):
@@ -87,6 +88,41 @@ class HistoricalBreadcrumb:
     lng: float
     timestamp: float
     speed: float
+
+
+@dataclass(frozen=True)
+class TimetableStopDTO:
+    """Normalized intermediate timetable stop record."""
+
+    stop_sequence: int
+    station_id: str
+    station_name_el: str
+    station_name_en: str
+    scheduled_arrival: Optional[str] = None
+    actual_arrival: Optional[str] = None
+    scheduled_departure: Optional[str] = None
+    actual_departure: Optional[str] = None
+    platform: Optional[str] = None
+    delay_minutes: int = 0
+    status: str = "SCHEDULED"
+    is_passed: bool = False
+    is_current: bool = False
+
+
+@dataclass(frozen=True)
+class TrainTimetableDTO:
+    """Complete scheduled itinerary for a train service."""
+
+    train_number: str
+    schedule_id: str
+    train_type: str
+    service_type: str
+    origin_name: str
+    destination_name: str
+    corridor: str
+    stops: Tuple[TimetableStopDTO, ...]
+    current_delay_min: int = 0
+    fetched_at: float = 0.0
 
 
 @dataclass

@@ -391,3 +391,219 @@ def format_station_board_table(
     plural_label = "arrivals" if is_arrivals else "departures"
     lines.append(f"Total {plural_label}: {len(records)} | Data source: {data_source}")
     return "\n".join(lines)
+
+
+# -----------------------------------------------------------------------------
+# Train Timetable & Intermediate Stop Inspector Formatters (F-6.2)
+# -----------------------------------------------------------------------------
+
+
+def _format_schedule_header_title(timetable: Any, is_ascii: bool) -> str:
+    """Format the header title displaying train number and origin/destination."""
+    train_no = (
+        getattr(timetable, "train_number", None)
+        or (timetable.get("trainNumber") if isinstance(timetable, dict) else None)
+        or (timetable.get("train_number") if isinstance(timetable, dict) else None)
+        or "N/A"
+    )
+
+    def _resolve_endpoint_name(endpoint: Any) -> str:
+        if isinstance(endpoint, dict):
+            el = endpoint.get("nameGreek") or endpoint.get("name_el")
+            en = endpoint.get("nameEnglish") or endpoint.get("name_en")
+            if is_ascii or not el or el == en:
+                return en or el or endpoint.get("id") or "—"
+            return f"{en} / {el}" if en else el
+        if isinstance(endpoint, str) and endpoint.strip():
+            return endpoint.strip()
+        return "—"
+
+    if isinstance(timetable, dict):
+        orig_str = _resolve_endpoint_name(timetable.get("origin"))
+        dest_str = _resolve_endpoint_name(timetable.get("destination"))
+    else:
+        orig_str = getattr(timetable, "origin_name", "—")
+        dest_str = getattr(timetable, "destination_name", "—")
+
+    arrow = "->" if is_ascii else "→"
+    return f"TRAIN TIMETABLE & ITINERARY: TRAIN {train_no} ({orig_str} {arrow} {dest_str})"
+
+
+def _extract_stop_station_name(stop: Any, is_ascii: bool, empty_dash: str) -> str:
+    """Extract and format the calling station name for a timetable stop."""
+    if isinstance(stop, dict):
+        en = stop.get("stationNameEnglish") or stop.get("station_name_en")
+        el = stop.get("stationNameGreek") or stop.get("station_name_el")
+        name = stop.get("stationName") or stop.get("station_name") or stop.get("stationId")
+    else:
+        en = getattr(stop, "station_name_en", None)
+        el = getattr(stop, "station_name_el", None)
+        name = getattr(stop, "station_name", None) or getattr(stop, "station_id", None)
+
+    if is_ascii:
+        return en or name or el or empty_dash
+    if en and el and en != el:
+        return f"{en} / {el}"
+    return en or el or name or empty_dash
+
+
+def _extract_stop_time_field(raw_time: Any, empty_dash: str = "--:--") -> str:
+    """Parse time string into clean HH:MM representation."""
+    if not raw_time or str(raw_time).lower() in ("none", "null", ""):
+        return empty_dash
+    s = str(raw_time).strip()
+    clean = s.split("T")[-1].replace("Z", "")
+    return clean[:5] if len(clean) >= 5 else clean
+
+
+def _extract_stop_indicator(stop: Any, is_ascii: bool) -> str:
+    """Determine stop progression indicator glyph: [X] (passed), ►/> (current), or upcoming."""
+    is_passed = getattr(stop, "is_passed", False) if hasattr(stop, "is_passed") else False
+    is_current = getattr(stop, "is_current", False) if hasattr(stop, "is_current") else False
+    status = ""
+
+    if isinstance(stop, dict):
+        is_passed = stop.get("is_passed", False) or stop.get("status") == "DEPARTED"
+        is_current = stop.get("is_current", False) or stop.get("status") == "APPROACH"
+        status = str(stop.get("status", "")).upper()
+    elif hasattr(stop, "status"):
+        status = str(getattr(stop, "status", "")).upper()
+        if status == "DEPARTED":
+            is_passed = True
+        elif status == "APPROACH":
+            is_current = True
+
+    if is_passed:
+        return "[X]"
+    if is_current:
+        return " > " if is_ascii else " ► "
+    return "   "
+
+
+def _extract_stop_status_and_delay(stop: Any, is_passed: bool, is_current: bool) -> Tuple[str, str]:
+    """Extract status description and delay badge for a timetable stop."""
+    raw_delay = stop.get("delayMinutes") if isinstance(stop, dict) else getattr(stop, "delay_minutes", None)
+    if raw_delay is None and isinstance(stop, dict):
+        raw_delay = stop.get("delay_minutes") or stop.get("delay")
+
+    try:
+        delay_min = int(raw_delay) if raw_delay is not None else 0
+    except (ValueError, TypeError):
+        delay_min = 0
+
+    if isinstance(stop, dict):
+        raw_status = stop.get("status")
+    else:
+        raw_status = getattr(stop, "status", None)
+
+    if raw_status:
+        status_str = str(raw_status).replace("_", " ").upper()
+    elif is_passed:
+        status_str = "DEPARTED"
+    elif is_current:
+        status_str = "APPROACH"
+    else:
+        status_str = "SCHEDULED"
+
+    if is_passed or is_current:
+        delay_str = f"+{delay_min}m" if delay_min > 0 else f"{delay_min}m"
+    elif delay_min > 0:
+        delay_str = f"+{delay_min}m"
+    else:
+        delay_str = "---"
+
+    return status_str, delay_str
+
+
+def format_train_schedule_table(
+    timetable: Any,
+    is_ascii: bool = False,
+    data_source: str = "railway.gov.gr",
+) -> str:
+    """Format full train timetable and intermediate calling stops into a clean CLI table.
+
+    Args:
+        timetable: TrainTimetableDTO or dictionary containing timetable metadata and stops list.
+        is_ascii: True if 7-bit ASCII characters should be enforced.
+        data_source: Attribution label for table footer.
+
+    Returns:
+        Formatted multi-line text table string.
+    """
+    divider_char = "="
+    sub_divider_char = "-"
+    empty_dash = "-" if is_ascii else "—"
+    time_dash = "--:--"
+    width = 100
+
+    header_title = _format_schedule_header_title(timetable, is_ascii)
+    lines = [
+        divider_char * width,
+        header_title,
+        divider_char * width,
+    ]
+
+    stops: List[Any] = []
+    if isinstance(timetable, dict):
+        raw_stops = timetable.get("stops")
+        if isinstance(raw_stops, list):
+            stops = raw_stops
+    elif hasattr(timetable, "stops"):
+        stops = list(getattr(timetable, "stops", []))
+
+    if not stops:
+        lines.append("No intermediate calling points or timetable records found.")
+        lines.append(divider_char * width)
+        return "\n".join(lines)
+
+    lines.append(
+        f"{'ST':<4} {'STATION':<28} {'SCHED ARR':^9} {'ACTUAL ARR':^10} {'SCHED DEP':^9} {'ACTUAL DEP':^10} {'PLAT':^5} {'STATUS':<10} {'DELAY':>7}"
+    )
+    lines.append(sub_divider_char * width)
+
+    passed_count = 0
+    current_station = empty_dash
+    overall_delay = 0
+
+    for stop in stops:
+        indicator = _extract_stop_indicator(stop, is_ascii)
+        is_passed = "[X]" in indicator
+        is_current = (">" in indicator) or ("►" in indicator)
+
+        if is_passed:
+            passed_count += 1
+
+        station_name = _extract_stop_station_name(stop, is_ascii, empty_dash)
+        if is_current:
+            current_station = station_name
+
+        sched_arr_raw = stop.get("scheduledArrival") if isinstance(stop, dict) else getattr(stop, "scheduled_arrival", None)
+        act_arr_raw = stop.get("actualArrival") if isinstance(stop, dict) else getattr(stop, "actual_arrival", None)
+        sched_dep_raw = stop.get("scheduledDeparture") if isinstance(stop, dict) else getattr(stop, "scheduled_departure", None)
+        act_dep_raw = stop.get("actualDeparture") if isinstance(stop, dict) else getattr(stop, "actual_departure", None)
+        plat_raw = stop.get("platform") if isinstance(stop, dict) else getattr(stop, "platform", None)
+
+        sched_arr = _extract_stop_time_field(sched_arr_raw, time_dash)
+        act_arr = _extract_stop_time_field(act_arr_raw, time_dash)
+        sched_dep = _extract_stop_time_field(sched_dep_raw, time_dash)
+        act_dep = _extract_stop_time_field(act_dep_raw, time_dash)
+        platform = str(plat_raw) if plat_raw is not None and str(plat_raw).strip() else empty_dash
+
+        status_str, delay_str = _extract_stop_status_and_delay(stop, is_passed, is_current)
+        if (is_passed or is_current) and delay_str != "---":
+            try:
+                delay_val = int(delay_str.replace("+", "").replace("m", ""))
+                overall_delay = max(overall_delay, delay_val)
+            except ValueError:
+                pass
+
+        lines.append(
+            f"{indicator:<4} {station_name[:28]:<28} {sched_arr:^9} {act_arr:^10} {sched_dep:^9} {act_dep:^10} {platform[:4]:^5} {status_str[:10]:<10} {delay_str:>7}"
+        )
+
+    lines.append(divider_char * width)
+    delay_repr = f"+{overall_delay}m" if overall_delay > 0 else f"{overall_delay}m"
+    lines.append(
+        f"Total stops: {len(stops)} | Passed: {passed_count} | Next stop: {current_station[:24]} | Delay: {delay_repr} | Source: {data_source}"
+    )
+    return "\n".join(lines)

@@ -937,7 +937,37 @@ Examples:
         help="Fetch and display today's upcoming train timetables.",
     )
 
-    # 3. departures
+    # 3. schedule (F-6.2)
+    p_sched = subparsers.add_parser(
+        "schedule",
+        help="Inspect timetable and intermediate calling stops for a train.",
+        description="Fetch and display intermediate calling points, platform tracks, scheduled and actual times for any commercial train.",
+    )
+    p_sched.add_argument(
+        "train_number",
+        type=str,
+        help="Commercial train number (e.g. '1597', 'IC52', 'IC 52', '2232').",
+    )
+    p_sched.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Run in offline mock mode with synthetic train timetables.",
+    )
+    p_sched.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured JSON to stdout instead of tabular text.",
+    )
+    p_sched.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
+    # 4. departures
     p_dep = subparsers.add_parser(
         "departures",
         help="Query live station departure and arrival boards.",
@@ -1909,6 +1939,74 @@ def run_departures_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_schedule_mode(args: argparse.Namespace) -> int:
+    """Fetch and display train timetable and intermediate calling stops.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on failure).
+    """
+    import difflib
+    from storage.cli_formatters import format_train_schedule_table
+    from tui.mock_engine import (
+        generate_mock_train_schedule,
+        get_active_mock_train_numbers,
+    )
+
+    query = getattr(args, "train_number", "").strip()
+    if not query:
+        print("[Error] Missing required argument: train_number", file=sys.stderr)
+        return 1
+
+    is_demo = bool(getattr(args, "demo", False))
+    is_json = bool(getattr(args, "json", False))
+    is_ascii = bool(getattr(args, "ascii", False))
+
+    timetable: Optional[Dict[str, Any]] = None
+    data_source = "railway.gov.gr"
+
+    if is_demo:
+        timetable = generate_mock_train_schedule(query)
+        data_source = "synthetic simulation (--demo)"
+    else:
+        client = RailwayGovClient()
+        try:
+            timetable = client.get_schedule_by_train_number(query)
+        except (RailwayAPIError, urllib.error.URLError, TimeoutError, OSError) as err:
+            candidates = get_active_mock_train_numbers()
+            matches = difflib.get_close_matches(query.upper(), [c.upper() for c in candidates], n=4, cutoff=0.3)
+            print(f"[Error] Failed to fetch schedule for train '{query}': {err}", file=sys.stderr)
+            if matches:
+                print("Did you mean:", file=sys.stderr)
+                for m in matches:
+                    print(f"  • {m}", file=sys.stderr)
+            return 1
+
+    if not timetable or not timetable.get("stops"):
+        candidates = get_active_mock_train_numbers()
+        matches = difflib.get_close_matches(query.upper(), [c.upper() for c in candidates], n=4, cutoff=0.3)
+        print(f"[Error] Timetable not found for train '{query}'.", file=sys.stderr)
+        if matches:
+            print("Did you mean:", file=sys.stderr)
+            for m in matches:
+                print(f"  • {m}", file=sys.stderr)
+        return 1
+
+    if is_json:
+        print(json.dumps(timetable, indent=2, ensure_ascii=is_ascii))
+        return 0
+
+    table_str = format_train_schedule_table(
+        timetable,
+        is_ascii=is_ascii,
+        data_source=data_source,
+    )
+    print(table_str)
+    return 0
+
+
 def _configure_win32_utf8_console() -> None:
     """Configure Windows console codepage and standard streams for UTF-8 output."""
     if sys.platform != "win32":
@@ -1975,6 +2073,9 @@ def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
     if args.mode == "departures":
         return run_departures_mode(args)
+
+    if args.mode == "schedule":
+        return run_schedule_mode(args)
 
     if args.mode == "schedules":
         ret = run_schedules_mode()

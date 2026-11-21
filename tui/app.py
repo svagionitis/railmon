@@ -43,6 +43,7 @@ from tui.geo import (
 from tui.mock_engine import (
     StationNode,
     TrackPolyline,
+    generate_mock_train_schedule,
     load_stations,
     load_tracks,
     snap_to_track_network,
@@ -202,6 +203,12 @@ class TUIApp:
         self.search_buffer: str = ""
         self._pre_search_query: str = ""
         self.show_help: bool = False
+        self.show_timetable: bool = False
+        self.timetable_scroll_offset: int = 0
+        self._timetable_cache: Dict[str, Tuple[float, Any]] = {}
+        self._timetable_loading: bool = False
+        self._timetable_error: Optional[str] = None
+        self._active_timetable: Optional[Any] = None
         self.paused: bool = False
 
         # Transient status bar toast notification state (F-4.1)
@@ -216,7 +223,7 @@ class TUIApp:
         self._last_viewport_state: Optional[Tuple[float, float, float, int, int]] = None
         self._last_clock_sec: Optional[int] = None
         self._last_rendered_msg_rate: Optional[float] = None
-        self._last_modal_state: Optional[Tuple[InputMode, str, bool, bool, Optional[str], bool]] = None
+        self._last_modal_state: Optional[Tuple[Any, ...]] = None
         self._render_count: int = 0
         self._skip_count: int = 0
 
@@ -812,6 +819,10 @@ class TUIApp:
         elif key == ord("M"):
             self.cycle_station_inspector(exit_if_active=True)
 
+        # Toggle Train Timetable & Intermediate Stop Inspector modal (F-6.2)
+        elif key in (ord("i"), ord("I")):
+            self.toggle_timetable_modal()
+
         # Tier 4 export ('e'/'E') & DVR timeline scrubbing / speed ('[', ']', '<', '>')
         elif self._handle_dvr_and_export_input(key):
             pass
@@ -877,6 +888,174 @@ class TUIApp:
             except (ValueError, OverflowError):
                 pass
             return True
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Train Timetable & Intermediate Stop Inspector (F-6.2)
+    # ------------------------------------------------------------------
+
+    def toggle_timetable_modal(self) -> None:
+        """Toggle the Train Timetable & Intermediate Stop Inspector modal dialog."""
+        if self.input_mode == InputMode.TIMETABLE:
+            self.show_timetable = False
+            self.input_mode = InputMode.NORMAL
+            self._force_redraw = True
+            return
+
+        snapshot = self.store.get_snapshot()
+        if not snapshot.selected_train:
+            self._set_toast("[Select a train first to inspect timetable]", is_error=True)
+            return
+
+        train_num = (
+            snapshot.selected_train.position.train_number
+            or snapshot.selected_train.position.id
+        )
+        self.show_timetable = True
+        self.input_mode = InputMode.TIMETABLE
+        self.timetable_scroll_offset = 0
+        self._force_redraw = True
+        self._fetch_timetable_for_train(str(train_num), snapshot.selected_train)
+
+    def _auto_scroll_to_current_stop(self) -> None:
+        """Auto-adjust timetable_scroll_offset to vertically center the active calling point."""
+        if not self._active_timetable:
+            return
+        stops = []
+        if isinstance(self._active_timetable, dict):
+            stops = self._active_timetable.get("stops", [])
+        elif hasattr(self._active_timetable, "stops"):
+            stops = list(getattr(self._active_timetable, "stops", []))
+
+        current_idx = 0
+        for i, s in enumerate(stops):
+            if isinstance(s, dict) and (s.get("is_current") or s.get("status") == "APPROACH"):
+                current_idx = i
+                break
+            elif hasattr(s, "is_current") and getattr(s, "is_current", False):
+                current_idx = i
+                break
+
+        target_offset = max(0, current_idx - 5)
+        self.timetable_scroll_offset = target_offset
+
+    def _fetch_timetable_for_train(self, train_num: str, record: Any) -> None:
+        """Fetch timetable from cache, mock engine, or upstream REST API asynchronously."""
+        clean_num = train_num.strip().upper()
+
+        cached = self._timetable_cache.get(clean_num)
+        if cached and (time.time() - cached[0] < 300.0):
+            self._active_timetable = cached[1]
+            self._timetable_loading = False
+            self._timetable_error = None
+            self._auto_scroll_to_current_stop()
+            self._force_redraw = True
+            return
+
+        snapshot = self.store.get_snapshot()
+        is_demo_or_replay = (
+            getattr(snapshot, "is_replay", False)
+            or (hasattr(self.worker, "mock_engine") and getattr(self.worker, "mock_engine") is not None)
+            or getattr(self.worker, "client", None) is None
+        )
+
+        if is_demo_or_replay:
+            try:
+                mock_sched = generate_mock_train_schedule(clean_num)
+                self._timetable_cache[clean_num] = (time.time(), mock_sched)
+                self._active_timetable = mock_sched
+                self._timetable_loading = False
+                self._timetable_error = None
+                self._auto_scroll_to_current_stop()
+            except Exception as err:
+                self._timetable_error = str(err)
+                self._timetable_loading = False
+            self._force_redraw = True
+            return
+
+        self._timetable_loading = True
+        self._timetable_error = None
+        self._active_timetable = None
+        self._force_redraw = True
+
+        def _worker() -> None:
+            try:
+                from train_tracker import RailwayGovClient
+                client = RailwayGovClient()
+                data = client.get_schedule_by_train_number(clean_num)
+                if not data or not data.get("stops"):
+                    data = generate_mock_train_schedule(clean_num)
+                self._timetable_cache[clean_num] = (time.time(), data)
+                self._active_timetable = data
+                self._timetable_loading = False
+                self._timetable_error = None
+                self._auto_scroll_to_current_stop()
+            except Exception as err:
+                try:
+                    data = generate_mock_train_schedule(clean_num)
+                    self._timetable_cache[clean_num] = (time.time(), data)
+                    self._active_timetable = data
+                    self._timetable_loading = False
+                    self._timetable_error = None
+                    self._auto_scroll_to_current_stop()
+                except Exception:
+                    self._timetable_error = str(err)
+                    self._timetable_loading = False
+            self._force_redraw = True
+
+        t = threading.Thread(target=_worker, name=f"timetable-fetch-{clean_num}", daemon=True)
+        t.start()
+
+    def _handle_timetable_input(self, key: int) -> bool:
+        """Handle input event in TIMETABLE modal inspection mode.
+
+        Args:
+            key: Curses key code.
+
+        Returns:
+            True to continue application loop; False to exit.
+        """
+        # Dismiss modal on Esc (27), 'q', 'Q', 'i', 'I', or Enter
+        if key in (27, ord("q"), ord("Q"), ord("i"), ord("I"), 10, 13):
+            self.show_timetable = False
+            self.input_mode = InputMode.NORMAL
+            self._force_redraw = True
+            return True
+
+        stops_count = 0
+        if self._active_timetable:
+            if isinstance(self._active_timetable, dict):
+                stops_count = len(self._active_timetable.get("stops", []))
+            elif hasattr(self._active_timetable, "stops"):
+                stops_count = len(getattr(self._active_timetable, "stops", []))
+
+        max_offset = max(0, stops_count - 10)
+
+        # Scroll Up
+        if key in (curses.KEY_UP, ord("k"), ord("K")):
+            self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - 1)
+            self._force_redraw = True
+        # Scroll Down
+        elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            self.timetable_scroll_offset = min(max_offset, self.timetable_scroll_offset + 1)
+            self._force_redraw = True
+        # Page Up
+        elif key == getattr(curses, "KEY_PPAGE", -1):
+            self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - 8)
+            self._force_redraw = True
+        # Page Down
+        elif key == getattr(curses, "KEY_NPAGE", -1):
+            self.timetable_scroll_offset = min(max_offset, self.timetable_scroll_offset + 8)
+            self._force_redraw = True
+        # Home
+        elif key == getattr(curses, "KEY_HOME", -1):
+            self.timetable_scroll_offset = 0
+            self._force_redraw = True
+        # End
+        elif key == getattr(curses, "KEY_END", -1):
+            self.timetable_scroll_offset = max_offset
+            self._force_redraw = True
 
         return True
 
@@ -1113,6 +1292,35 @@ class TUIApp:
                 self.input_mode = InputMode.NORMAL
             return True
 
+        if self.input_mode == InputMode.TIMETABLE:
+            if bstate & MOUSE_SCROLL_UP_MASK:
+                self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - 2)
+                self._force_redraw = True
+                return True
+            if bstate & MOUSE_SCROLL_DOWN_MASK:
+                stops_count = 0
+                if self._active_timetable:
+                    if isinstance(self._active_timetable, dict):
+                        stops_count = len(self._active_timetable.get("stops", []))
+                    elif hasattr(self._active_timetable, "stops"):
+                        stops_count = len(getattr(self._active_timetable, "stops", []))
+                self.timetable_scroll_offset = min(max(0, stops_count - 8), self.timetable_scroll_offset + 2)
+                self._force_redraw = True
+                return True
+            if bstate & (MOUSE_LEFT_CLICK_MASK | MOUSE_LEFT_DOUBLE_CLICK_MASK):
+                term_h = self.geometry.term_height
+                term_w = self.geometry.term_width
+                box_h = min(22, max(12, term_h - 2))
+                box_w = min(82, max(46, term_w - 4))
+                start_y = max(1, (term_h - box_h) // 2)
+                start_x = max(1, (term_w - box_w) // 2)
+                if my < start_y or my >= start_y + box_h or mx < start_x or mx >= start_x + box_w:
+                    self.show_timetable = False
+                    self.input_mode = InputMode.NORMAL
+                    self._force_redraw = True
+                return True
+            return True
+
         g = self.geometry
         if not g.is_valid:
             return True
@@ -1166,6 +1374,10 @@ class TUIApp:
             self.show_help = False
             self.input_mode = InputMode.NORMAL
             return True
+
+        # In TIMETABLE mode, route to timetable modal input handler (F-6.2)
+        if self.input_mode == InputMode.TIMETABLE:
+            return self._handle_timetable_input(key)
 
         # In SEARCH mode, route to search input editor
         if self.input_mode == InputMode.SEARCH:
@@ -1234,6 +1446,9 @@ class TUIApp:
                     self.input_mode,
                     self.search_buffer,
                     self.show_help,
+                    self.show_timetable,
+                    self.timetable_scroll_offset,
+                    self._timetable_loading,
                     self.paused,
                     active_toast_msg,
                     active_toast_err,
@@ -1260,6 +1475,11 @@ class TUIApp:
                         playback_state=PlaybackState.PAUSED if self.paused else PlaybackState.RUNNING,
                         toast_message=active_toast_msg,
                         toast_is_error=active_toast_err,
+                        timetable_overlay=self.show_timetable,
+                        timetable_data=self._active_timetable,
+                        timetable_scroll_offset=self.timetable_scroll_offset,
+                        timetable_loading=self._timetable_loading,
+                        timetable_error=self._timetable_error,
                     )
 
                     # 4b. Flush frame using double buffering (noutrefresh + doupdate)
@@ -1270,7 +1490,7 @@ class TUIApp:
                                     win.noutrefresh()
                                 except curses.error:
                                     pass
-                        if self.show_help:
+                        if self.show_help or self.show_timetable:
                             try:
                                 self.stdscr.noutrefresh()
                             except curses.error:
