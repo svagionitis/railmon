@@ -70,6 +70,7 @@ from tui.state import (
     TrackColorMode,
     TrainStateStore,
 )
+from tui.theme import ThemeProfile, get_theme_spec
 from tui.stream_worker import ReplayWorker, StreamWorker
 
 
@@ -178,6 +179,7 @@ class TUIApp:
         ascii_mode: bool = False,
         export_dir: Optional[str] = None,
         infrastructure: Optional[Sequence[InfrastructureFeature]] = None,
+        initial_theme: Optional[ThemeProfile] = None,
     ) -> None:
         """Initialize the TUI application controller.
 
@@ -255,6 +257,9 @@ class TUIApp:
             ascii_mode=self.ascii_mode,
             infrastructure=self.infrastructure,
         )
+        if initial_theme is not None:
+            self.store.set_theme_profile(initial_theme)
+            self.renderer.active_theme = initial_theme
 
         # Base viewport covers Greece corridor
         viewport = Viewport(
@@ -485,6 +490,20 @@ class TUIApp:
         else:
             self._set_toast("[✓ Infrastructure GIS: Off]")
         return mode
+
+    def cycle_theme(self) -> ThemeProfile:
+        """Cycle to next terminal color theme and rebind curses palette (F-7.3)."""
+        new_theme = self.store.cycle_theme_profile()
+        self.renderer.apply_theme(new_theme)
+        spec = get_theme_spec(new_theme)
+        self._set_toast(f"[✓ Theme: {spec.display_name}]")
+        if getattr(self, "stdscr", None) is not None:
+            try:
+                self.stdscr.touchwin()
+            except curses.error:
+                pass
+        self._force_redraw = True
+        return new_theme
 
     def _get_candidate_stations(self, corridor_filter: Optional[str]) -> List[StationNode]:
         """Return ordered hub stations matching the active corridor filter (or all stations if none are hubs)."""
@@ -868,6 +887,10 @@ class TUIApp:
         # Launch Live Locomotive Forward Cab Video Stream (F-7.1)
         elif key in (ord("w"), ord("W")):
             self.launch_cab_stream_for_selected_train()
+
+        # Cycle Terminal Color Theme Profile (F-7.3)
+        elif key in (getattr(curses, "KEY_F10", 274), ord("K")):
+            self.cycle_theme()
 
         # Tier 4 export ('e'/'E') & DVR timeline scrubbing / speed ('[', ']', '<', '>')
         elif self._handle_dvr_and_export_input(key):
@@ -1658,6 +1681,7 @@ def run_tui(
     stop_event: Optional[threading.Event] = None,
     ascii_mode: bool = False,
     infrastructure: Optional[Sequence[InfrastructureFeature]] = None,
+    initial_theme: Optional[ThemeProfile] = None,
 ) -> None:
     """Safely start the Curses TUI application with automatic terminal restoration.
 
@@ -1688,6 +1712,7 @@ def run_tui(
             stop_event=stop_event,
             ascii_mode=ascii_mode,
             infrastructure=infrastructure,
+            initial_theme=initial_theme,
         )
         app.run_loop()
 

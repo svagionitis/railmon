@@ -16,6 +16,7 @@ from tui.geo import (
     PATHE_PRESET,
     PROASTIAKOS_PRESET,
 )
+from tui.theme import ThemeProfile, get_next_theme
 
 
 class ConnectionStatus(Enum):
@@ -234,6 +235,7 @@ class StateSnapshot:
     station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
     track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
     infrastructure_mode: InfrastructureLayerMode = InfrastructureLayerMode.ALL
+    theme_profile: ThemeProfile = ThemeProfile.AZURE
     is_replay: bool = False
     replay_db: Optional[str] = None
     replay_virtual_time: Optional[float] = None
@@ -360,7 +362,12 @@ def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
 class TrainStateStore:
     """Thread-safe state repository for live train positions and UI view state."""
 
-    def __init__(self, stale_timeout_sec: float = 1800.0, max_trail_len: int = 15) -> None:
+    def __init__(
+        self,
+        stale_timeout_sec: float = 1800.0,
+        max_trail_len: int = 15,
+        initial_theme: Optional[ThemeProfile] = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._stale_timeout_sec = stale_timeout_sec
         self._max_trail_len = max_trail_len
@@ -386,6 +393,7 @@ class TrainStateStore:
         self._station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
         self._track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
         self._infrastructure_mode: InfrastructureLayerMode = InfrastructureLayerMode.ALL
+        self._theme_profile: ThemeProfile = initial_theme if initial_theme is not None else ThemeProfile.AZURE
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
         self._is_recording: bool = False
@@ -606,6 +614,7 @@ class TrainStateStore:
                 station_label_mode=self._station_label_mode,
                 track_color_mode=self._track_color_mode,
                 infrastructure_mode=self._infrastructure_mode,
+                theme_profile=self._theme_profile,
                 is_replay=self._is_replay,
                 replay_db=self._replay_db,
                 replay_virtual_time=self._replay_virtual_time,
@@ -912,6 +921,22 @@ class TrainStateStore:
             self._infrastructure_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
             self._version += 1
             return self._infrastructure_mode
+
+    def set_theme_profile(self, profile: ThemeProfile) -> None:
+        """Explicitly set active terminal color theme profile."""
+        if not isinstance(profile, ThemeProfile):
+            raise TypeError(f"Expected ThemeProfile enum, got {type(profile).__name__}: {profile}")
+        with self._lock:
+            if self._theme_profile != profile:
+                self._theme_profile = profile
+                self._version += 1
+
+    def cycle_theme_profile(self) -> ThemeProfile:
+        """Cycle to next terminal color theme profile: AZURE -> AMBER -> MATRIX -> SOLARIZED -> MONOCHROME."""
+        with self._lock:
+            self._theme_profile = get_next_theme(self._theme_profile)
+            self._version += 1
+            return self._theme_profile
 
     def clear(self) -> None:
         """Reset state store completely."""

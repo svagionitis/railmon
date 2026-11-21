@@ -1165,6 +1165,13 @@ Examples:
         help="Force pure 7-bit ASCII rendering fallback (disable Unicode Braille and UTF-8 glyphs).",
     )
     parser.add_argument(
+        "--theme",
+        type=str,
+        default=None,
+        choices=["azure", "amber", "matrix", "solarized", "monochrome"],
+        help="Initial terminal color theme profile for TUI dashboard (default: azure or $RAILMON_THEME).",
+    )
+    parser.add_argument(
         "--demo",
         action="store_true",
         help="Run offline using synthetic telemetry simulator (no live network connection required).",
@@ -1670,6 +1677,7 @@ def run_tui_mode(
     archive_path: Optional[str] = None,
     glyph_mode: GlyphMode = GlyphMode.AUTO,
     replay_speed: float = 1.0,
+    theme: Optional[str] = None,
     # Backward compatibility shims:
     demo: Optional[bool] = None,
     record: Optional[bool] = None,
@@ -1769,7 +1777,13 @@ def run_tui_mode(
     # 4. Start background ingestion thread
     worker.start()
 
-    # 5. Resolve ASCII fallback mode
+    # 5. Resolve ASCII fallback mode and initial color theme
+    initial_theme = None
+    theme_name = theme if theme is not None else os.environ.get("RAILMON_THEME")
+    if theme_name:
+        from tui.theme import parse_theme_name
+        initial_theme = parse_theme_name(theme_name)
+
     use_ascii = (
         True
         if glyph_mode == GlyphMode.ASCII
@@ -1791,6 +1805,7 @@ def run_tui_mode(
                 target_fps=fps,
                 stop_event=stop_event,
                 ascii_mode=use_ascii,
+                initial_theme=initial_theme,
             )
         except curses_error_cls as exc:
             logger.warning(
@@ -2615,16 +2630,20 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
     glyph_mode = GlyphMode.ASCII if getattr(args, "ascii", False) else GlyphMode.AUTO
     replay_speed = float(getattr(args, "replay_speed", 1.0) or 1.0)
+    theme = getattr(args, "theme", None)
     if is_tui:
-        run_tui_mode(
-            source=TelemetrySource.REPLAY,
-            fps=args.fps,
-            reconnect_delay=args.reconnect_delay,
-            recording=RecordingMode.DISABLED,
-            db_path=replay_db,
-            glyph_mode=glyph_mode,
-            replay_speed=replay_speed,
-        )
+        replay_kwargs: Dict[str, Any] = {
+            "source": TelemetrySource.REPLAY,
+            "fps": args.fps,
+            "reconnect_delay": args.reconnect_delay,
+            "recording": RecordingMode.DISABLED,
+            "db_path": replay_db,
+            "glyph_mode": glyph_mode,
+            "replay_speed": replay_speed,
+        }
+        if theme is not None:
+            replay_kwargs["theme"] = theme
+        run_tui_mode(**replay_kwargs)
         return 0
 
     run_plain_stream_mode(
@@ -2683,6 +2702,7 @@ def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     is_rec = bool(getattr(args, "record", False))
     if is_tui:
         glyph_mode = GlyphMode.ASCII if getattr(args, "ascii", False) else GlyphMode.AUTO
+        theme = getattr(args, "theme", None)
         if is_rec:
             tui_kwargs: Dict[str, Any] = {
                 "source": source,
@@ -2693,15 +2713,20 @@ def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
                 "deadband": deadband,
                 "glyph_mode": glyph_mode,
             }
+            if theme is not None:
+                tui_kwargs["theme"] = theme
             _attach_optional_retention_kwargs(args, tui_kwargs)
             run_tui_mode(**tui_kwargs)
         else:
-            run_tui_mode(
-                source=source,
-                fps=args.fps,
-                reconnect_delay=args.reconnect_delay,
-                glyph_mode=glyph_mode,
-            )
+            tui_call_kwargs: Dict[str, Any] = {
+                "source": source,
+                "fps": args.fps,
+                "reconnect_delay": args.reconnect_delay,
+                "glyph_mode": glyph_mode,
+            }
+            if theme is not None:
+                tui_call_kwargs["theme"] = theme
+            run_tui_mode(**tui_call_kwargs)
         return 0
 
     if is_rec:

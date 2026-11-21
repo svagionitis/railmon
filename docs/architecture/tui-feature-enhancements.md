@@ -30,7 +30,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
-| **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | **Implemented** | [`tui/theme.py`](../../tui/theme.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`tui/app.py`](../../tui/app.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/db.py`](../../storage/db.py) |
 | **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py) |
@@ -814,7 +814,7 @@ Ingests infrastructure GeoJSON features from `/api/msd/geo?types=tunnel,bridge,s
 
 ---
 
-### F-7.3: Custom Terminal Color Theme Profiles (`F10` / `K`) — *Planned*
+### F-7.3: Custom Terminal Color Theme Profiles (`F10` / `K`) — *Implemented*
 
 #### Overview
 Adds switchable 16-color and 256-color palette presets in [`tui/renderer.py`](../../tui/renderer.py) to accommodate different terminal emulator backgrounds:
@@ -823,6 +823,8 @@ Adds switchable 16-color and 256-color palette presets in [`tui/renderer.py`](..
 3. **Matrix Green:** High-contrast phosphor green for night monitoring.
 4. **Solarized Dark:** Standard low-fatigue palette for terminal developers.
 5. **High-Contrast Monochrome:** Pure black-and-white for minimal/e-ink consoles.
+
+See the detailed implementation plan in [`../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md`](../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md).
 
 ---
 
@@ -1000,9 +1002,9 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 2. **F-6.2 (*Completed*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>` (see detailed plan in [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md)).
 3. **F-6.3 (*Planned*):** Implement `railmon watch <train_num>` background proximity and delay notification engine.
 
-### Phase 7: Tier 7 Visual Enhancements & GIS Layers (F-7.1 & F-7.2 Implemented)
+### Phase 7: Tier 7 Visual Enhancements & GIS Layers (F-7.1, F-7.2 & F-7.3 Implemented)
 1. **F-7.2 (*Implemented*):** Ingest tunnel, bridge, and signal GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`, overlay portals (`∩` / `[ ]`), bridges (`═` / `||`), and interlocking signals (`◆` / `[S]`), detect in-tunnel transit (`[TUNNEL]` badge), and toggle layers via `g` / `G` and CLI `railmon infrastructure` (see detailed plan in [`../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md`](../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md)).
-2. **F-7.3 (*Planned*):** Implement color palette switcher in [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`).
+2. **F-7.3 (*Implemented*):** Implement color palette switcher in [`tui/theme.py`](../../tui/theme.py) and [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`) (see detailed plan in [`../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md`](../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md)).
 3. **F-7.1 (*Implemented*):** Add cab stream launcher subprocess execution in [`tui/app.py`](../../tui/app.py) (`w`/`W`) and CLI `railmon cab` (see detailed plan in [`../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md`](../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md)).
 
 ### Phase 8: Tier 8 Integrations & DevOps — *Planned*

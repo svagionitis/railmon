@@ -62,6 +62,13 @@ from tui.state import (
     TrainStateStore,
 )
 from tui.stream_worker import ReplayWorker, StreamWorker
+from tui.theme import (
+    ThemeProfile,
+    ThemeSpec,
+    get_next_theme,
+    get_theme_spec,
+    parse_theme_name,
+)
 
 __all__ = [
     "GeoPoint",
@@ -120,4 +127,9 @@ __all__ = [
     "compute_station_board_entries",
     "normalize_station_key",
     "calculate_scroll_offset",
+    "ThemeProfile",
+    "ThemeSpec",
+    "get_theme_spec",
+    "get_next_theme",
+    "parse_theme_name",
 ]

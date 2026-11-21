@@ -47,6 +47,26 @@ from tui.state import (
     TrackColorMode,
     TrainRecord,
 )
+from tui.theme import (
+    PAIR_BORDER,
+    PAIR_CONNECTED,
+    PAIR_DEFAULT,
+    PAIR_HEADER,
+    PAIR_ROSTER_SELECT,
+    PAIR_STATION,
+    PAIR_STATION_DIM,
+    PAIR_STATUS_BAR,
+    PAIR_TRACK,
+    PAIR_TRAIL,
+    PAIR_TRAIN_ALERT,
+    PAIR_TRAIN_FREIGHT,
+    PAIR_TRAIN_HALTED,
+    PAIR_TRAIN_ON_TIME,
+    PAIR_TRAIN_PROAST,
+    PAIR_TRAIN_WARN,
+    ThemeProfile,
+    get_theme_spec,
+)
 
 
 class HelpOverlay(Enum):
@@ -978,6 +998,7 @@ def safe_addstr(
 
 
 _INITIALIZED_COLOR_PAIRS: Set[int] = set()
+_THEME_ATTR_OVERRIDES: Dict[int, int] = {}
 
 
 def safe_color_pair(pair_idx: int, fallback_attr: int = curses.A_NORMAL) -> int:
@@ -988,15 +1009,16 @@ def safe_color_pair(pair_idx: int, fallback_attr: int = curses.A_NORMAL) -> int:
         fallback_attr: Curses attribute to return if colors unavailable or uninitialized.
 
     Returns:
-        Color pair attribute integer or fallback.
+        Color pair attribute integer or fallback, combined with active theme attribute overrides.
     """
-    global _INITIALIZED_COLOR_PAIRS
+    global _INITIALIZED_COLOR_PAIRS, _THEME_ATTR_OVERRIDES
+    attr_override = _THEME_ATTR_OVERRIDES.get(pair_idx, 0)
     try:
         if curses.has_colors() and pair_idx in _INITIALIZED_COLOR_PAIRS:
-            return curses.color_pair(pair_idx)
+            return curses.color_pair(pair_idx) | attr_override
     except curses.error:
         pass
-    return fallback_attr
+    return fallback_attr | attr_override
 
 
 class TUIRenderer:
@@ -1029,6 +1051,7 @@ class TUIRenderer:
         ]
         self.ascii_mode: bool = ascii_mode
         self.glyphs: RenderGlyphs = GLYPHS_ASCII if ascii_mode else GLYPHS_UTF8
+        self.active_theme: ThemeProfile = ThemeProfile.AZURE
 
     def resolve_station(self, name_or_id: Optional[str]) -> Optional[StationNode]:
         """Resolve a station name, Greek/English alias, code, or ID to a StationNode."""
@@ -1045,58 +1068,66 @@ class TUIRenderer:
                 return self.station_index[base_key]
         return None
 
-    def init_colors(self) -> None:
-        """Initialize standard curses color pairs and semantic visual attributes with error bounds."""
-        global _INITIALIZED_COLOR_PAIRS
-        _INITIALIZED_COLOR_PAIRS.clear()
+    def apply_theme(self, profile: ThemeProfile) -> bool:
+        """Re-bind curses color pairs and attribute overrides for designated theme profile.
+
+        Args:
+            profile: Target ThemeProfile enum.
+
+        Returns:
+            True if colors were successfully initialized/re-bound, False if curses has no colors.
+        """
+        global _INITIALIZED_COLOR_PAIRS, _THEME_ATTR_OVERRIDES
+        if not isinstance(profile, ThemeProfile):
+            raise TypeError(f"Expected ThemeProfile enum, got {type(profile).__name__}: {profile}")
+
+        self.active_theme = profile
+        spec = get_theme_spec(profile)
+
+        _THEME_ATTR_OVERRIDES.clear()
+        for pair_id, p_def in spec.pairs.items():
+            if p_def.attr_override is not None:
+                _THEME_ATTR_OVERRIDES[pair_id] = p_def.attr_override
 
         try:
             if not curses.has_colors():
-                return
+                return False
         except curses.error:
-            return
+            return False
 
         try:
             curses.start_color()
         except curses.error:
-            return
+            return False
 
         try:
             curses.use_default_colors()
-            bg = -1
         except curses.error:
-            bg = curses.COLOR_BLACK
+            pass
 
+        num_colors = getattr(curses, "COLORS", 8)
+        use_256 = num_colors >= 256
         max_pairs = getattr(curses, "COLOR_PAIRS", 64)
 
-        pairs = [
-            (PAIR_DEFAULT, curses.COLOR_WHITE, bg),
-            (PAIR_HEADER, curses.COLOR_CYAN, bg),
-            (PAIR_BORDER, curses.COLOR_BLUE, bg),
-            (PAIR_TRACK, curses.COLOR_WHITE, bg),
-            (PAIR_STATION, curses.COLOR_YELLOW, bg),
-            (PAIR_STATION_DIM, curses.COLOR_YELLOW, bg),
-            (PAIR_TRAIN_ON_TIME, curses.COLOR_GREEN, bg),
-            (PAIR_TRAIN_WARN, curses.COLOR_YELLOW, bg),
-            (PAIR_TRAIN_ALERT, curses.COLOR_RED, bg),
-            (PAIR_TRAIN_PROAST, curses.COLOR_CYAN, bg),
-            (PAIR_TRAIN_FREIGHT, curses.COLOR_MAGENTA, bg),
-            (PAIR_TRAIN_HALTED, curses.COLOR_WHITE, bg),
-            (PAIR_ROSTER_SELECT, curses.COLOR_BLACK, curses.COLOR_CYAN),
-            (PAIR_TRAIL, curses.COLOR_GREEN, bg),
-            (PAIR_STATUS_BAR, curses.COLOR_BLACK, curses.COLOR_WHITE),
-            (PAIR_CONNECTED, curses.COLOR_GREEN, bg),
-        ]
+        _INITIALIZED_COLOR_PAIRS.clear()
 
-        for pair_idx, fg, pair_bg in pairs:
+        for pair_idx, p_def in spec.pairs.items():
             if pair_idx >= max_pairs:
                 continue
+            fg = p_def.fg_256 if use_256 else p_def.fg_16
+            bg = p_def.bg_256 if use_256 else p_def.bg_16
             try:
-                curses.init_pair(pair_idx, fg, pair_bg)
+                curses.init_pair(pair_idx, fg, bg)
                 _INITIALIZED_COLOR_PAIRS.add(pair_idx)
             except curses.error:
                 # Silently degrade: safe_color_pair will return fallback_attr
                 pass
+
+        return True
+
+    def init_colors(self) -> None:
+        """Initialize standard curses color pairs and semantic visual attributes with error bounds."""
+        self.apply_theme(self.active_theme)
 
     def render_undersized(self, win: Any, height: int, width: int) -> None:
         """Render centered warning banner when terminal size falls below minimum.
@@ -2095,11 +2126,11 @@ class TUIRenderer:
         if getattr(snapshot, "is_replay", False):
             return (
                 f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [[/]] Scrub  [</>] Speed  [Space] Pause  "
-                f"[Tab] Select  [s] Sort  [b] Trails  [e] Export  [m] Stations  {follow_str}  [/] Filter  [?] Help"
+                f"[Tab] Select  [s] Sort  [b] Trails  [e] Export  [m] Stations  {follow_str}  [F10/K] Theme  [/] Filter  [?] Help"
             )
         return (
             f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
-            f"[e] Export  [i] Timetable  [w] Cab View  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+            f"[e] Export  [i] Timetable  [w] Cab View  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [F10/K] Theme  [/] Filter  [?] Help  [0..3] Presets"
         )
 
     def render_status_bar(
@@ -2258,6 +2289,7 @@ class TUIRenderer:
                 ("/, Esc", "Enter search filter mode / Cancel and return"),
                 ("e / E, Space", "Export train GeoJSON / CSV / Pause stream or DVR"),
                 ("[ / ], < / >, ?, q", "DVR scrub -/+5m & speed (1x..60x) / Help / Quit"),
+                ("F10 / K", "Cycle Color Themes (Azure, Amber, Matrix, Solarized, Mono)"),
             ]),
             ("SYMBOLS & COLOR LEGEND", [
                 (
