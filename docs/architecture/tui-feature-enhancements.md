@@ -29,7 +29,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
-| **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/db.py`](../../storage/db.py) |
@@ -801,7 +801,9 @@ railmon cab 1597 --json
 
 ---
 
-### F-7.2: Infrastructure GIS Layers: Tunnels, Bridges & Signals (`g` / `G`) — *Planned*
+### F-7.2: Infrastructure GIS Layers: Tunnels, Bridges & Signals (`g` / `G`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md`](../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md)
 
 #### Overview
 Ingests infrastructure GeoJSON features from `/api/msd/geo?types=tunnel,bridge,signal` and overlays them onto the Braille canvas:
@@ -940,9 +942,9 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 | **`e` / `E`** | **Normal** | **Export selected train trajectory to GeoJSON (`e`) / CSV (`E`) file** | **Implemented (Tier 4)** |
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Implemented (Tier 4)** |
 | **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Implemented (Tier 4)** |
-| **`i` / `I`** | **Normal** | **Open Train Timetable & Intermediate Stop Itinerary modal** | **Planned (Tier 6)** |
-| **`w` / `W`** | **Normal** | **Launch forward cab video stream in external media player (`mpv`)** | **Planned (Tier 7)** |
-| **`g` / `G`** | **Normal** | **Cycle infrastructure GIS layer (`All` → `Tunnels/Bridges` → `Off`)** | **Planned (Tier 7)** |
+| **`i` / `I`** | **Normal** | **Open Train Timetable & Intermediate Stop Itinerary modal** | **Implemented (Tier 6)** |
+| **`w` / `W`** | **Normal** | **Launch forward cab video stream in external media player (`mpv`)** | **Implemented (Tier 7)** |
+| **`g` / `G`** | **Normal** | **Cycle infrastructure GIS layer (`All` → `Tunnels/Bridges` → `Off`)** | **Implemented (Tier 7)** |
 | **`F10` / `K`** | **Normal** | **Cycle terminal color themes (Azure, Amber, Green, Solarized)** | **Planned (Tier 7)** |
 | **`D`** | **Normal** | **Toggle dual split-screen multi-train follow view** | **Planned (Tier 7)** |
 
@@ -998,10 +1000,10 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 2. **F-6.2 (*Completed*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>` (see detailed plan in [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md)).
 3. **F-6.3 (*Planned*):** Implement `railmon watch <train_num>` background proximity and delay notification engine.
 
-### Phase 7: Tier 7 Visual Enhancements & GIS Layers — *Planned*
-1. Ingest tunnel and bridge GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`.
-2. Implement color palette switcher in [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`).
-3. Add cab stream launcher subprocess execution in [`tui/app.py`](../../tui/app.py) (`w`/`W`).
+### Phase 7: Tier 7 Visual Enhancements & GIS Layers (F-7.1 & F-7.2 Implemented)
+1. **F-7.2 (*Implemented*):** Ingest tunnel, bridge, and signal GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`, overlay portals (`∩` / `[ ]`), bridges (`═` / `||`), and interlocking signals (`◆` / `[S]`), detect in-tunnel transit (`[TUNNEL]` badge), and toggle layers via `g` / `G` and CLI `railmon infrastructure` (see detailed plan in [`../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md`](../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md)).
+2. **F-7.3 (*Planned*):** Implement color palette switcher in [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`).
+3. **F-7.1 (*Implemented*):** Add cab stream launcher subprocess execution in [`tui/app.py`](../../tui/app.py) (`w`/`W`) and CLI `railmon cab` (see detailed plan in [`../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md`](../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md)).
 
 ### Phase 8: Tier 8 Integrations & DevOps — *Planned*
 1. Implement zero-dependency HTTP server in [`train_tracker.py`](../../train_tracker.py) for `railmon serve`.

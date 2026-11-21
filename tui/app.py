@@ -32,6 +32,7 @@ from tui.geo import (
     BoundingBox,
     BrailleCanvas,
     GREECE_PRESET,
+    InfrastructureFeature,
     NORTHERN_GREECE_PRESET,
     PATHE_PRESET,
     PROASTIAKOS_PRESET,
@@ -44,6 +45,7 @@ from tui.mock_engine import (
     StationNode,
     TrackPolyline,
     generate_mock_train_schedule,
+    load_infrastructure,
     load_stations,
     load_tracks,
     snap_to_track_network,
@@ -59,6 +61,7 @@ from tui.renderer import (
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
+    InfrastructureLayerMode,
     InputMode,
     InspectorMode,
     RosterSortMode,
@@ -174,6 +177,7 @@ class TUIApp:
         stop_event: Optional[threading.Event] = None,
         ascii_mode: bool = False,
         export_dir: Optional[str] = None,
+        infrastructure: Optional[Sequence[InfrastructureFeature]] = None,
     ) -> None:
         """Initialize the TUI application controller.
 
@@ -187,6 +191,7 @@ class TUIApp:
             stop_event: Optional external shutdown event triggered by OS signals.
             ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
             export_dir: Optional base directory for in-TUI trajectory exports (defaults to '.').
+            infrastructure: List or sequence of InfrastructureFeature entities.
         """
         self.stdscr = stdscr
         self.store = store
@@ -236,12 +241,20 @@ class TUIApp:
             stations = list(load_stations().values())
         if tracks is None:
             tracks = list(load_tracks().values())
+        if infrastructure is None:
+            infrastructure = list(load_infrastructure().values())
 
         self.stations = stations
         self.tracks = tracks
+        self.infrastructure = infrastructure
 
         # Initialize renderer and viewport projector
-        self.renderer = TUIRenderer(stations=self.stations, tracks=self.tracks, ascii_mode=self.ascii_mode)
+        self.renderer = TUIRenderer(
+            stations=self.stations,
+            tracks=self.tracks,
+            ascii_mode=self.ascii_mode,
+            infrastructure=self.infrastructure,
+        )
 
         # Base viewport covers Greece corridor
         viewport = Viewport(
@@ -460,6 +473,18 @@ class TUIApp:
     def toggle_track_colors(self) -> TrackColorMode:
         """Toggle corridor-colored Braille track rendering (UNIFORM <-> CORRIDOR)."""
         return self.store.cycle_track_color_mode()
+
+    def cycle_infrastructure_layers(self) -> InfrastructureLayerMode:
+        """Cycle railway infrastructure GIS overlay mode: ALL -> TUNNELS_BRIDGES -> OFF."""
+        mode = self.store.cycle_infrastructure_mode()
+        self._force_redraw = True
+        if mode == InfrastructureLayerMode.ALL:
+            self._set_toast("[✓ Infrastructure GIS: All (Tunnels, Bridges & Signals)]")
+        elif mode == InfrastructureLayerMode.TUNNELS_BRIDGES:
+            self._set_toast("[✓ Infrastructure GIS: Tunnels & Bridges]")
+        else:
+            self._set_toast("[✓ Infrastructure GIS: Off]")
+        return mode
 
     def _get_candidate_stations(self, corridor_filter: Optional[str]) -> List[StationNode]:
         """Return ordered hub stations matching the active corridor filter (or all stations if none are hubs)."""
@@ -825,6 +850,10 @@ class TUIApp:
         # Toggle corridor-colored Braille track rendering (Uniform, Corridor)
         elif key in (ord("t"), ord("T")):
             self.toggle_track_colors()
+
+        # Cycle Infrastructure GIS Layers: Tunnels, Bridges & Signals (F-7.2)
+        elif key in (ord("g"), ord("G")):
+            self.cycle_infrastructure_layers()
 
         # Cycle Station Departure Board & Proximity Inspector Mode
         elif key == ord("m"):
@@ -1628,6 +1657,7 @@ def run_tui(
     target_fps: float = 15.0,
     stop_event: Optional[threading.Event] = None,
     ascii_mode: bool = False,
+    infrastructure: Optional[Sequence[InfrastructureFeature]] = None,
 ) -> None:
     """Safely start the Curses TUI application with automatic terminal restoration.
 
@@ -1639,6 +1669,7 @@ def run_tui(
         target_fps: Rendering target frames per second.
         stop_event: Optional external shutdown event triggered by OS signals.
         ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
+        infrastructure: Optional list of InfrastructureFeature objects.
 
     Raises:
         curses.error: If standard output is not an interactive TTY or curses initialization fails.
@@ -1656,6 +1687,7 @@ def run_tui(
             target_fps=target_fps,
             stop_event=stop_event,
             ascii_mode=ascii_mode,
+            infrastructure=infrastructure,
         )
         app.run_loop()
 

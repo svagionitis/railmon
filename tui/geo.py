@@ -5,12 +5,14 @@ and terminal screen space with font aspect ratio compensation, alongside
 a 2x4 sub-pixel Braille rasterizer for rendering railway tracks.
 """
 
+import json
 import locale
 import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from enum import Enum
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
 # Base Unicode code point for Braille Patterns block (U+2800)
@@ -114,6 +116,7 @@ class GeoPoint:
 
 # Mean spherical Earth radius in kilometers (WGS84)
 EARTH_RADIUS_KM = 6371.0
+EARTH_RADIUS_M = 6371000.0
 
 # Standard meridional kilometers per degree of latitude
 KM_PER_DEGREE_LAT: float = 111.32
@@ -199,6 +202,51 @@ def haversine_distance_km(a: GeoPoint, b: GeoPoint) -> float:
     h = sin_dphi * sin_dphi + math.cos(phi1) * math.cos(phi2) * sin_dlng * sin_dlng
     h = min(1.0, max(0.0, h))
     return 2.0 * EARTH_RADIUS_KM * math.atan2(math.sqrt(h), math.sqrt(1.0 - h))
+
+
+def project_point_to_segment(
+    point: GeoPoint, p0: GeoPoint, p1: GeoPoint
+) -> Tuple[GeoPoint, float]:
+    """Orthogonally project a geographic point onto a line segment [p0, p1].
+
+    Uses a local Equirectangular tangent-plane approximation scaled at the
+    segment's mean latitude to compute the clamped projection parameter
+    t in [0.0, 1.0], the interpolated GeoPoint on [p0, p1], and the
+    perpendicular distance in meters.
+
+    Args:
+        point: Query geographic coordinate (lat, lng).
+        p0: Segment start coordinate (lat, lng).
+        p1: Segment end coordinate (lat, lng).
+
+    Returns:
+        Tuple of (snapped_geopoint, perpendicular_distance_m).
+    """
+    mean_lat_rad = math.radians((p0.lat + p1.lat) * 0.5)
+    m_per_deg_lat = (math.pi / 180.0) * EARTH_RADIUS_M
+    m_per_deg_lng = m_per_deg_lat * math.cos(mean_lat_rad)
+
+    ux = (p1.lng - p0.lng) * m_per_deg_lng
+    uy = (p1.lat - p0.lat) * m_per_deg_lat
+
+    vx = (point.lng - p0.lng) * m_per_deg_lng
+    vy = (point.lat - p0.lat) * m_per_deg_lat
+
+    seg_len_sq = ux * ux + uy * uy
+    if seg_len_sq <= 1e-12:
+        return p0, math.hypot(vx, vy)
+
+    t = (vx * ux + vy * uy) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+
+    snapped_lat = p0.lat + t * (p1.lat - p0.lat)
+    snapped_lng = p0.lng + t * (p1.lng - p0.lng)
+
+    dx = vx - t * ux
+    dy = vy - t * uy
+    perp_dist_m = math.hypot(dx, dy)
+
+    return GeoPoint(lat=snapped_lat, lng=snapped_lng), perp_dist_m
 
 
 @dataclass(frozen=True)
@@ -746,3 +794,437 @@ class BrailleCanvas:
             Multi-line string representing the rendered grid.
         """
         return "\n".join(self.render_rows(ascii_mode=ascii_mode))
+
+
+# ==============================================================================
+# F-7.2: Infrastructure GIS Layers: Tunnels, Bridges & Signals
+# ==============================================================================
+
+
+class InfrastructureType(Enum):
+    """Classification of civil and operational railway infrastructure features."""
+
+    TUNNEL = "tunnel"
+    BRIDGE = "bridge"
+    SIGNAL = "signal"
+
+
+class SignalAspect(Enum):
+    """Interlocking signal type or operational aspect."""
+
+    JUNCTION = "junction"
+    INTERLOCKING = "interlocking"
+    PORTAL = "portal"
+    BLOCK = "block"
+
+
+@dataclass(frozen=True)
+class PortalNode:
+    """Geographic tunnel portal entry/exit boundary point."""
+
+    name: str
+    point: GeoPoint
+    altitude_m: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class InfrastructureFeature:
+    """Railway infrastructure GIS feature (tunnel, bridge, or interlocking signal)."""
+
+    id: str
+    name: str
+    feature_type: InfrastructureType
+    corridor_id: str
+    point: GeoPoint
+    points: Tuple[GeoPoint, ...] = ()
+    length_m: Optional[float] = None
+    bbox: Optional[BoundingBox] = None
+    portals: Tuple[PortalNode, ...] = ()
+    signal_aspect: Optional[SignalAspect] = None
+    description: str = ""
+
+    @classmethod
+    def create_tunnel(
+        cls,
+        id: str,
+        name: str,
+        corridor_id: str,
+        points: Sequence[GeoPoint],
+        portals: Sequence[PortalNode] = (),
+        length_m: Optional[float] = None,
+        description: str = "",
+    ) -> "InfrastructureFeature":
+        """Factory method to construct a validated tunnel feature with precalculated BoundingBox."""
+        pts = tuple(points)
+        if pts:
+            min_lat = min(p.lat for p in pts)
+            max_lat = max(p.lat for p in pts)
+            min_lng = min(p.lng for p in pts)
+            max_lng = max(p.lng for p in pts)
+        else:
+            min_lat = max_lat = min_lng = max_lng = 0.0
+        pad = 0.001
+        bbox = BoundingBox(
+            min_lat=min_lat - pad,
+            max_lat=max_lat + pad,
+            min_lng=min_lng - pad,
+            max_lng=max_lng + pad,
+        )
+        calc_len = length_m
+        if calc_len is None and len(pts) >= 2:
+            calc_len = sum(
+                haversine_distance_km(pts[i], pts[i + 1]) * 1000.0
+                for i in range(len(pts) - 1)
+            )
+        center_pt = portals[0].point if portals else (pts[len(pts) // 2] if pts else GeoPoint(0.0, 0.0))
+        return cls(
+            id=id,
+            name=name,
+            feature_type=InfrastructureType.TUNNEL,
+            corridor_id=corridor_id,
+            point=center_pt,
+            points=pts,
+            length_m=calc_len,
+            bbox=bbox,
+            portals=tuple(portals),
+            description=description,
+        )
+
+    @classmethod
+    def create_bridge(
+        cls,
+        id: str,
+        name: str,
+        corridor_id: str,
+        points: Sequence[GeoPoint],
+        length_m: Optional[float] = None,
+        description: str = "",
+    ) -> "InfrastructureFeature":
+        """Factory method to construct a bridge or viaduct feature."""
+        pts = tuple(points)
+        if pts:
+            min_lat = min(p.lat for p in pts)
+            max_lat = max(p.lat for p in pts)
+            min_lng = min(p.lng for p in pts)
+            max_lng = max(p.lng for p in pts)
+            mid_pt = pts[len(pts) // 2]
+        else:
+            min_lat = max_lat = min_lng = max_lng = 0.0
+            mid_pt = GeoPoint(0.0, 0.0)
+        pad = 0.001
+        bbox = BoundingBox(
+            min_lat=min_lat - pad,
+            max_lat=max_lat + pad,
+            min_lng=min_lng - pad,
+            max_lng=max_lng + pad,
+        )
+        calc_len = length_m
+        if calc_len is None and len(pts) >= 2:
+            calc_len = sum(
+                haversine_distance_km(pts[i], pts[i + 1]) * 1000.0
+                for i in range(len(pts) - 1)
+            )
+        return cls(
+            id=id,
+            name=name,
+            feature_type=InfrastructureType.BRIDGE,
+            corridor_id=corridor_id,
+            point=mid_pt,
+            points=pts,
+            length_m=calc_len,
+            bbox=bbox,
+            description=description,
+        )
+
+    @classmethod
+    def create_signal(
+        cls,
+        id: str,
+        name: str,
+        corridor_id: str,
+        point: GeoPoint,
+        signal_aspect: SignalAspect = SignalAspect.JUNCTION,
+        description: str = "",
+    ) -> "InfrastructureFeature":
+        """Factory method to construct an interlocking or junction signal feature."""
+        bbox = BoundingBox(
+            min_lat=point.lat - 0.0005,
+            max_lat=point.lat + 0.0005,
+            min_lng=point.lng - 0.0005,
+            max_lng=point.lng + 0.0005,
+        )
+        return cls(
+            id=id,
+            name=name,
+            feature_type=InfrastructureType.SIGNAL,
+            corridor_id=corridor_id,
+            point=point,
+            points=(point,),
+            bbox=bbox,
+            signal_aspect=signal_aspect,
+            description=description,
+        )
+
+
+def is_point_in_tunnel(
+    point: GeoPoint, tunnel: InfrastructureFeature, max_dist_m: float = 45.0
+) -> bool:
+    """Determine whether a geographic point lies within a tunnel polyline corridor.
+
+    Args:
+        point: Query coordinate (lat, lng).
+        tunnel: InfrastructureFeature of type TUNNEL.
+        max_dist_m: Maximum perpendicular distance in meters (default: 45m).
+
+    Returns:
+        True if the point lies inside the tunnel envelope; False otherwise.
+    """
+    if tunnel.feature_type != InfrastructureType.TUNNEL:
+        return False
+    if tunnel.bbox and not tunnel.bbox.contains(point):
+        return False
+
+    pts = tunnel.points
+    if len(pts) < 2:
+        if len(pts) == 1:
+            return haversine_distance_km(point, pts[0]) * 1000.0 <= max_dist_m
+        return False
+
+    for i in range(len(pts) - 1):
+        _, perp_dist_m = project_point_to_segment(point, pts[i], pts[i + 1])
+        if perp_dist_m <= max_dist_m:
+            return True
+    return False
+
+
+def detect_train_tunnel(
+    point: GeoPoint,
+    tunnels: Sequence[InfrastructureFeature],
+    max_dist_m: float = 45.0,
+) -> Optional[Tuple[InfrastructureFeature, float, float]]:
+    """Identify which tunnel (if any) contains the given point and compute progress.
+
+    Args:
+        point: Query coordinate (lat, lng).
+        tunnels: Candidate tunnel infrastructure features.
+        max_dist_m: Maximum perpendicular distance threshold in meters.
+
+    Returns:
+        Tuple of (tunnel_feature, distance_along_m, progress_ratio_0_to_1) if inside
+        a tunnel; None otherwise.
+    """
+    for tunnel in tunnels:
+        if tunnel.feature_type != InfrastructureType.TUNNEL:
+            continue
+        if tunnel.bbox and not tunnel.bbox.contains(point):
+            continue
+
+        pts = tunnel.points
+        if len(pts) < 2:
+            continue
+
+        best_perp = float("inf")
+        best_seg_idx = -1
+        best_t = 0.0
+
+        for i in range(len(pts) - 1):
+            p0, p1 = pts[i], pts[i + 1]
+            mean_lat_rad = math.radians((p0.lat + p1.lat) * 0.5)
+            m_per_deg_lat = (math.pi / 180.0) * EARTH_RADIUS_M
+            m_per_deg_lng = m_per_deg_lat * math.cos(mean_lat_rad)
+            ux = (p1.lng - p0.lng) * m_per_deg_lng
+            uy = (p1.lat - p0.lat) * m_per_deg_lat
+            vx = (point.lng - p0.lng) * m_per_deg_lng
+            vy = (point.lat - p0.lat) * m_per_deg_lat
+            seg_len_sq = ux * ux + uy * uy
+            if seg_len_sq <= 1e-12:
+                t = 0.0
+                perp = math.hypot(vx, vy)
+            else:
+                t = max(0.0, min(1.0, (vx * ux + vy * uy) / seg_len_sq))
+                dx = vx - t * ux
+                dy = vy - t * uy
+                perp = math.hypot(dx, dy)
+
+            if perp < best_perp:
+                best_perp = perp
+                best_seg_idx = i
+                best_t = t
+
+        if best_perp <= max_dist_m and best_seg_idx >= 0:
+            dist_along = 0.0
+            for i in range(best_seg_idx):
+                dist_along += haversine_distance_km(pts[i], pts[i + 1]) * 1000.0
+            dist_along += haversine_distance_km(pts[best_seg_idx], pts[best_seg_idx + 1]) * 1000.0 * best_t
+            total_len = tunnel.length_m or max(1.0, dist_along)
+            dist_along = max(0.0, min(total_len, dist_along))
+            ratio = max(0.0, min(1.0, dist_along / total_len))
+            return tunnel, dist_along, ratio
+
+    return None
+
+
+def _extract_geometry_points(geom: Dict[str, Any]) -> List[GeoPoint]:
+    """Extract ordered GeoPoint coordinates from GeoJSON geometry dict."""
+    g_type = geom.get("type", "")
+    coords = geom.get("coordinates", [])
+    pts: List[GeoPoint] = []
+
+    if g_type == "Point" and isinstance(coords, (list, tuple)) and len(coords) >= 2:
+        try:
+            return [GeoPoint(lat=float(coords[1]), lng=float(coords[0]))]
+        except (ValueError, TypeError):
+            return []
+
+    if g_type == "LineString" and isinstance(coords, list):
+        for c in coords:
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                try:
+                    pts.append(GeoPoint(lat=float(c[1]), lng=float(c[0])))
+                except (ValueError, TypeError):
+                    pass
+        return pts
+
+    if g_type == "MultiLineString" and isinstance(coords, list):
+        for line in coords:
+            if isinstance(line, list):
+                for c in line:
+                    if isinstance(c, (list, tuple)) and len(c) >= 2:
+                        try:
+                            pts.append(GeoPoint(lat=float(c[1]), lng=float(c[0])))
+                        except (ValueError, TypeError):
+                            pass
+        return pts
+
+    return pts
+
+
+def _parse_portal_nodes(raw_portals: Any) -> List[PortalNode]:
+    """Parse tunnel portal dictionary list into PortalNodes."""
+    if not isinstance(raw_portals, list):
+        return []
+    portals: List[PortalNode] = []
+    for p in raw_portals:
+        if not isinstance(p, dict):
+            continue
+        p_name = str(p.get("name") or "Portal")
+        p_coords = p.get("coordinates") or p.get("point") or []
+        if isinstance(p_coords, (list, tuple)) and len(p_coords) >= 2:
+            try:
+                portals.append(
+                    PortalNode(
+                        name=p_name,
+                        point=GeoPoint(lat=float(p_coords[1]), lng=float(p_coords[0])),
+                        altitude_m=float(p["altitude_m"]) if p.get("altitude_m") is not None else None,
+                    )
+                )
+            except (ValueError, TypeError):
+                pass
+    return portals
+
+
+def _parse_signal_aspect(aspect_val: Any) -> SignalAspect:
+    """Normalize raw signal aspect string into SignalAspect enum."""
+    aspect_str = str(aspect_val or "junction").strip().lower()
+    if aspect_str == "interlocking":
+        return SignalAspect.INTERLOCKING
+    if aspect_str == "portal":
+        return SignalAspect.PORTAL
+    if aspect_str == "block":
+        return SignalAspect.BLOCK
+    return SignalAspect.JUNCTION
+
+
+def _parse_single_feature(item: Dict[str, Any]) -> Optional[InfrastructureFeature]:
+    """Parse a single GeoJSON feature dictionary into an InfrastructureFeature."""
+    if not isinstance(item, dict):
+        return None
+    geom = item.get("geometry") or {}
+    props = item.get("properties") or {}
+    fid = str(item.get("id") or props.get("id") or "")
+    name = str(props.get("name") or fid)
+    raw_type = str(props.get("type") or "").strip().lower()
+    corridor = str(props.get("corridor") or props.get("corridor_id") or "")
+    desc = str(props.get("description") or "")
+
+    length_m: Optional[float] = None
+    if props.get("length_m") is not None:
+        try:
+            length_m = float(props["length_m"])
+        except (ValueError, TypeError):
+            length_m = None
+
+    pts = _extract_geometry_points(geom)
+    if not pts:
+        return None
+
+    if raw_type == "tunnel":
+        portals = _parse_portal_nodes(props.get("portals"))
+        return InfrastructureFeature.create_tunnel(
+            id=fid,
+            name=name,
+            corridor_id=corridor,
+            points=pts,
+            portals=portals,
+            length_m=length_m,
+            description=desc,
+        )
+
+    if raw_type == "bridge":
+        return InfrastructureFeature.create_bridge(
+            id=fid,
+            name=name,
+            corridor_id=corridor,
+            points=pts,
+            length_m=length_m,
+            description=desc,
+        )
+
+    if raw_type == "signal":
+        aspect = _parse_signal_aspect(props.get("aspect") or props.get("signal_aspect"))
+        return InfrastructureFeature.create_signal(
+            id=fid,
+            name=name,
+            corridor_id=corridor,
+            point=pts[0],
+            signal_aspect=aspect,
+            description=desc,
+        )
+
+    return None
+
+
+def parse_infrastructure_geojson(
+    payload: Union[Dict[str, Any], str]
+) -> List[InfrastructureFeature]:
+    """Parse GeoJSON FeatureCollection or JSON string into InfrastructureFeatures.
+
+    Handles LineString, MultiLineString, and Point geometries defensively.
+
+    Args:
+        payload: GeoJSON dictionary or JSON string.
+
+    Returns:
+        List of parsed InfrastructureFeature objects.
+    """
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except Exception:
+            return []
+    elif isinstance(payload, dict):
+        data = payload
+    else:
+        return []
+
+    items = data.get("features", [])
+    if not isinstance(items, list):
+        return []
+
+    features: List[InfrastructureFeature] = []
+    for item in items:
+        feat = _parse_single_feature(item)
+        if feat is not None:
+            features.append(feat)
+
+    return features

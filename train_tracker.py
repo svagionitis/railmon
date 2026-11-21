@@ -1391,6 +1391,47 @@ Examples:
         help="Force pure 7-bit ASCII rendering fallback.",
     )
 
+    # 6. infrastructure / geo (F-7.2)
+    p_infra = subparsers.add_parser(
+        "infrastructure",
+        aliases=["infra", "geo"],
+        help="Query and inspect railway GIS infrastructure assets (tunnels, bridges, signals).",
+        description="Query and display railway civil and operational infrastructure features.",
+    )
+    p_infra.add_argument(
+        "--type",
+        "-t",
+        dest="feature_type",
+        choices=["all", "tunnel", "bridge", "signal"],
+        default="all",
+        help="Filter features by asset type (default: all).",
+    )
+    p_infra.add_argument(
+        "--corridor",
+        "-c",
+        type=str,
+        default=None,
+        help="Filter features by railway corridor (e.g. 'pathe-mainline', 'proastiakos').",
+    )
+    p_infra.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured JSON summary to stdout.",
+    )
+    p_infra.add_argument(
+        "--geojson",
+        action="store_true",
+        default=False,
+        help="Output standard GeoJSON FeatureCollection to stdout.",
+    )
+    p_infra.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
     # Shared parser for subparsers accepting --db
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument("--db", default=argparse.SUPPRESS, help="SQLite database file path.")
@@ -2446,6 +2487,93 @@ def run_cab_stream_mode(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_infrastructure_mode(args: argparse.Namespace) -> int:
+    """Execute the headless infrastructure GIS inspection CLI command.
+
+    Args:
+        args: Parsed CLI namespace arguments.
+
+    Returns:
+        Exit code: 0 on clean output, 1 on error.
+    """
+    from tui.mock_engine import load_infrastructure
+    from storage.cli_formatters import format_infrastructure_table
+
+    is_ascii = bool(getattr(args, "ascii", False))
+    feature_type = str(getattr(args, "feature_type", "all")).lower().strip()
+    corridor_filter = getattr(args, "corridor", None)
+    output_json = bool(getattr(args, "json", False))
+    output_geojson = bool(getattr(args, "geojson", False))
+
+    features_dict = load_infrastructure()
+    features = list(features_dict.values())
+
+    if feature_type != "all":
+        features = [f for f in features if f.feature_type.value == feature_type]
+
+    if corridor_filter:
+        c_target = corridor_filter.lower().strip()
+        features = [f for f in features if c_target in f.corridor_id.lower()]
+
+    if output_geojson:
+        geojson_features = []
+        for f in features:
+            if f.feature_type.value == "signal":
+                geom = {"type": "Point", "coordinates": [f.point.lng, f.point.lat]}
+            else:
+                geom = {"type": "LineString", "coordinates": [[p.lng, p.lat] for p in f.points]}
+            props: Dict[str, Any] = {
+                "id": f.id,
+                "name": f.name,
+                "type": f.feature_type.value,
+                "corridor": f.corridor_id,
+                "description": f.description,
+            }
+            if f.length_m is not None:
+                props["length_m"] = f.length_m
+            if f.signal_aspect is not None:
+                props["aspect"] = f.signal_aspect.value
+            if f.portals:
+                props["portals"] = [
+                    {"name": p.name, "coordinates": [p.point.lng, p.point.lat]} for p in f.portals
+                ]
+            geojson_features.append({
+                "type": "Feature",
+                "id": f.id,
+                "geometry": geom,
+                "properties": props,
+            })
+        collection = {
+            "type": "FeatureCollection",
+            "features": geojson_features,
+        }
+        sys.stdout.write(json.dumps(collection, indent=2, ensure_ascii=is_ascii) + "\n")
+        return 0
+
+    if output_json:
+        summary_list = []
+        for f in features:
+            item: Dict[str, Any] = {
+                "id": f.id,
+                "name": f.name,
+                "type": f.feature_type.value,
+                "corridor": f.corridor_id,
+                "description": f.description,
+                "point": {"lat": f.point.lat, "lng": f.point.lng},
+            }
+            if f.length_m is not None:
+                item["length_m"] = f.length_m
+            if f.signal_aspect is not None:
+                item["aspect"] = f.signal_aspect.value
+            summary_list.append(item)
+        sys.stdout.write(json.dumps(summary_list, indent=2, ensure_ascii=is_ascii) + "\n")
+        return 0
+
+    table_str = format_infrastructure_table(features, ascii_mode=is_ascii)
+    sys.stdout.write(table_str + "\n")
+    return 0
+
+
 def _configure_win32_utf8_console() -> None:
     """Configure Windows console codepage and standard streams for UTF-8 output."""
     if sys.platform != "win32":
@@ -2510,6 +2638,9 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode in ("infrastructure", "infra", "geo"):
+        return run_infrastructure_mode(args)
+
     if args.mode in ("cab", "stream-cab"):
         return run_cab_stream_mode(args)
 

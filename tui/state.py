@@ -76,6 +76,14 @@ class TrackColorMode(Enum):
     CORRIDOR = auto()  # Corridor-colored tracks (PATHE=White, PROASTIAKOS=Cyan, Regional=Yellow)
 
 
+class InfrastructureLayerMode(Enum):
+    """Visibility policy for railway infrastructure GIS overlays on the map canvas."""
+
+    ALL = auto()             # Display tunnels, bridges, and interlocking signals
+    TUNNELS_BRIDGES = auto() # Display tunnels and bridges only (signals hidden)
+    OFF = auto()             # Hide all infrastructure overlays
+
+
 # Supported playback speed multipliers for SQLite Historical DVR Mode (F-4.2)
 REPLAY_SPEED_MULTIPLIERS: Tuple[float, ...] = (1.0, 5.0, 15.0, 60.0)
 
@@ -225,6 +233,7 @@ class StateSnapshot:
     selected_station_id: Optional[str] = None
     station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
     track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
+    infrastructure_mode: InfrastructureLayerMode = InfrastructureLayerMode.ALL
     is_replay: bool = False
     replay_db: Optional[str] = None
     replay_virtual_time: Optional[float] = None
@@ -376,6 +385,7 @@ class TrainStateStore:
         self._station_cycle_anchor_id: Optional[str] = None
         self._station_label_mode: StationLabelMode = StationLabelMode.HUBS_AND_SECONDARY
         self._track_color_mode: TrackColorMode = TrackColorMode.UNIFORM
+        self._infrastructure_mode: InfrastructureLayerMode = InfrastructureLayerMode.ALL
         self._connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
         self._status_message: str = "Ready"
         self._is_recording: bool = False
@@ -595,6 +605,7 @@ class TrainStateStore:
                 selected_station_id=self._selected_station_id,
                 station_label_mode=self._station_label_mode,
                 track_color_mode=self._track_color_mode,
+                infrastructure_mode=self._infrastructure_mode,
                 is_replay=self._is_replay,
                 replay_db=self._replay_db,
                 replay_virtual_time=self._replay_virtual_time,
@@ -881,6 +892,26 @@ class TrainStateStore:
             self._track_color_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
             self._version += 1
             return self._track_color_mode
+
+    def set_infrastructure_mode(self, mode: InfrastructureLayerMode) -> None:
+        """Explicitly set infrastructure GIS overlay mode."""
+        with self._lock:
+            if self._infrastructure_mode != mode:
+                self._infrastructure_mode = mode
+                self._version += 1
+
+    def cycle_infrastructure_mode(self) -> InfrastructureLayerMode:
+        """Cycle railway infrastructure GIS overlay mode: ALL -> TUNNELS_BRIDGES -> OFF."""
+        cycle_order = (
+            InfrastructureLayerMode.ALL,
+            InfrastructureLayerMode.TUNNELS_BRIDGES,
+            InfrastructureLayerMode.OFF,
+        )
+        with self._lock:
+            curr_idx = cycle_order.index(self._infrastructure_mode)
+            self._infrastructure_mode = cycle_order[(curr_idx + 1) % len(cycle_order)]
+            self._version += 1
+            return self._infrastructure_mode
 
     def clear(self) -> None:
         """Reset state store completely."""

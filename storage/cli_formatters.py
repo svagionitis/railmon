@@ -3,7 +3,7 @@ Terminal output formatters and text table renderers for railmon CLI commands.
 Zero external dependencies; pure Python standard library.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from storage.models import (
     CorridorPunctualitySummary,
@@ -606,4 +606,71 @@ def format_train_schedule_table(
     lines.append(
         f"Total stops: {len(stops)} | Passed: {passed_count} | Next stop: {current_station[:24]} | Delay: {delay_repr} | Source: {data_source}"
     )
+    return "\n".join(lines)
+
+
+def format_infrastructure_table(
+    features: Sequence[Any],
+    ascii_mode: bool = False,
+    title: str = "HELLENIC RAILWAYS - INFRASTRUCTURE GIS ASSETS",
+) -> str:
+    """Format railway infrastructure GIS assets (tunnels, bridges, signals) into an ASCII/UTF-8 table.
+
+    Args:
+        features: Sequence of InfrastructureFeature objects.
+        ascii_mode: Whether to force 7-bit ASCII characters.
+        title: Table header title.
+
+    Returns:
+        Formatted multi-line table string.
+    """
+    if not features:
+        return "No infrastructure assets matching filter criteria."
+
+    width = 96
+    border_char = "=" if ascii_mode else "═"
+    divider_char = "-" if ascii_mode else "─"
+
+    lines: List[str] = [
+        border_char * width,
+        f" {title} ",
+        border_char * width,
+        f"{'ID':<18} {'ASSET NAME':<28} {'TYPE':<8} {'CORRIDOR':<22} {'LENGTH / ASPECT':<15}",
+        divider_char * width,
+    ]
+
+    tunnel_count = 0
+    bridge_count = 0
+    signal_count = 0
+
+    for feat in features:
+        fid = getattr(feat, "id", "")
+        name = getattr(feat, "name", "")
+        ftype = getattr(feat, "feature_type", None)
+        ftype_str = ftype.value if hasattr(ftype, "value") else str(ftype)
+        corridor = getattr(feat, "corridor_id", "")
+        length_m = getattr(feat, "length_m", None)
+        aspect = getattr(feat, "signal_aspect", None)
+
+        if ftype_str == "tunnel":
+            tunnel_count += 1
+            extra = f"{length_m / 1000.0:4.1f} km" if length_m else "N/A"
+        elif ftype_str == "bridge":
+            bridge_count += 1
+            extra = f"{int(round(length_m))} m" if length_m else "N/A"
+        elif ftype_str == "signal":
+            signal_count += 1
+            extra = aspect.value.upper() if hasattr(aspect, "value") else str(aspect or "JUNCTION")
+        else:
+            extra = "N/A"
+
+        lines.append(
+            f"{fid[:17]:<18} {name[:27]:<28} {ftype_str.upper()[:7]:<8} {corridor[:21]:<22} {extra:<15}"
+        )
+
+    lines.append(divider_char * width)
+    lines.append(
+        f"Total Assets: {len(features)} | Tunnels: {tunnel_count} | Bridges: {bridge_count} | Signals: {signal_count}"
+    )
+    lines.append(border_char * width)
     return "\n".join(lines)

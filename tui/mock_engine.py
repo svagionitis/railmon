@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple
 
 from train_tracker import TrainPosition
-from tui.geo import GeoPoint
+from tui.geo import GeoPoint, InfrastructureFeature, parse_infrastructure_geojson
 
 # Earth radius in meters (WGS84 mean radius)
 EARTH_RADIUS_M = 6371000.0
@@ -32,6 +32,7 @@ DEFAULT_SNAP_THRESHOLD_M = 1500.0
 DATA_DIR = Path(__file__).parent / "data"
 DEFAULT_STATIONS_FILE = DATA_DIR / "stations.json"
 DEFAULT_TRACKS_FILE = DATA_DIR / "tracks.json"
+DEFAULT_INFRASTRUCTURE_FILE = DATA_DIR / "infrastructure.json"
 
 
 def haversine_distance(p1: GeoPoint, p2: GeoPoint) -> float:
@@ -876,6 +877,25 @@ def load_tracks(path: Optional[str] = None) -> Dict[str, TrackPolyline]:
         corridors[cid] = poly
 
     return corridors
+
+
+def load_infrastructure(path: Optional[str] = None) -> Dict[str, InfrastructureFeature]:
+    """Load and parse railway infrastructure assets from GeoJSON file.
+
+    Args:
+        path: Path to infrastructure.json. Defaults to package data directory.
+
+    Returns:
+        Dictionary mapping infrastructure feature ID to InfrastructureFeature.
+    """
+    file_path = Path(path) if path else DEFAULT_INFRASTRUCTURE_FILE
+    if not file_path.exists():
+        return {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    parsed = parse_infrastructure_geojson(data)
+    return {f.id: f for f in parsed}
 
 
 class TrainMotionState(Enum):

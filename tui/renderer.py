@@ -19,8 +19,11 @@ from tui.geo import (
     BrailleCanvas,
     GeoPoint,
     GeoProjector,
+    InfrastructureFeature,
+    InfrastructureType,
     SCALE_BAR_INTERVALS_KM,
     ScaleBarSpec,
+    detect_train_tunnel,
     haversine_distance_km,
 )
 from tui.mock_engine import (
@@ -28,12 +31,14 @@ from tui.mock_engine import (
     TrackPolyline,
     build_station_index,
     calculate_bearing,
+    load_infrastructure,
     normalize_station_key,
     snap_to_track_network,
 )
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
+    InfrastructureLayerMode,
     InputMode,
     InspectorMode,
     RosterSortMode,
@@ -113,6 +118,9 @@ class RenderGlyphs:
     scale_left: str = "├"
     scale_right: str = "┤"
     scale_bar: str = "─"
+    tunnel_portal: str = "∩"
+    bridge_marker: str = "═"
+    signal_junction: str = "◆"
 
 
 GLYPHS_UTF8 = RenderGlyphs(
@@ -136,6 +144,9 @@ GLYPHS_UTF8 = RenderGlyphs(
     scale_left="├",
     scale_right="┤",
     scale_bar="─",
+    tunnel_portal="∩",
+    bridge_marker="═",
+    signal_junction="◆",
 )
 
 GLYPHS_ASCII = RenderGlyphs(
@@ -159,6 +170,9 @@ GLYPHS_ASCII = RenderGlyphs(
     scale_left="|",
     scale_right="|",
     scale_bar="-",
+    tunnel_portal="n",
+    bridge_marker="=",
+    signal_junction="S",
 )
 
 # Sparkline glyph bars and trend arrow constants
@@ -993,6 +1007,7 @@ class TUIRenderer:
         stations: Optional[Sequence[StationNode]] = None,
         tracks: Optional[Sequence[TrackPolyline]] = None,
         ascii_mode: bool = False,
+        infrastructure: Optional[Sequence[InfrastructureFeature]] = None,
     ) -> None:
         """Initialize renderer with static railway network vector data.
 
@@ -1000,10 +1015,18 @@ class TUIRenderer:
             stations: List or sequence of StationNode objects.
             tracks: List or sequence of TrackPolyline objects.
             ascii_mode: Whether to force standard 7-bit ASCII rendering fallback.
+            infrastructure: List or sequence of InfrastructureFeature objects.
         """
         self.stations: Sequence[StationNode] = stations or []
         self.station_index: Dict[str, StationNode] = _build_station_index(self.stations)
         self.tracks: Sequence[TrackPolyline] = tracks or []
+        if infrastructure is None:
+            self.infrastructure: Sequence[InfrastructureFeature] = list(load_infrastructure().values())
+        else:
+            self.infrastructure = list(infrastructure)
+        self.tunnels: Sequence[InfrastructureFeature] = [
+            f for f in self.infrastructure if f.feature_type == InfrastructureType.TUNNEL
+        ]
         self.ascii_mode: bool = ascii_mode
         self.glyphs: RenderGlyphs = GLYPHS_ASCII if ascii_mode else GLYPHS_UTF8
 
@@ -1401,6 +1424,65 @@ class TUIRenderer:
                 for dx in range(label_w):
                     occupied_cells.add((label_start_x + dx, row))
 
+    def _render_map_infrastructure(
+        self,
+        win: Any,
+        snapshot: StateSnapshot,
+        projector: GeoProjector,
+        canvas: BrailleCanvas,
+        inner_w: int,
+        inner_h: int,
+        occupied_cells: Set[Tuple[int, int]],
+    ) -> None:
+        """Overlay railway infrastructure assets (portals, bridges, signals)."""
+        infra_mode = getattr(snapshot, "infrastructure_mode", InfrastructureLayerMode.ALL)
+        if infra_mode == InfrastructureLayerMode.OFF:
+            return
+
+        portal_attr = safe_color_pair(PAIR_STATION_DIM, curses.A_BOLD) | curses.A_BOLD
+        bridge_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_BOLD) | curses.A_BOLD
+        signal_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+
+        portal_glyph = self.glyphs.tunnel_portal
+        bridge_glyph = self.glyphs.bridge_marker
+        signal_glyph = self.glyphs.signal_junction
+
+        draw_signals = (infra_mode == InfrastructureLayerMode.ALL)
+
+        for feature in self.infrastructure:
+            ftype = feature.feature_type
+            if ftype == InfrastructureType.SIGNAL and not draw_signals:
+                continue
+
+            if ftype == InfrastructureType.TUNNEL:
+                for portal in feature.portals:
+                    col, row = projector.resolve_track_cell(portal.point, canvas)
+                    if 0 <= col < inner_w and 0 <= row < inner_h:
+                        if (col, row) not in occupied_cells:
+                            try:
+                                win.addstr(1 + row, 1 + col, portal_glyph, portal_attr)
+                                occupied_cells.add((col, row))
+                            except curses.error:
+                                pass
+            elif ftype == InfrastructureType.BRIDGE:
+                col, row = projector.resolve_track_cell(feature.point, canvas)
+                if 0 <= col < inner_w and 0 <= row < inner_h:
+                    if (col, row) not in occupied_cells:
+                        try:
+                            win.addstr(1 + row, 1 + col, bridge_glyph, bridge_attr)
+                            occupied_cells.add((col, row))
+                        except curses.error:
+                            pass
+            elif ftype == InfrastructureType.SIGNAL and draw_signals:
+                col, row = projector.resolve_track_cell(feature.point, canvas)
+                if 0 <= col < inner_w and 0 <= row < inner_h:
+                    if (col, row) not in occupied_cells:
+                        try:
+                            win.addstr(1 + row, 1 + col, signal_glyph, signal_attr)
+                            occupied_cells.add((col, row))
+                        except curses.error:
+                            pass
+
     def _render_map_trains(
         self,
         win: Any,
@@ -1505,6 +1587,11 @@ class TUIRenderer:
         )
         if track_color_mode == TrackColorMode.CORRIDOR:
             layer_str += " | Tracks: COLOR"
+        infra_mode = getattr(snapshot, "infrastructure_mode", InfrastructureLayerMode.ALL)
+        if infra_mode == InfrastructureLayerMode.ALL:
+            layer_str += " | GIS: ALL"
+        elif infra_mode == InfrastructureLayerMode.TUNNELS_BRIDGES:
+            layer_str += " | GIS: TUNNELS"
         d_sym = self.glyphs.degree_sym
         title = (
             f" Map Viewport: {center.lat:.2f}{d_sym}N, {center.lng:.2f}{d_sym}E"
@@ -1553,6 +1640,17 @@ class TUIRenderer:
             occupied_cells,
             station_attr,
             station_dim_attr,
+        )
+
+        # 4. Overlay railway infrastructure assets (portals, bridges, signals)
+        self._render_map_infrastructure(
+            win,
+            snapshot,
+            projector,
+            canvas,
+            inner_w,
+            inner_h,
+            occupied_cells,
         )
 
         if scale_bar_str is not None:
@@ -1888,6 +1986,15 @@ class TUIRenderer:
         ) or (pos.train_type in ("Intercity", "Proastiakos", "Suburban"))
         cam_display = "ONLINE [w]" if has_cam else "UNAVAILABLE"
 
+        tunnel_info = detect_train_tunnel(train_pt, self.tunnels)
+        status_text = f"{pos.status or 'In Service'}"
+        status_attr = val_attr
+        if tunnel_info is not None:
+            active_tun, dist_m, pct = tunnel_info
+            len_km = (active_tun.length_m / 1000.0) if active_tun.length_m else 0.0
+            status_text = f"RUNNING [TUNNEL: {active_tun.name} ({len_km:.1f}km)]"
+            status_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+
         rows = [
             ("Train No:", f"{pos.train_number or pos.id} ({pos.train_type or 'Passenger'})", val_attr),
             ("Route:", route_str, val_attr),
@@ -1901,7 +2008,7 @@ class TUIRenderer:
             ("Heading:", compass_str, val_attr),
             ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
             ("Cab Camera:", cam_display, val_attr),
-            ("Status:", f"{pos.status or 'In Service'}", val_attr),
+            ("Status:", status_text, status_attr),
             ("Chainage:", chainage_str, val_attr),
         ]
 
@@ -2135,7 +2242,7 @@ class TUIRenderer:
                 ("h/j/k/l, Arrows", "Pan viewport West / South / North / East"),
                 ("+ / =, - / _, Wheel", "Zoom In / Zoom Out (0.2x to 25.0x)"),
                 ("0, 1, 2, 3", "Presets (0: Greece, 1: Suburban, 2: PATHE, 3: North)"),
-                ("v / V, t / T", "Cycle station labels / Toggle corridor track colors"),
+                ("v / V, t / T, g / G", "Station labels / Track colors / Cycle GIS layers"),
             ]),
             ("TRAIN SELECTION & TRACKING", [
                 ("Tab, n / p, Click", "Select Next / Previous or click train / station"),
@@ -2160,6 +2267,10 @@ class TUIRenderer:
                 (
                     "#/+ Station  . Trail" if self.ascii_mode else "◉ Station   · Trail",
                     "Red: Alert (>10m)    Cyan: Suburban  Magenta: Cargo",
+                ),
+                (
+                    "n Tun  = Brg  S Sig" if self.ascii_mode else "∩ Tun  ═ Brg  ◆ Sig",
+                    "Tunnels (Portals), Bridges & Interlockings",
                 ),
             ]),
         ]

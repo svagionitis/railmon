@@ -1,0 +1,430 @@
+{
+  "type": "FeatureCollection",
+  "version": "1.0",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "tun-kallidromo",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.5585, 38.7270],
+          [22.5320, 38.7620],
+          [22.5015, 38.7960]
+        ]
+      },
+      "properties": {
+        "id": "tun-kallidromo",
+        "name": "Kallidromo Tunnel",
+        "type": "tunnel",
+        "corridor": "pathe-mainline",
+        "length_m": 9038,
+        "description": "Callidromon Twin-Bore Tunnel (Longest railway tunnel in Greece and Balkans)",
+        "portals": [
+          {
+            "name": "South Portal (Tithorea)",
+            "coordinates": [22.5585, 38.7270],
+            "altitude_m": 160.0
+          },
+          {
+            "name": "North Portal (Molos/Lianokladi)",
+            "coordinates": [22.5015, 38.7960],
+            "altitude_m": 50.0
+          }
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "tun-othrys",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.3740, 38.9650],
+          [22.3680, 39.0050],
+          [22.3665, 39.0275]
+        ]
+      },
+      "properties": {
+        "id": "tun-othrys",
+        "name": "Mount Othrys Tunnel",
+        "type": "tunnel",
+        "corridor": "pathe-mainline",
+        "length_m": 7026,
+        "description": "Mount Othrys Twin-Bore Mountain Crossing (Lianokladi - Domokos)",
+        "portals": [
+          {
+            "name": "South Portal (Stirfaka)",
+            "coordinates": [22.3740, 38.9650]
+          },
+          {
+            "name": "North Portal (Xyniada)",
+            "coordinates": [22.3665, 39.0275]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "tun-tempi-t1",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.5760, 39.8620],
+          [22.5950, 39.8850],
+          [22.6139, 39.9056]
+        ]
+      },
+      "properties": {
+        "id": "tun-tempi-t1",
+        "name": "Tempi Tunnel T1",
+        "type": "tunnel",
+        "corridor": "pathe-mainline",
+        "length_m": 2000,
+        "description": "Tempi Valley Southern Bore T1 (Evangelismos)",
+        "portals": [
+          {
+            "name": "South Portal",
+            "coordinates": [22.5760, 39.8620]
+          },
+          {
+            "name": "North Portal",
+            "coordinates": [22.6139, 39.9056]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "tun-tempi-t2",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.6139, 39.9056],
+          [22.6260, 39.9420],
+          [22.6290, 39.9750]
+        ]
+      },
+      "properties": {
+        "id": "tun-tempi-t2",
+        "name": "Tempi Tunnel T2",
+        "type": "tunnel",
+        "corridor": "pathe-mainline",
+        "length_m": 5500,
+        "description": "Tempi Valley Mainline Central Bore T2",
+        "portals": [
+          {
+            "name": "South Portal",
+            "coordinates": [22.6139, 39.9056]
+          },
+          {
+            "name": "North Portal",
+            "coordinates": [22.6290, 39.9750]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "tun-platamonas",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.6030, 40.0080],
+          [22.5810, 40.0350],
+          [22.5614, 40.0603]
+        ]
+      },
+      "properties": {
+        "id": "tun-platamonas",
+        "name": "Platamonas Tunnel",
+        "type": "tunnel",
+        "corridor": "pathe-mainline",
+        "length_m": 3500,
+        "description": "Platamon Castle Ridge Coastal Tunnel",
+        "portals": [
+          {
+            "name": "South Portal",
+            "coordinates": [22.6030, 40.0080]
+          },
+          {
+            "name": "North Portal",
+            "coordinates": [22.5614, 40.0603]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "tun-kakia-skala",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [23.2660, 37.9730],
+          [23.2280, 37.9620],
+          [23.1920, 37.9495]
+        ]
+      },
+      "properties": {
+        "id": "tun-kakia-skala",
+        "name": "Kakia Skala Tunnels",
+        "type": "tunnel",
+        "corridor": "proastiakos-airport-kiato",
+        "length_m": 2400,
+        "description": "Saronic Gulf Coastal Cliff Tunnels (Megara - Kineta)",
+        "portals": [
+          {
+            "name": "East Portal",
+            "coordinates": [23.2660, 37.9730]
+          },
+          {
+            "name": "West Portal",
+            "coordinates": [23.1920, 37.9495]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "brg-gorgopotamos",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.4480, 38.8460],
+          [22.3986, 38.8872]
+        ]
+      },
+      "properties": {
+        "id": "brg-gorgopotamos",
+        "name": "Gorgopotamos Viaduct",
+        "type": "bridge",
+        "corridor": "pathe-mainline",
+        "length_m": 211,
+        "description": "Historic Railway Viaduct over Gorgopotamos Gorge"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "brg-spercheios",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.4350, 38.8550],
+          [22.4150, 38.8720]
+        ]
+      },
+      "properties": {
+        "id": "brg-spercheios",
+        "name": "Spercheios SG26 Viaduct",
+        "type": "bridge",
+        "corridor": "pathe-mainline",
+        "length_m": 450,
+        "description": "High-Speed Rail Viaduct across Spercheios Floodplain"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "brg-corinth-canal",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.9700, 37.9242],
+          [22.9306, 37.9236]
+        ]
+      },
+      "properties": {
+        "id": "brg-corinth-canal",
+        "name": "Corinth Canal Bridge",
+        "type": "bridge",
+        "corridor": "proastiakos-airport-kiato",
+        "length_m": 120,
+        "description": "Railway Bridge crossing the Isthmus of Corinth Canal"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "brg-aliakmonas",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.5240, 40.1880],
+          [22.5150, 40.2300]
+        ]
+      },
+      "properties": {
+        "id": "brg-aliakmonas",
+        "name": "Aliakmonas River Bridge",
+        "type": "bridge",
+        "corridor": "pathe-mainline",
+        "length_m": 380,
+        "description": "PATHE Mainline Bridge crossing Aliakmonas River"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "brg-gallikos",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.8550, 40.6900],
+          [22.8350, 40.7150]
+        ]
+      },
+      "properties": {
+        "id": "brg-gallikos",
+        "name": "Gallikos River Viaduct",
+        "type": "bridge",
+        "corridor": "pathe-mainline",
+        "length_m": 290,
+        "description": "Northern Railway Viaduct across Gallikos River"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "brg-peneus",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.4720, 39.7280],
+          [22.5020, 39.7740]
+        ]
+      },
+      "properties": {
+        "id": "brg-peneus",
+        "name": "Peneus River Bridge",
+        "type": "bridge",
+        "corridor": "pathe-mainline",
+        "length_m": 260,
+        "description": "Larissa - Tempi Bridge crossing Peneus (Pinios) River"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-skau",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [23.7550, 38.0900]
+      },
+      "properties": {
+        "id": "sig-skau",
+        "name": "SKAU Central Interlocking",
+        "type": "signal",
+        "aspect": "interlocking",
+        "corridor": "pathe-mainline",
+        "description": "Acharnes Railway Center (SKA) Primary Interlocking Plant"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-inoi",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [23.6150, 38.3100]
+      },
+      "properties": {
+        "id": "sig-inoi",
+        "name": "Inoi Junction Signal",
+        "type": "signal",
+        "aspect": "junction",
+        "corridor": "pathe-mainline",
+        "description": "Bifurcation Interlocking towards Chalkida branch"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-tithorea",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.6340, 38.6380]
+      },
+      "properties": {
+        "id": "sig-tithorea",
+        "name": "Tithorea North Signal",
+        "type": "signal",
+        "aspect": "portal",
+        "corridor": "pathe-mainline",
+        "description": "Entry Interlocking to Kallidromo Mountain Tunnel Section"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-lianokladi",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.3850, 38.9250]
+      },
+      "properties": {
+        "id": "sig-lianokladi",
+        "name": "Lianokladi Junction Signal",
+        "type": "signal",
+        "aspect": "interlocking",
+        "corridor": "pathe-mainline",
+        "description": "Central Mountain Bypass Interlocking and Passing Loop Control"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-domokos",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.3620, 39.0850]
+      },
+      "properties": {
+        "id": "sig-domokos",
+        "name": "Domokos South Signal",
+        "type": "signal",
+        "aspect": "junction",
+        "corridor": "pathe-mainline",
+        "description": "Transition Signal from Othrys Section onto Thessalian Plain"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-larissa",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.4460, 39.6820]
+      },
+      "properties": {
+        "id": "sig-larissa",
+        "name": "Larissa Interlocking",
+        "type": "signal",
+        "aspect": "interlocking",
+        "corridor": "pathe-mainline",
+        "description": "Central Thessaly Dispatch Interlocking & Volos Branch Bifurcation"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-platy",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.5150, 40.5500]
+      },
+      "properties": {
+        "id": "sig-platy",
+        "name": "Platy Junction Signal",
+        "type": "signal",
+        "aspect": "junction",
+        "corridor": "pathe-mainline",
+        "description": "Critical Western Macedonia (Veroia/Kozani/Florina) Junction Interlocking"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "sig-thessaloniki",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.8800, 40.6600]
+      },
+      "properties": {
+        "id": "sig-thessaloniki",
+        "name": "Thessaloniki Terminal Throat",
+        "type": "signal",
+        "aspect": "interlocking",
+        "corridor": "pathe-mainline",
+        "description": "New Railway Station of Thessaloniki Terminal Interlocking Throat"
+      }
+    }
+  ]
+}
