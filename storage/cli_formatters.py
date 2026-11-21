@@ -3,7 +3,10 @@ Terminal output formatters and text table renderers for railmon CLI commands.
 Zero external dependencies; pure Python standard library.
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import unicodedata
+import zoneinfo
 
 from storage.models import (
     CorridorPunctualitySummary,
@@ -13,6 +16,185 @@ from storage.models import (
     TelemetryHistoryRow,
     TripSummary,
 )
+
+try:
+    ATHENS_TZ: timezone = zoneinfo.ZoneInfo("Europe/Athens")
+except Exception:
+    ATHENS_TZ = timezone(timedelta(hours=2))
+
+_GREEK_TO_LATIN_MAP: Dict[str, str] = {
+    "α": "a", "β": "v", "γ": "g", "δ": "d", "ε": "e", "ζ": "z", "η": "i",
+    "θ": "th", "ι": "i", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "ξ": "x",
+    "ο": "o", "π": "p", "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "υ": "y",
+    "φ": "f", "χ": "ch", "ψ": "ps", "ω": "o",
+    "ά": "a", "έ": "e", "ή": "i", "ί": "i", "ό": "o", "ύ": "y", "ώ": "o",
+    "ϊ": "i", "ϋ": "y", "ΐ": "i", "ΰ": "y",
+    "Α": "A", "Β": "V", "Γ": "G", "Δ": "D", "Ε": "E", "Ζ": "Z", "Η": "I",
+    "Θ": "Th", "Ι": "I", "Κ": "K", "Λ": "L", "Μ": "M", "Ν": "N", "Ξ": "X",
+    "Ο": "O", "Π": "P", "Ρ": "R", "Σ": "S", "Τ": "T", "Υ": "Y", "Φ": "F",
+    "Χ": "Ch", "Ψ": "Ps", "Ω": "O",
+    "Ά": "A", "Έ": "E", "Ή": "I", "Ί": "I", "Ό": "O", "Ύ": "Y", "Ώ": "O",
+}
+
+_STATION_INDEX_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _get_station_index() -> Dict[str, Any]:
+    """Retrieve or build the station index cache for cross-referencing names."""
+    global _STATION_INDEX_CACHE
+    if _STATION_INDEX_CACHE is None:
+        try:
+            from tui.mock_engine import build_station_index, load_stations
+
+            stations = list(load_stations().values())
+            _STATION_INDEX_CACHE = build_station_index(stations)
+        except Exception:
+            _STATION_INDEX_CACHE = {}
+    return _STATION_INDEX_CACHE
+
+
+def transliterate_greek_to_latin(text: str) -> str:
+    """Convert Greek text to clean 7-bit ASCII Latin characters."""
+    if not text:
+        return ""
+    result: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if i + 1 < n:
+            pair = text[i : i + 2].lower()
+            if pair in ("ου", "ού"):
+                result.append("Ou" if text[i].isupper() else "ou")
+                i += 2
+                continue
+        ch = text[i]
+        result.append(_GREEK_TO_LATIN_MAP.get(ch, ch))
+        i += 1
+    decomposed = unicodedata.normalize("NFD", "".join(result))
+    return "".join(c for c in decomposed if ord(c) < 128)
+
+
+def format_timetable_time(raw_time: Any, empty_dash: str = "--:--") -> str:
+    """Parse raw timestamp or clock string and format into 'HH:MM' in Europe/Athens time.
+
+    Supports:
+    - ISO 8601 strings (e.g. '2026-11-21T21:37:00.000Z', '2026-11-21T21:37:00+00:00')
+    - Simple clock strings (e.g. '14:30', '14:30:00')
+    - Unix epoch timestamps (int / float)
+
+    Args:
+        raw_time: Input time representation or None.
+        empty_dash: Fallback string for missing/null values.
+
+    Returns:
+        Formatted 'HH:MM' string in Europe/Athens local time.
+    """
+    if not raw_time or str(raw_time).lower() in ("none", "null", ""):
+        return empty_dash
+
+    s = str(raw_time).strip()
+
+    # 1. If already 'HH:MM'
+    if len(s) == 5 and s[2] == ":" and s[:2].isdigit() and s[3:].isdigit():
+        return s
+
+    # 2. If 'HH:MM:SS'
+    if len(s) == 8 and s[2] == ":" and s[5] == ":" and s[:2].isdigit():
+        return s[:5]
+
+    # 3. Parse ISO 8601 string
+    try:
+        clean_s = s.replace("Z", "+00:00")
+        if "T" in clean_s or " " in clean_s:
+            dt = datetime.fromisoformat(clean_s)
+            if dt.tzinfo is not None:
+                dt_athens = dt.astimezone(ATHENS_TZ)
+            else:
+                dt_athens = dt.replace(tzinfo=timezone.utc).astimezone(ATHENS_TZ)
+            return dt_athens.strftime("%H:%M")
+    except (ValueError, TypeError, OSError):
+        pass
+
+    # 4. Fallback for strings containing 'T' if fromisoformat failed
+    if "T" in s:
+        part = s.split("T")[-1].replace("Z", "").strip()
+        if len(part) >= 5 and part[2] == ":" and part[:2].isdigit() and part[3:5].isdigit():
+            return part[:5]
+
+    return empty_dash
+
+
+def resolve_timetable_station_name(
+    stop: Any,
+    is_ascii: bool = False,
+    empty_dash: str = "—",
+    single_name: bool = False,
+) -> str:
+    """Extract and format the calling station name for a timetable stop record.
+
+    Cross-references raw stop payload keys ('name', 'stationName', 'stationNameGreek', etc.)
+    against known stations in stations.json to provide accurate English and Greek names,
+    with automatic Latin transliteration for ASCII purity.
+
+    Args:
+        stop: Stop dictionary or TimetableStopDTO instance.
+        is_ascii: True if output must be strictly 7-bit ASCII.
+        empty_dash: Placeholder for missing names.
+        single_name: True if only a single English/Latin name should be returned.
+
+    Returns:
+        Formatted station name string.
+    """
+    en: Optional[str] = None
+    el: Optional[str] = None
+    name: Optional[str] = None
+
+    if isinstance(stop, dict):
+        en = stop.get("stationNameEnglish") or stop.get("station_name_en")
+        el = stop.get("stationNameGreek") or stop.get("station_name_el") or stop.get("name")
+        name = stop.get("name") or stop.get("stationName") or stop.get("station_name")
+        stn_obj = stop.get("station")
+        if isinstance(stn_obj, dict):
+            en = en or stn_obj.get("nameEnglish") or stn_obj.get("name_en")
+            el = el or stn_obj.get("nameGreek") or stn_obj.get("name_el") or stn_obj.get("name")
+        stn_id_obj = stop.get("stationId")
+        if isinstance(stn_id_obj, dict):
+            names_obj = stn_id_obj.get("names", {})
+            if isinstance(names_obj, dict):
+                en = en or names_obj.get("en")
+                el = el or names_obj.get("el") or names_obj.get("default")
+            name = name or stn_id_obj.get("name")
+    else:
+        en = getattr(stop, "station_name_en", None)
+        el = getattr(stop, "station_name_el", None)
+        name = getattr(stop, "station_name", None) or getattr(stop, "name", None)
+
+    # Cross-reference against stations.json index if English name is missing
+    if not en and (el or name):
+        from tui.mock_engine import normalize_station_key
+
+        stn_idx = _get_station_index()
+        for candidate in (el, name):
+            if candidate and isinstance(candidate, str):
+                matched = stn_idx.get(normalize_station_key(candidate))
+                if matched:
+                    en = matched.name_en
+                    if not el:
+                        el = matched.name_el
+                    break
+
+    # If still not found and in ASCII mode or single_name mode, transliterate
+    if not en and (el or name):
+        en = transliterate_greek_to_latin(str(el or name or ""))
+
+    if is_ascii or single_name:
+        resolved = en or transliterate_greek_to_latin(str(el or name or "")) or empty_dash
+        return transliterate_greek_to_latin(resolved) if is_ascii else resolved
+
+    if en and el and en != el:
+        return f"{en} / {el}"
+
+    return en or el or name or empty_dash
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -409,13 +591,28 @@ def _format_schedule_header_title(timetable: Any, is_ascii: bool) -> str:
 
     def _resolve_endpoint_name(endpoint: Any) -> str:
         if isinstance(endpoint, dict):
-            el = endpoint.get("nameGreek") or endpoint.get("name_el")
+            el = (
+                endpoint.get("nameGreek")
+                or endpoint.get("name_el")
+                or endpoint.get("name")
+            )
             en = endpoint.get("nameEnglish") or endpoint.get("name_en")
+            if not en and el and isinstance(el, str):
+                from tui.mock_engine import normalize_station_key
+
+                stn_idx = _get_station_index()
+                matched = stn_idx.get(normalize_station_key(el))
+                if matched:
+                    en = matched.name_en
+                else:
+                    en = transliterate_greek_to_latin(el)
             if is_ascii or not el or el == en:
-                return en or el or endpoint.get("id") or "—"
+                resolved = en or transliterate_greek_to_latin(str(el or "")) or endpoint.get("id") or "—"
+                return transliterate_greek_to_latin(str(resolved)) if is_ascii else str(resolved)
             return f"{en} / {el}" if en else el
         if isinstance(endpoint, str) and endpoint.strip():
-            return endpoint.strip()
+            s = endpoint.strip()
+            return transliterate_greek_to_latin(s) if is_ascii else s
         return "—"
 
     if isinstance(timetable, dict):
@@ -431,29 +628,12 @@ def _format_schedule_header_title(timetable: Any, is_ascii: bool) -> str:
 
 def _extract_stop_station_name(stop: Any, is_ascii: bool, empty_dash: str) -> str:
     """Extract and format the calling station name for a timetable stop."""
-    if isinstance(stop, dict):
-        en = stop.get("stationNameEnglish") or stop.get("station_name_en")
-        el = stop.get("stationNameGreek") or stop.get("station_name_el")
-        name = stop.get("stationName") or stop.get("station_name") or stop.get("stationId")
-    else:
-        en = getattr(stop, "station_name_en", None)
-        el = getattr(stop, "station_name_el", None)
-        name = getattr(stop, "station_name", None) or getattr(stop, "station_id", None)
-
-    if is_ascii:
-        return en or name or el or empty_dash
-    if en and el and en != el:
-        return f"{en} / {el}"
-    return en or el or name or empty_dash
+    return resolve_timetable_station_name(stop, is_ascii=is_ascii, empty_dash=empty_dash)
 
 
 def _extract_stop_time_field(raw_time: Any, empty_dash: str = "--:--") -> str:
     """Parse time string into clean HH:MM representation."""
-    if not raw_time or str(raw_time).lower() in ("none", "null", ""):
-        return empty_dash
-    s = str(raw_time).strip()
-    clean = s.split("T")[-1].replace("Z", "")
-    return clean[:5] if len(clean) >= 5 else clean
+    return format_timetable_time(raw_time, empty_dash=empty_dash)
 
 
 def _extract_stop_indicator(stop: Any, is_ascii: bool) -> str:

@@ -67,6 +67,10 @@ from tui.theme import (
     ThemeProfile,
     get_theme_spec,
 )
+from storage.cli_formatters import (
+    format_timetable_time,
+    resolve_timetable_station_name,
+)
 
 
 class HelpOverlay(Enum):
@@ -2377,17 +2381,19 @@ class TUIRenderer:
             train_no = str(
                 getattr(timetable, "train_number", None)
                 or (timetable.get("trainNumber") if isinstance(timetable, dict) else "")
+                or (timetable.get("train_number") if isinstance(timetable, dict) else "")
                 or ""
             )
             if isinstance(timetable, dict):
                 orig_raw = timetable.get("origin")
                 dest_raw = timetable.get("destination")
-                orig = orig_raw.get("nameEnglish", "") if isinstance(orig_raw, dict) else str(orig_raw or "")
-                dest = dest_raw.get("nameEnglish", "") if isinstance(dest_raw, dict) else str(dest_raw or "")
+                orig = resolve_timetable_station_name(orig_raw, is_ascii=self.ascii_mode, empty_dash="", single_name=True) if orig_raw else ""
+                dest = resolve_timetable_station_name(dest_raw, is_ascii=self.ascii_mode, empty_dash="", single_name=True) if dest_raw else ""
             else:
                 orig = getattr(timetable, "origin_name", "")
                 dest = getattr(timetable, "destination_name", "")
-            orig_dest = f" ({orig} -> {dest})" if orig or dest else ""
+            arrow = "->" if self.ascii_mode else "→"
+            orig_dest = f" ({orig} {arrow} {dest})" if orig or dest else ""
 
         title = f" TIMETABLE & ITINERARY: TRAIN {train_no}{orig_dest} "[: box_w - 4]
         t_x = max(start_x + 2, start_x + (box_w - len(title)) // 2)
@@ -2434,21 +2440,26 @@ class TUIRenderer:
             if isinstance(stop, dict):
                 is_passed = stop.get("is_passed", False) or stop.get("status") == "DEPARTED"
                 is_current = stop.get("is_current", False) or stop.get("status") == "APPROACH"
-                stn_name = stop.get("stationNameEnglish") or stop.get("station_name_en") or stop.get("stationName") or stop.get("stationId", "")
-                sched_arr = stop.get("scheduledArrival") or time_dash
-                act_arr = stop.get("actualArrival") or time_dash
-                sched_dep = stop.get("scheduledDeparture") or time_dash
-                act_dep = stop.get("actualDeparture") or time_dash
+                sched_arr = format_timetable_time(stop.get("scheduledArrival"), time_dash)
+                act_arr = format_timetable_time(stop.get("actualArrival"), time_dash)
+                sched_dep = format_timetable_time(stop.get("scheduledDeparture"), time_dash)
+                act_dep = format_timetable_time(stop.get("actualDeparture"), time_dash)
                 plat = str(stop.get("platform") or "-")
             else:
                 is_passed = getattr(stop, "is_passed", False)
                 is_current = getattr(stop, "is_current", False)
-                stn_name = getattr(stop, "station_name_en", None) or getattr(stop, "station_name", "") or getattr(stop, "station_id", "")
-                sched_arr = getattr(stop, "scheduled_arrival", None) or time_dash
-                act_arr = getattr(stop, "actual_arrival", None) or time_dash
-                sched_dep = getattr(stop, "scheduled_departure", None) or time_dash
-                act_dep = getattr(stop, "actual_departure", None) or time_dash
+                sched_arr = format_timetable_time(getattr(stop, "scheduled_arrival", None), time_dash)
+                act_arr = format_timetable_time(getattr(stop, "actual_arrival", None), time_dash)
+                sched_dep = format_timetable_time(getattr(stop, "scheduled_departure", None), time_dash)
+                act_dep = format_timetable_time(getattr(stop, "actual_departure", None), time_dash)
                 plat = str(getattr(stop, "platform", None) or "-")
+
+            stn_name = resolve_timetable_station_name(
+                stop,
+                is_ascii=self.ascii_mode,
+                empty_dash="-",
+                single_name=True,
+            )
 
             ind = "[X]" if is_passed else ((" > " if self.ascii_mode else " ► ") if is_current else "   ")
             row_attr = current_attr if is_current else (dim_attr if is_passed else text_attr)

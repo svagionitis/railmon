@@ -9,7 +9,12 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from storage.cli_formatters import format_train_schedule_table
+from storage.cli_formatters import (
+    format_timetable_time,
+    format_train_schedule_table,
+    resolve_timetable_station_name,
+    transliterate_greek_to_latin,
+)
 from train_tracker import RailwayAPIError, build_parser, main, run_schedule_mode
 from tui.mock_engine import (
     generate_mock_train_schedule,
@@ -164,6 +169,97 @@ class TestCLISchedule(unittest.TestCase):
         self.assertIn("1597", trains)
         self.assertIn("IC 52", trains)
         self.assertIn("2232", trains)
+
+    def test_tc_sch_10_live_api_payload_formatting(self) -> None:
+        """TC-SCH-10: Verify table formats live production railway.gov.gr JSON payload."""
+        live_payload = {
+            "scheduleId": "6a94743cd16c475ca1449ec2",
+            "scheduleNumber": "1239-20261121-2332",
+            "trainNumber": "1239",
+            "serviceType": "Suburban",
+            "corridor": "PIRAIR",
+            "scheduledDeparture": "2026-11-21T21:32:00.000Z",
+            "scheduledArrival": "2026-11-21T22:26:00.000Z",
+            "origin": {"name": "Αεροδρόμιο", "nameGreek": "Αεροδρόμιο"},
+            "destination": {"name": "Ταύρος", "nameGreek": "Ταύρος"},
+            "stops": [
+                {
+                    "_id": "0",
+                    "stationId": "6928c3c150ab5bc72b39d006",
+                    "order": 1,
+                    "scheduledArrival": "2026-11-21T21:37:00.000Z",
+                    "scheduledDeparture": "2026-11-21T21:37:00.000Z",
+                    "actualArrival": None,
+                    "actualDeparture": None,
+                    "status": "scheduled",
+                    "platform": None,
+                    "dwellTime": 0,
+                    "name": "Κορωπί",
+                },
+                {
+                    "_id": "1",
+                    "stationId": "6928c3c150ab5bc72b39cec9",
+                    "order": 2,
+                    "scheduledArrival": "2026-11-21T21:43:00.000Z",
+                    "scheduledDeparture": "2026-11-21T21:43:00.000Z",
+                    "actualArrival": None,
+                    "actualDeparture": None,
+                    "status": "scheduled",
+                    "platform": None,
+                    "dwellTime": 0,
+                    "name": "Παιανία-Κάντζα",
+                },
+            ],
+        }
+
+        # 1. UTF-8 table formatting
+        output_utf8 = format_train_schedule_table(live_payload, is_ascii=False)
+        self.assertIn("TRAIN TIMETABLE & ITINERARY: TRAIN 1239", output_utf8)
+        self.assertIn("Koropi", output_utf8)
+        self.assertIn("Κορωπί", output_utf8)
+        self.assertIn("23:37", output_utf8)
+        self.assertNotIn("6928c3c150ab5bc72b39d006", output_utf8)
+        self.assertNotIn("2026-", output_utf8)
+
+        # 2. ASCII purity table formatting
+        output_ascii = format_train_schedule_table(live_payload, is_ascii=True)
+        self.assertIn("Koropi", output_ascii)
+        self.assertIn("Paiania-Kantza", output_ascii)
+        self.assertIn("23:37", output_ascii)
+        self.assertNotIn("6928c3c150ab5bc72b39d006", output_ascii)
+        self.assertNotIn("2026-", output_ascii)
+        for line in output_ascii.splitlines():
+            for ch in line:
+                self.assertLess(ord(ch), 128, f"Non-ASCII character {ch!r} in ASCII output")
+
+    def test_tc_sch_11_format_timetable_time_athens(self) -> None:
+        """TC-SCH-11: Verify format_timetable_time correctly converts UTC to Athens local time."""
+        # UTC string with 'Z'
+        self.assertEqual(format_timetable_time("2026-11-21T21:37:00.000Z"), "23:37")
+        # UTC string with offset +00:00
+        self.assertEqual(format_timetable_time("2026-11-21T21:37:00+00:00"), "23:37")
+        # Local Athens string with offset +02:00
+        self.assertEqual(format_timetable_time("2026-11-21T23:37:00+02:00"), "23:37")
+        # Already formatted clock times
+        self.assertEqual(format_timetable_time("14:30"), "14:30")
+        self.assertEqual(format_timetable_time("14:30:45"), "14:30")
+        # Null and empty
+        self.assertEqual(format_timetable_time(None), "--:--")
+        self.assertEqual(format_timetable_time(""), "--:--")
+        self.assertEqual(format_timetable_time("null"), "--:--")
+
+    def test_tc_sch_12_resolve_timetable_station_name(self) -> None:
+        """TC-SCH-12: Verify resolve_timetable_station_name handles live API schema and cross-referencing."""
+        # Stop with name "Κορωπί" and ObjectId stationId
+        stop_koropi = {"name": "Κορωπί", "stationId": "6928c3c150ab5bc72b39d006"}
+        self.assertEqual(resolve_timetable_station_name(stop_koropi, is_ascii=False), "Koropi / Κορωπί")
+        self.assertEqual(resolve_timetable_station_name(stop_koropi, is_ascii=True), "Koropi")
+        self.assertEqual(resolve_timetable_station_name(stop_koropi, single_name=True), "Koropi")
+
+        # Unindexed stop
+        stop_unindexed = {"name": "Παιανία-Κάντζα", "stationId": "6928c3c150ab5bc72b39cec9"}
+        self.assertEqual(resolve_timetable_station_name(stop_unindexed, is_ascii=True), "Paiania-Kantza")
+        self.assertTrue(all(ord(c) < 128 for c in resolve_timetable_station_name(stop_unindexed, is_ascii=True)))
 
 
 if __name__ == "__main__":

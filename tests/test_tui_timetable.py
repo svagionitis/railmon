@@ -292,6 +292,72 @@ class TestTUITimetableModal(unittest.TestCase):
             app._fetch_timetable_for_train("1597", app.store.get_snapshot().selected_train)
             mock_cls.assert_not_called()
 
+    def test_tc_tui_sch_09_render_live_api_payload_modal(self) -> None:
+        """TC-TUI-SCH-09: Test modal rendering with real-world live API payload."""
+        renderer = TUIRenderer(stations=self.stations, tracks=self.tracks, ascii_mode=False)
+        win = MockWindow(28, 90)
+        live_payload = {
+            "scheduleId": "6a94743cd16c475ca1449ec2",
+            "scheduleNumber": "1239-20261121-2332",
+            "trainNumber": "1239",
+            "serviceType": "Suburban",
+            "corridor": "PIRAIR",
+            "scheduledDeparture": "2026-11-21T21:32:00.000Z",
+            "scheduledArrival": "2026-11-21T22:26:00.000Z",
+            "origin": {"name": "Αεροδρόμιο", "nameGreek": "Αεροδρόμιο"},
+            "destination": {"name": "Ταύρος", "nameGreek": "Ταύρος"},
+            "stops": [
+                {
+                    "_id": "0",
+                    "stationId": "6928c3c150ab5bc72b39d006",
+                    "order": 1,
+                    "scheduledArrival": "2026-11-21T21:37:00.000Z",
+                    "scheduledDeparture": "2026-11-21T21:37:00.000Z",
+                    "actualArrival": None,
+                    "actualDeparture": None,
+                    "status": "scheduled",
+                    "platform": None,
+                    "dwellTime": 0,
+                    "name": "Κορωπί",
+                },
+                {
+                    "_id": "1",
+                    "stationId": "6928c3c150ab5bc72b39cec9",
+                    "order": 2,
+                    "scheduledArrival": "2026-11-21T21:43:00.000Z",
+                    "scheduledDeparture": "2026-11-21T21:43:00.000Z",
+                    "actualArrival": None,
+                    "actualDeparture": None,
+                    "status": "scheduled",
+                    "platform": None,
+                    "dwellTime": 0,
+                    "name": "Παιανία-Κάντζα",
+                },
+            ],
+        }
+
+        renderer.render_timetable_modal(
+            win=win,
+            height=28,
+            width=90,
+            timetable=live_payload,
+            scroll_offset=0,
+        )
+
+        all_rendered = " ".join(win.strings)
+        # Check station names rendered cleanly
+        self.assertIn("Koropi", all_rendered)
+        self.assertIn("Paiania-Kantza", all_rendered)
+        # Check time rendered as Athens local time
+        self.assertIn("23:37", all_rendered)
+        self.assertIn("23:43", all_rendered)
+        # Check hex ObjectId and year strings are NOT present
+        self.assertNotIn("6928c3c150ab5bc72b3", all_rendered)
+        self.assertNotIn("2026-", all_rendered)
+        # Check title contains route endpoints
+        self.assertIn("TIMETABLE & ITINERARY: TRAIN 1239", all_rendered)
+        self.assertTrue("Athens" in all_rendered or "Aerodromio" in all_rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
