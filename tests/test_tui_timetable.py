@@ -19,7 +19,11 @@ from tui.app import (
 )
 from tui.geo import GeoPoint, GeoProjector, Viewport
 from tui.mock_engine import generate_mock_train_schedule, load_stations, load_tracks
-from tui.renderer import PaneGeometry, TUIRenderer
+from tui.renderer import (
+    PaneGeometry,
+    TUIRenderer,
+    calculate_timetable_visible_rows,
+)
 from tui.state import (
     StateSnapshot,
     TimetableStopDTO,
@@ -357,6 +361,184 @@ class TestTUITimetableModal(unittest.TestCase):
         # Check title contains route endpoints
         self.assertIn("TIMETABLE & ITINERARY: TRAIN 1239", all_rendered)
         self.assertTrue("Athens" in all_rendered or "Aerodromio" in all_rendered)
+
+
+    def test_tc_tui_sch_10_calculate_timetable_visible_rows(self) -> None:
+        """TC-TUI-SCH-10: Test calculation of visible stops rows across varying terminal heights."""
+        # Minimum clamped terminal height (< 14 -> box_h=12 -> 12-5=7)
+        self.assertEqual(calculate_timetable_visible_rows(10), 7)
+        # Compact terminal height (15 -> box_h=13 -> 13-5=8)
+        self.assertEqual(calculate_timetable_visible_rows(15), 8)
+        # Standard terminal height (24 -> box_h=22 -> 22-5=17)
+        self.assertEqual(calculate_timetable_visible_rows(24), 17)
+        # Large terminal height (50 -> box_h=22 (capped) -> 22-5=17)
+        self.assertEqual(calculate_timetable_visible_rows(50), 17)
+
+    def test_tc_tui_sch_11_viewport_synchronized_keyboard_scrolling(self) -> None:
+        """TC-TUI-SCH-11: Verify max_offset prevents ghost scrolling when stops <= visible_rows."""
+        app = self._create_app()
+        # Mock timetable with 14 stops (visible_rows = 17 on 30x100 terminal)
+        stops_14 = [{"stationId": f"stn_{i}", "name": f"Station {i}", "order": i} for i in range(14)]
+        mock_sched = {"trainNumber": "1239", "stops": stops_14}
+        app._active_timetable = mock_sched
+        app.input_mode = InputMode.TIMETABLE
+        app.show_timetable = True
+        app.timetable_scroll_offset = 0
+
+        # Press 'j' / KEY_DOWN: max_offset must be max(0, 14 - 17) = 0. Offset remains 0 (no ghost scrolling).
+        app._handle_timetable_input(ord("j"))
+        self.assertEqual(app.timetable_scroll_offset, 0)
+        app._handle_timetable_input(curses.KEY_DOWN)
+        self.assertEqual(app.timetable_scroll_offset, 0)
+
+        # Mock timetable with 25 stops: max_offset must be max(0, 25 - 17) = 8.
+        stops_25 = [{"stationId": f"stn_{i}", "name": f"Station {i}", "order": i} for i in range(25)]
+        app._active_timetable = {"trainNumber": "IC52", "stops": stops_25}
+
+        for _ in range(15):
+            app._handle_timetable_input(ord("j"))
+        # Clamped precisely at max_offset = 8
+        self.assertEqual(app.timetable_scroll_offset, 8)
+
+        # Scroll back up with 'k'
+        app._handle_timetable_input(ord("k"))
+        self.assertEqual(app.timetable_scroll_offset, 7)
+
+    def test_tc_tui_sch_12_page_up_page_down_and_end_navigation(self) -> None:
+        """TC-TUI-SCH-12: Test Page Down, Page Up, End, and Home keys with synchronized bounds."""
+        app = self._create_app()
+        stops_30 = [{"stationId": f"stn_{i}", "name": f"Station {i}", "order": i} for i in range(30)]
+        app._active_timetable = {"trainNumber": "IC52", "stops": stops_30}
+        app.input_mode = InputMode.TIMETABLE
+        app.show_timetable = True
+        app.timetable_scroll_offset = 0
+
+        # On 30-row terminal, visible_rows = 17, max_offset = 30 - 17 = 13.
+        # page_step = max(1, 17 - 2) = 15.
+        app._handle_timetable_input(getattr(curses, "KEY_NPAGE", -1))
+        self.assertEqual(app.timetable_scroll_offset, 13)
+
+        app._handle_timetable_input(getattr(curses, "KEY_PPAGE", -1))
+        self.assertEqual(app.timetable_scroll_offset, 0)
+
+        app._handle_timetable_input(getattr(curses, "KEY_END", -1))
+        self.assertEqual(app.timetable_scroll_offset, 13)
+
+        app._handle_timetable_input(getattr(curses, "KEY_HOME", -1))
+        self.assertEqual(app.timetable_scroll_offset, 0)
+
+    def test_tc_tui_sch_13_mouse_wheel_clamping_to_visible_rows(self) -> None:
+        """TC-TUI-SCH-13: Mouse wheel scrolling clamps to stops_count - visible_rows."""
+        app = self._create_app()
+        stops_20 = [{"stationId": f"stn_{i}", "name": f"Station {i}", "order": i} for i in range(20)]
+        app._active_timetable = {"trainNumber": "IC52", "stops": stops_20}
+        app.input_mode = InputMode.TIMETABLE
+        app.show_timetable = True
+        app.timetable_scroll_offset = 0
+
+        # visible_rows = 17, max_offset = 3
+        with patch("curses.getmouse", return_value=(0, 50, 15, 0, MOUSE_SCROLL_DOWN_MASK)):
+            app._handle_mouse_input()
+            self.assertEqual(app.timetable_scroll_offset, 2)
+            app._handle_mouse_input()
+            self.assertEqual(app.timetable_scroll_offset, 3)
+            # Cannot exceed max_offset 3
+            app._handle_mouse_input()
+            self.assertEqual(app.timetable_scroll_offset, 3)
+
+        with patch("curses.getmouse", return_value=(0, 50, 15, 0, MOUSE_SCROLL_UP_MASK)):
+            app._handle_mouse_input()
+            self.assertEqual(app.timetable_scroll_offset, 1)
+
+    def test_tc_tui_sch_14_user_scroll_persists_across_async_fetch(self) -> None:
+        """TC-TUI-SCH-14: User scrolling sets flag and prevents async completion from resetting offset."""
+        app = self._create_app()
+        stops_25 = [{"stationId": f"stn_{i}", "name": f"Station {i}", "order": i, "is_current": (i == 10)} for i in range(25)]
+        mock_sched = {"trainNumber": "1597", "stops": stops_25}
+
+        app._active_timetable = mock_sched
+        app.input_mode = InputMode.TIMETABLE
+        app.show_timetable = True
+        app.timetable_scroll_offset = 0
+        self.assertFalse(app._timetable_user_scrolled)
+
+        # User scrolls manually
+        app._handle_timetable_input(ord("j"))
+        self.assertTrue(app._timetable_user_scrolled)
+        app.timetable_scroll_offset = 5
+
+        # When _fetch_timetable_for_train or auto-scroll completes, offset must remain 5
+        app._auto_scroll_to_current_stop()
+        # Direct _auto_scroll_to_current_stop updates offset, but _fetch_timetable_for_train guards it:
+        app.timetable_scroll_offset = 5
+        app.worker.client = MagicMock()
+        mock_client = MagicMock()
+        mock_client.get_schedule_by_train_number.return_value = mock_sched
+        with patch("train_tracker.RailwayGovClient", return_value=mock_client):
+            app._fetch_timetable_for_train("1597", None)
+            import time
+            for _ in range(50):
+                if not app._timetable_loading:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(app.timetable_scroll_offset, 5)
+
+    def test_tc_tui_sch_15_live_telemetry_next_station_auto_scroll(self) -> None:
+        """TC-TUI-SCH-15: Auto-scroll matches live telemetry next_station and centers viewport."""
+        app = self._create_app()
+        pos = create_test_position("T1", "1597")
+        pos.next_station = "Θήβα"
+        app.store.update_positions([pos])
+        app.store.select_by_id("T1")
+
+        stops = [
+            {"stationId": f"stn_{i}", "name": f"Station {i}", "order": i} for i in range(10)
+        ]
+        stops.append({"stationId": "stn_thb", "name": "Thiva", "order": 10})
+        for i in range(11, 25):
+            stops.append({"stationId": f"stn_{i}", "name": f"Station {i}", "order": i})
+
+        app._active_timetable = {"trainNumber": "1597", "stops": stops}
+        app.input_mode = InputMode.TIMETABLE
+        app.show_timetable = True
+        app._timetable_user_scrolled = False
+
+        app._auto_scroll_to_current_stop()
+        # Thiva is index 10. visible_rows = 17, visible_rows // 2 = 8.
+        # target_offset = 10 - 8 = 2.
+        self.assertEqual(app.timetable_scroll_offset, 2)
+
+    def test_tc_tui_sch_16_footer_range_and_all_stops_indicators(self) -> None:
+        """TC-TUI-SCH-16: Footer displays 'All N stops displayed' or 'Scroll (Stops start-end of total)'."""
+        renderer = TUIRenderer(stations=self.stations, tracks=self.tracks, ascii_mode=False)
+
+        # 1. Fits in viewport (14 stops <= 17 visible rows)
+        win1 = MockWindow(24, 80)
+        timetable_small = {
+            "trainNumber": "1239",
+            "stops": [{"stationId": f"s_{i}", "name": f"Stop {i}", "order": i} for i in range(14)],
+        }
+        renderer.render_timetable_modal(win1, 24, 80, timetable=timetable_small, scroll_offset=0)
+        all_txt1 = " ".join(win1.strings)
+        self.assertIn("All 14 stops displayed", all_txt1)
+        self.assertNotIn("of 14", all_txt1)
+
+        # 2. Exceeds viewport (25 stops > 17 visible rows)
+        win2 = MockWindow(24, 80)
+        timetable_large = {
+            "trainNumber": "IC52",
+            "stops": [{"stationId": f"s_{i}", "name": f"Stop {i}", "order": i} for i in range(25)],
+        }
+        renderer.render_timetable_modal(win2, 24, 80, timetable=timetable_large, scroll_offset=0)
+        all_txt2 = " ".join(win2.strings)
+        self.assertIn("Scroll (Stops 1-17 of 25)", all_txt2)
+
+        # At scroll offset 8 (bottom)
+        win3 = MockWindow(24, 80)
+        renderer.render_timetable_modal(win3, 24, 80, timetable=timetable_large, scroll_offset=8)
+        all_txt3 = " ".join(win3.strings)
+        self.assertIn("Scroll (Stops 9-25 of 25)", all_txt3)
 
 
 if __name__ == "__main__":

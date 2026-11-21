@@ -70,6 +70,7 @@ from tui.theme import (
 from storage.cli_formatters import (
     format_timetable_time,
     resolve_timetable_station_name,
+    transliterate_greek_to_latin,
 )
 
 
@@ -1023,6 +1024,19 @@ def safe_color_pair(pair_idx: int, fallback_attr: int = curses.A_NORMAL) -> int:
     except curses.error:
         pass
     return fallback_attr | attr_override
+
+
+def calculate_timetable_visible_rows(term_height: int) -> int:
+    """Calculate the number of stop rows visible in the centered timetable modal dialog.
+
+    Args:
+        term_height: Available terminal height in rows.
+
+    Returns:
+        Integer count of visible stop rows (minimum 1).
+    """
+    box_h = min(22, max(12, term_height - 2))
+    return max(1, box_h - 5)
 
 
 class TUIRenderer:
@@ -2328,6 +2342,99 @@ class TUIRenderer:
         f_x = max(start_x + 2, start_x + (box_w - len(footer_msg)) // 2)
         safe_addstr(win, start_y + box_h - 1, f_x, footer_msg, dim_attr, ascii_mode=self.ascii_mode)
 
+    def _find_timetable_approaching_index(
+        self,
+        stops: Sequence[Any],
+        next_station: Optional[str],
+    ) -> Optional[int]:
+        """Locate approaching station index in stops sequence matching next_station."""
+        if not next_station:
+            return None
+        norm_target_latin = normalize_station_key(transliterate_greek_to_latin(str(next_station)))
+        norm_raw_target = normalize_station_key(str(next_station))
+        for i, st in enumerate(stops):
+            st_name = resolve_timetable_station_name(st, is_ascii=True, empty_dash="", single_name=True)
+            raw_name = st.get("name", "") if isinstance(st, dict) else getattr(st, "station_name_el", "")
+            norm_st_latin = normalize_station_key(transliterate_greek_to_latin(st_name))
+            norm_raw_latin = normalize_station_key(transliterate_greek_to_latin(str(raw_name)))
+            norm_raw = normalize_station_key(str(raw_name))
+            if (
+                (norm_target_latin and (norm_target_latin in norm_st_latin or norm_target_latin in norm_raw_latin))
+                or (norm_raw_target and (norm_raw_target in norm_raw or norm_raw_target in normalize_station_key(st_name)))
+            ):
+                return i
+        return None
+
+    def _format_timetable_stop_row(
+        self,
+        stop: Any,
+        abs_idx: int,
+        approaching_idx: Optional[int],
+        box_w: int,
+    ) -> Tuple[str, int]:
+        """Format an individual timetable calling point row string and color attribute."""
+        time_dash = "--:--"
+        if isinstance(stop, dict):
+            is_passed = stop.get("is_passed", False) or stop.get("status") == "DEPARTED"
+            is_current = stop.get("is_current", False) or stop.get("status") == "APPROACH"
+            sched_arr = format_timetable_time(stop.get("scheduledArrival"), time_dash)
+            act_arr = format_timetable_time(stop.get("actualArrival"), time_dash)
+            sched_dep = format_timetable_time(stop.get("scheduledDeparture"), time_dash)
+            act_dep = format_timetable_time(stop.get("actualDeparture"), time_dash)
+            plat = str(stop.get("platform") or "-")
+        else:
+            is_passed = getattr(stop, "is_passed", False)
+            is_current = getattr(stop, "is_current", False)
+            sched_arr = format_timetable_time(getattr(stop, "scheduled_arrival", None), time_dash)
+            act_arr = format_timetable_time(getattr(stop, "actual_arrival", None), time_dash)
+            sched_dep = format_timetable_time(getattr(stop, "scheduled_departure", None), time_dash)
+            act_dep = format_timetable_time(getattr(stop, "actual_departure", None), time_dash)
+            plat = str(getattr(stop, "platform", None) or "-")
+
+        if approaching_idx is not None and not is_passed and not is_current:
+            is_passed = (abs_idx < approaching_idx)
+            is_current = (abs_idx == approaching_idx)
+
+        stn_name = resolve_timetable_station_name(
+            stop,
+            is_ascii=self.ascii_mode,
+            empty_dash="-",
+            single_name=True,
+        )
+
+        ind = "[X]" if is_passed else ((" > " if self.ascii_mode else " ► ") if is_current else "   ")
+        if is_current:
+            row_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+        elif is_passed:
+            row_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL) | curses.A_DIM
+        else:
+            row_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL)
+
+        stop_line = f" {ind:<4} {stn_name[:19]:<20} {sched_arr[:5]:^10} {act_arr[:5]:^11} {sched_dep[:5]:^10} {act_dep[:5]:^8} {plat:^4}"[: box_w - 4]
+        return stop_line, row_attr
+
+    def _format_timetable_title(self, timetable: Any, max_len: int) -> str:
+        """Format modal header title with train number and route endpoints."""
+        if not timetable:
+            return " TIMETABLE & ITINERARY "[:max_len]
+        train_no = str(
+            getattr(timetable, "train_number", None)
+            or (timetable.get("trainNumber") if isinstance(timetable, dict) else "")
+            or (timetable.get("train_number") if isinstance(timetable, dict) else "")
+            or ""
+        )
+        if isinstance(timetable, dict):
+            orig_raw = timetable.get("origin")
+            dest_raw = timetable.get("destination")
+            orig = resolve_timetable_station_name(orig_raw, is_ascii=self.ascii_mode, empty_dash="", single_name=True) if orig_raw else ""
+            dest = resolve_timetable_station_name(dest_raw, is_ascii=self.ascii_mode, empty_dash="", single_name=True) if dest_raw else ""
+        else:
+            orig = getattr(timetable, "origin_name", "")
+            dest = getattr(timetable, "destination_name", "")
+        arrow = "->" if self.ascii_mode else "→"
+        orig_dest = f" ({orig} {arrow} {dest})" if orig or dest else ""
+        return f" TIMETABLE & ITINERARY: TRAIN {train_no}{orig_dest} "[:max_len]
+
     def render_timetable_modal(
         self,
         win: Any,
@@ -2337,6 +2444,7 @@ class TUIRenderer:
         scroll_offset: int = 0,
         is_loading: bool = False,
         error_msg: Optional[str] = None,
+        next_station: Optional[str] = None,
     ) -> None:
         """Render centered train timetable and intermediate stop inspector modal dialog.
 
@@ -2348,6 +2456,7 @@ class TUIRenderer:
             scroll_offset: Vertical stop scrolling offset.
             is_loading: True if timetable is currently being fetched asynchronously.
             error_msg: Optional error string if timetable retrieval failed.
+            next_station: Name of approaching station from live telemetry for progress marking.
         """
         box_h = min(22, max(12, height - 2))
         box_w = min(82, max(46, width - 4))
@@ -2375,27 +2484,7 @@ class TUIRenderer:
             safe_addstr(win, start_y + r, start_x + box_w - 1, "|", border_attr, ascii_mode=self.ascii_mode)
 
         # Title
-        train_no = ""
-        orig_dest = ""
-        if timetable:
-            train_no = str(
-                getattr(timetable, "train_number", None)
-                or (timetable.get("trainNumber") if isinstance(timetable, dict) else "")
-                or (timetable.get("train_number") if isinstance(timetable, dict) else "")
-                or ""
-            )
-            if isinstance(timetable, dict):
-                orig_raw = timetable.get("origin")
-                dest_raw = timetable.get("destination")
-                orig = resolve_timetable_station_name(orig_raw, is_ascii=self.ascii_mode, empty_dash="", single_name=True) if orig_raw else ""
-                dest = resolve_timetable_station_name(dest_raw, is_ascii=self.ascii_mode, empty_dash="", single_name=True) if dest_raw else ""
-            else:
-                orig = getattr(timetable, "origin_name", "")
-                dest = getattr(timetable, "destination_name", "")
-            arrow = "->" if self.ascii_mode else "→"
-            orig_dest = f" ({orig} {arrow} {dest})" if orig or dest else ""
-
-        title = f" TIMETABLE & ITINERARY: TRAIN {train_no}{orig_dest} "[: box_w - 4]
+        title = self._format_timetable_title(timetable, box_w - 4)
         t_x = max(start_x + 2, start_x + (box_w - len(title)) // 2)
         safe_addstr(win, start_y, t_x, title, header_attr, ascii_mode=self.ascii_mode)
 
@@ -2426,51 +2515,29 @@ class TUIRenderer:
         safe_addstr(win, start_y + 2, start_x + 1, "-" * (box_w - 2), border_attr, ascii_mode=self.ascii_mode)
 
         # Stops
-        visible_rows = max(1, box_h - 5)
+        visible_rows = calculate_timetable_visible_rows(height)
         max_offset = max(0, len(stops) - visible_rows)
         offset = max(0, min(max_offset, scroll_offset))
-        time_dash = "--:--"
+
+        approaching_idx = self._find_timetable_approaching_index(stops, next_station)
 
         for idx, stop in enumerate(stops[offset : offset + visible_rows]):
             row_y = start_y + 3 + idx
             if row_y >= start_y + box_h - 2:
                 break
-
-            # Indicator & status
-            if isinstance(stop, dict):
-                is_passed = stop.get("is_passed", False) or stop.get("status") == "DEPARTED"
-                is_current = stop.get("is_current", False) or stop.get("status") == "APPROACH"
-                sched_arr = format_timetable_time(stop.get("scheduledArrival"), time_dash)
-                act_arr = format_timetable_time(stop.get("actualArrival"), time_dash)
-                sched_dep = format_timetable_time(stop.get("scheduledDeparture"), time_dash)
-                act_dep = format_timetable_time(stop.get("actualDeparture"), time_dash)
-                plat = str(stop.get("platform") or "-")
-            else:
-                is_passed = getattr(stop, "is_passed", False)
-                is_current = getattr(stop, "is_current", False)
-                sched_arr = format_timetable_time(getattr(stop, "scheduled_arrival", None), time_dash)
-                act_arr = format_timetable_time(getattr(stop, "actual_arrival", None), time_dash)
-                sched_dep = format_timetable_time(getattr(stop, "scheduled_departure", None), time_dash)
-                act_dep = format_timetable_time(getattr(stop, "actual_departure", None), time_dash)
-                plat = str(getattr(stop, "platform", None) or "-")
-
-            stn_name = resolve_timetable_station_name(
-                stop,
-                is_ascii=self.ascii_mode,
-                empty_dash="-",
-                single_name=True,
-            )
-
-            ind = "[X]" if is_passed else ((" > " if self.ascii_mode else " ► ") if is_current else "   ")
-            row_attr = current_attr if is_current else (dim_attr if is_passed else text_attr)
-
-            stop_line = f" {ind:<4} {stn_name[:19]:<20} {sched_arr[:5]:^10} {act_arr[:5]:^11} {sched_dep[:5]:^10} {act_dep[:5]:^8} {plat:^4}"[: box_w - 4]
+            abs_idx = offset + idx
+            stop_line, row_attr = self._format_timetable_stop_row(stop, abs_idx, approaching_idx, box_w)
             safe_addstr(win, row_y, start_x + 2, stop_line, row_attr, ascii_mode=self.ascii_mode)
 
         # Footer
         footer_divider = "-" * (box_w - 2)
         safe_addstr(win, start_y + box_h - 2, start_x + 1, footer_divider, border_attr, ascii_mode=self.ascii_mode)
-        footer_txt = f" [Esc / i] Close    [▲ / ▼, j / k] Scroll ({offset + 1}/{len(stops)}) "[: box_w - 4]
+        last_visible = min(len(stops), offset + visible_rows)
+        if len(stops) <= visible_rows:
+            scroll_info = f"All {len(stops)} stops displayed"
+        else:
+            scroll_info = f"[▲ / ▼, j / k] Scroll (Stops {offset + 1}-{last_visible} of {len(stops)})"
+        footer_txt = f" [Esc / i] Close    {scroll_info} "[: box_w - 4]
         safe_addstr(win, start_y + box_h - 2, start_x + 2, footer_txt, footer_attr, ascii_mode=self.ascii_mode)
 
     def render_all(
@@ -2558,6 +2625,9 @@ class TUIRenderer:
         if help_overlay == HelpOverlay.VISIBLE and "root" in windows:
             self.render_help_modal(windows["root"], geometry.term_height, geometry.term_width)
         elif timetable_overlay and "root" in windows:
+            next_stn = None
+            if snapshot.selected_train and snapshot.selected_train.position:
+                next_stn = snapshot.selected_train.position.next_station
             self.render_timetable_modal(
                 windows["root"],
                 geometry.term_height,
@@ -2566,4 +2636,5 @@ class TUIRenderer:
                 scroll_offset=timetable_scroll_offset,
                 is_loading=timetable_loading,
                 error_msg=timetable_error,
+                next_station=next_stn,
             )

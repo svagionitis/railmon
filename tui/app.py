@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger("railmon." + __name__)
 
+from storage.cli_formatters import (
+    resolve_timetable_station_name,
+    transliterate_greek_to_latin,
+)
 from storage.db import Database
 from storage.repository import (
     HistoricalRepository,
@@ -56,7 +60,9 @@ from tui.renderer import (
     PlaybackState,
     TUIRenderer,
     calculate_scroll_offset,
+    calculate_timetable_visible_rows,
     compute_station_board_entries,
+    normalize_station_key,
 )
 from tui.state import (
     BreadcrumbMode,
@@ -216,6 +222,7 @@ class TUIApp:
         self._timetable_loading: bool = False
         self._timetable_error: Optional[str] = None
         self._active_timetable: Optional[Any] = None
+        self._timetable_user_scrolled: bool = False
         self.paused: bool = False
 
         # Transient status bar toast notification state (F-4.1)
@@ -349,6 +356,15 @@ class TUIApp:
             pass
 
         self.rebuild_windows()
+        if self.show_timetable and self._active_timetable:
+            stops_count = 0
+            if isinstance(self._active_timetable, dict):
+                stops_count = len(self._active_timetable.get("stops", []))
+            elif hasattr(self._active_timetable, "stops"):
+                stops_count = len(getattr(self._active_timetable, "stops", []))
+            visible_rows = calculate_timetable_visible_rows(self.geometry.term_height)
+            max_offset = max(0, stops_count - visible_rows)
+            self.timetable_scroll_offset = max(0, min(max_offset, self.timetable_scroll_offset))
         self.stdscr.clear()
         self._force_redraw = True
 
@@ -984,6 +1000,7 @@ class TUIApp:
         self.show_timetable = True
         self.input_mode = InputMode.TIMETABLE
         self.timetable_scroll_offset = 0
+        self._timetable_user_scrolled = False
         self._force_redraw = True
         self._fetch_timetable_for_train(str(train_num), snapshot.selected_train)
 
@@ -997,17 +1014,45 @@ class TUIApp:
         elif hasattr(self._active_timetable, "stops"):
             stops = list(getattr(self._active_timetable, "stops", []))
 
+        if not stops:
+            return
+
         current_idx = 0
+        found = False
         for i, s in enumerate(stops):
             if isinstance(s, dict) and (s.get("is_current") or s.get("status") == "APPROACH"):
                 current_idx = i
+                found = True
                 break
             elif hasattr(s, "is_current") and getattr(s, "is_current", False):
                 current_idx = i
+                found = True
                 break
 
-        target_offset = max(0, current_idx - 5)
-        self.timetable_scroll_offset = target_offset
+        if not found:
+            snapshot = self.store.get_snapshot()
+            if snapshot.selected_train and snapshot.selected_train.position.next_station:
+                next_st = str(snapshot.selected_train.position.next_station)
+                norm_target_latin = normalize_station_key(transliterate_greek_to_latin(next_st))
+                norm_raw_target = normalize_station_key(next_st)
+                for i, s in enumerate(stops):
+                    st_name = resolve_timetable_station_name(s, is_ascii=True, empty_dash="", single_name=True)
+                    raw_name = s.get("name", "") if isinstance(s, dict) else getattr(s, "station_name_el", "")
+                    norm_st_latin = normalize_station_key(transliterate_greek_to_latin(st_name))
+                    norm_raw_latin = normalize_station_key(transliterate_greek_to_latin(str(raw_name)))
+                    norm_raw = normalize_station_key(str(raw_name))
+                    if (
+                        (norm_target_latin and (norm_target_latin in norm_st_latin or norm_target_latin in norm_raw_latin))
+                        or (norm_raw_target and (norm_raw_target in norm_raw or norm_raw_target in normalize_station_key(st_name)))
+                    ):
+                        current_idx = i
+                        found = True
+                        break
+
+        term_h = self.geometry.term_height if (hasattr(self, "geometry") and self.geometry) else 24
+        visible_rows = calculate_timetable_visible_rows(term_h)
+        max_offset = max(0, len(stops) - visible_rows)
+        self.timetable_scroll_offset = max(0, min(max_offset, current_idx - (visible_rows // 2)))
 
     def _fetch_timetable_for_train(self, train_num: str, record: Any) -> None:
         """Fetch timetable from cache, mock engine, or upstream REST API asynchronously."""
@@ -1018,7 +1063,8 @@ class TUIApp:
             self._active_timetable = cached[1]
             self._timetable_loading = False
             self._timetable_error = None
-            self._auto_scroll_to_current_stop()
+            if not self._timetable_user_scrolled:
+                self._auto_scroll_to_current_stop()
             self._force_redraw = True
             return
 
@@ -1036,7 +1082,8 @@ class TUIApp:
                 self._active_timetable = mock_sched
                 self._timetable_loading = False
                 self._timetable_error = None
-                self._auto_scroll_to_current_stop()
+                if not self._timetable_user_scrolled:
+                    self._auto_scroll_to_current_stop()
             except Exception as err:
                 self._timetable_error = str(err)
                 self._timetable_loading = False
@@ -1059,7 +1106,8 @@ class TUIApp:
                 self._active_timetable = data
                 self._timetable_loading = False
                 self._timetable_error = None
-                self._auto_scroll_to_current_stop()
+                if not self._timetable_user_scrolled:
+                    self._auto_scroll_to_current_stop()
             except Exception as err:
                 try:
                     data = generate_mock_train_schedule(clean_num)
@@ -1067,7 +1115,8 @@ class TUIApp:
                     self._active_timetable = data
                     self._timetable_loading = False
                     self._timetable_error = None
-                    self._auto_scroll_to_current_stop()
+                    if not self._timetable_user_scrolled:
+                        self._auto_scroll_to_current_stop()
                 except Exception:
                     self._timetable_error = str(err)
                     self._timetable_loading = False
@@ -1099,30 +1148,39 @@ class TUIApp:
             elif hasattr(self._active_timetable, "stops"):
                 stops_count = len(getattr(self._active_timetable, "stops", []))
 
-        max_offset = max(0, stops_count - 10)
+        term_h = self.geometry.term_height if (hasattr(self, "geometry") and self.geometry) else 24
+        visible_rows = calculate_timetable_visible_rows(term_h)
+        max_offset = max(0, stops_count - visible_rows)
+        page_step = max(1, visible_rows - 2)
 
         # Scroll Up
         if key in (curses.KEY_UP, ord("k"), ord("K")):
+            self._timetable_user_scrolled = True
             self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - 1)
             self._force_redraw = True
         # Scroll Down
         elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            self._timetable_user_scrolled = True
             self.timetable_scroll_offset = min(max_offset, self.timetable_scroll_offset + 1)
             self._force_redraw = True
         # Page Up
         elif key == getattr(curses, "KEY_PPAGE", -1):
-            self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - 8)
+            self._timetable_user_scrolled = True
+            self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - page_step)
             self._force_redraw = True
         # Page Down
         elif key == getattr(curses, "KEY_NPAGE", -1):
-            self.timetable_scroll_offset = min(max_offset, self.timetable_scroll_offset + 8)
+            self._timetable_user_scrolled = True
+            self.timetable_scroll_offset = min(max_offset, self.timetable_scroll_offset + page_step)
             self._force_redraw = True
         # Home
         elif key == getattr(curses, "KEY_HOME", -1):
+            self._timetable_user_scrolled = True
             self.timetable_scroll_offset = 0
             self._force_redraw = True
         # End
         elif key == getattr(curses, "KEY_END", -1):
+            self._timetable_user_scrolled = True
             self.timetable_scroll_offset = max_offset
             self._force_redraw = True
 
@@ -1425,22 +1483,27 @@ class TUIApp:
             return True
 
         if self.input_mode == InputMode.TIMETABLE:
+            term_h = self.geometry.term_height if (hasattr(self, "geometry") and self.geometry) else 24
+            visible_rows = calculate_timetable_visible_rows(term_h)
+            stops_count = 0
+            if self._active_timetable:
+                if isinstance(self._active_timetable, dict):
+                    stops_count = len(self._active_timetable.get("stops", []))
+                elif hasattr(self._active_timetable, "stops"):
+                    stops_count = len(getattr(self._active_timetable, "stops", []))
+            max_offset = max(0, stops_count - visible_rows)
+
             if bstate & MOUSE_SCROLL_UP_MASK:
+                self._timetable_user_scrolled = True
                 self.timetable_scroll_offset = max(0, self.timetable_scroll_offset - 2)
                 self._force_redraw = True
                 return True
             if bstate & MOUSE_SCROLL_DOWN_MASK:
-                stops_count = 0
-                if self._active_timetable:
-                    if isinstance(self._active_timetable, dict):
-                        stops_count = len(self._active_timetable.get("stops", []))
-                    elif hasattr(self._active_timetable, "stops"):
-                        stops_count = len(getattr(self._active_timetable, "stops", []))
-                self.timetable_scroll_offset = min(max(0, stops_count - 8), self.timetable_scroll_offset + 2)
+                self._timetable_user_scrolled = True
+                self.timetable_scroll_offset = min(max_offset, self.timetable_scroll_offset + 2)
                 self._force_redraw = True
                 return True
             if bstate & (MOUSE_LEFT_CLICK_MASK | MOUSE_LEFT_DOUBLE_CLICK_MASK):
-                term_h = self.geometry.term_height
                 term_w = self.geometry.term_width
                 box_h = min(22, max(12, term_h - 2))
                 box_w = min(82, max(46, term_w - 4))
