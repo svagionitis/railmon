@@ -19,6 +19,7 @@
   - **Dynamic Conformal Map Scale Bar**: Live bottom-left cartographic scale bar (`├──── 25 km ────┤` / `|---- 25 km ----|`) that automatically adapts to viewport zoom (`0.2x`–`25.0x`) and center latitude.
 - **Live Station Departure & Arrival Boards (`railmon departures`)**: Headless CLI command querying real-time train departures and arrivals for any Greek railway station with Greek/Latin diacritic-tolerant fuzzy search, service type filtering, and `--json` export.
 - **Train Timetable & Intermediate Stop Inspector (`railmon schedule` / `i` in TUI)**: Inspect the complete scheduled itinerary of any commercial train, displaying intermediate calling points, planned versus actual times, scheduled dwell durations, and platform tracks.
+- **Live Locomotive Forward Cab Video Stream Launcher (`railmon cab` / `w` in TUI)**: Launch real-time forward cab camera video feeds (HLS) in an external video player (`mpv`, `ffplay`, `vlc`, or default web browser) directly from the terminal or shell.
 - **Historical Telemetry Recording & Analytics**:
   - Embedded zero-dependency SQLite persistence with Write-Ahead Logging (WAL) for non-blocking concurrent reading and writing.
   - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.
@@ -149,6 +150,13 @@ railmon schedule "IC 52"               # Intercity Athens -> Thessaloniki
 railmon schedule 1597 --ascii          # 7-bit ASCII table fallback
 railmon schedule 1597 --json           # Output structured JSON
 railmon schedule 1597 --demo           # Offline mock simulation
+
+# Launch live forward cab video stream
+./railmon cab 1597                     # Launch cab view in auto-detected player
+railmon cab "IC 52" --url-only         # Print raw HLS stream URL to stdout
+railmon cab 1597 --browser             # Open stream in default web browser
+railmon cab 1597 --json                # Output structured stream metadata JSON
+railmon cab 1597 --demo                # Offline mock simulation
 ```
 
 ### Historical Recording & Terminal Analytics
@@ -193,6 +201,7 @@ railmon schedule 1597 --demo           # Offline mock simulation
 | `b` | Toggle historical breadcrumb trails |
 | `s` | Cycle train roster sorting (Train ID, Speed, Delay) |
 | `i` / `I` | Inspect full timetable & intermediate stops for selected train |
+| `w` / `W` | Launch live locomotive forward cab video stream (`mpv`/`ffplay`/browser) |
 | `m` / `M` | Cycle Station Departure Board & Proximity Inspector / Return to train view |
 | `/` | Filter trains by number, name, or station query |
 | `?` | Show interactive Keyboard Controls modal |

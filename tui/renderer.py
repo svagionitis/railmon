@@ -1883,6 +1883,11 @@ class TUIRenderer:
         )
         coords_str = format_wgs84_coords(pos.lat, pos.lng, ascii_mode=self.ascii_mode)
 
+        has_cam = any(
+            k in str(pos.train_number or "").upper() for k in ("IC", "159", "223", "131")
+        ) or (pos.train_type in ("Intercity", "Proastiakos", "Suburban"))
+        cam_display = "ONLINE [w]" if has_cam else "UNAVAILABLE"
+
         rows = [
             ("Train No:", f"{pos.train_number or pos.id} ({pos.train_type or 'Passenger'})", val_attr),
             ("Route:", route_str, val_attr),
@@ -1895,6 +1900,7 @@ class TUIRenderer:
             ("Coordinates:", coords_str, val_attr),
             ("Heading:", compass_str, val_attr),
             ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
+            ("Cab Camera:", cam_display, val_attr),
             ("Status:", f"{pos.status or 'In Service'}", val_attr),
             ("Chainage:", chainage_str, val_attr),
         ]
@@ -1986,7 +1992,7 @@ class TUIRenderer:
             )
         return (
             f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
-            f"[e] Export  [i] Timetable  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
+            f"[e] Export  [i] Timetable  [w] Cab View  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [/] Filter  [?] Help  [0..3] Presets"
         )
 
     def render_status_bar(
@@ -2137,6 +2143,7 @@ class TUIRenderer:
                 ("b / B", "Cycle breadcrumb trails (All, Selected, Off)"),
                 ("m / M", "Cycle station departure board / Return to train view"),
                 ("i / I", "Inspect timetable & intermediate stops for selected train"),
+                ("w / W", "Launch live locomotive forward cab video stream"),
                 ("f / F, Dbl-Click", "Toggle auto-follow camera lock (or recenter map)"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),

@@ -217,6 +217,10 @@ class TUIApp:
         self.toast_expiry: float = 0.0
         self.toast_is_error: bool = False
 
+        # Cab video stream asynchronous launcher debounce state (F-7.1)
+        self._stream_launch_lock: threading.Lock = threading.Lock()
+        self._active_stream_launches: set = set()
+
         # Render cycle optimization & dirty-checking state
         self._force_redraw: bool = True
         self._last_rendered_version: Optional[int] = None
@@ -747,6 +751,34 @@ class TUIApp:
             return True
         return False
 
+    def _handle_navigation_input(self, key: int) -> bool:
+        """Handle panning, zooming, and corridor preset shortcuts."""
+        step_x = max(2, int(self.projector.viewport.width_cells * 0.08))
+        step_y = max(1, int(self.projector.viewport.height_cells * 0.08))
+
+        if key in (ord("h"), curses.KEY_LEFT):
+            self.pan(-step_x, 0)
+            return True
+        elif key in (ord("l"), curses.KEY_RIGHT):
+            self.pan(step_x, 0)
+            return True
+        elif key in (ord("k"), curses.KEY_UP):
+            self.pan(0, -step_y)
+            return True
+        elif key in (ord("j"), curses.KEY_DOWN):
+            self.pan(0, step_y)
+            return True
+        elif key in ZOOM_IN_KEYS:
+            self.zoom(1.25)
+            return True
+        elif key in ZOOM_OUT_KEYS:
+            self.zoom(1.0 / 1.25)
+            return True
+        elif key in PRESET_CONFIGS:
+            self.apply_preset(key)
+            return True
+        return False
+
     def _handle_normal_input(self, key: int) -> bool:
         """Handle input event in NORMAL navigation mode.
 
@@ -760,28 +792,9 @@ class TUIApp:
         if key in (ord("q"), ord("Q"), 27, 3):  # 'q', 'Q', ESC, or Ctrl+C
             return False
 
-        # Pan calculations (step sized ~8% of viewport dimensions)
-        step_x = max(2, int(self.projector.viewport.width_cells * 0.08))
-        step_y = max(1, int(self.projector.viewport.height_cells * 0.08))
-
-        if key in (ord("h"), curses.KEY_LEFT):
-            self.pan(-step_x, 0)
-        elif key in (ord("l"), curses.KEY_RIGHT):
-            self.pan(step_x, 0)
-        elif key in (ord("k"), curses.KEY_UP):
-            self.pan(0, -step_y)
-        elif key in (ord("j"), curses.KEY_DOWN):
-            self.pan(0, step_y)
-
-        # Zoom scaling (supports top-row +/- and Windows/PDCurses numpad +/-)
-        elif key in ZOOM_IN_KEYS:
-            self.zoom(1.25)
-        elif key in ZOOM_OUT_KEYS:
-            self.zoom(1.0 / 1.25)
-
-        # Preset shortcuts (0, 1, 2, 3)
-        elif key in PRESET_CONFIGS:
-            self.apply_preset(key)
+        # Panning, zooming, and corridor preset navigation
+        if self._handle_navigation_input(key):
+            return True
 
         # Train selection cycling
         elif key in (ord("\t"), ord("n")):
@@ -822,6 +835,10 @@ class TUIApp:
         # Toggle Train Timetable & Intermediate Stop Inspector modal (F-6.2)
         elif key in (ord("i"), ord("I")):
             self.toggle_timetable_modal()
+
+        # Launch Live Locomotive Forward Cab Video Stream (F-7.1)
+        elif key in (ord("w"), ord("W")):
+            self.launch_cab_stream_for_selected_train()
 
         # Tier 4 export ('e'/'E') & DVR timeline scrubbing / speed ('[', ']', '<', '>')
         elif self._handle_dvr_and_export_input(key):
@@ -1058,6 +1075,69 @@ class TUIApp:
             self._force_redraw = True
 
         return True
+
+    # ------------------------------------------------------------------
+    # Live Locomotive Forward Cab Video Stream Launcher (F-7.1)
+    # ------------------------------------------------------------------
+
+    def launch_cab_stream_for_selected_train(self) -> None:
+        """Trigger asynchronous resolution and external player launch for selected train."""
+        snapshot = self.store.get_snapshot()
+        if not snapshot.selected_train:
+            self._set_toast("Select a train first to launch cab video stream", is_error=True)
+            return
+
+        train_num = str(
+            snapshot.selected_train.position.train_number
+            or snapshot.selected_train.position.id
+        ).strip()
+
+        is_demo_or_replay = (
+            getattr(snapshot, "is_replay", False)
+            or (hasattr(self.worker, "mock_engine") and getattr(self.worker, "mock_engine") is not None)
+            or getattr(self.worker, "client", None) is None
+        )
+
+        with self._stream_launch_lock:
+            if train_num in self._active_stream_launches:
+                self._set_toast(f"Cab stream launch already in progress for train {train_num}")
+                return
+            self._active_stream_launches.add(train_num)
+
+        self._set_toast(f"Resolving cab stream: {train_num}...")
+
+        client = getattr(self.worker, "client", None)
+        if not is_demo_or_replay and client is None:
+            from train_tracker import RailwayGovClient
+            client = RailwayGovClient()
+
+        def _worker() -> None:
+            try:
+                if is_demo_or_replay:
+                    from tui.mock_engine import generate_mock_cab_stream
+                    info = generate_mock_cab_stream(train_num)
+                else:
+                    info = client.get_cab_stream_url(train_num)
+
+                if not info.has_stream or not info.playlist_url:
+                    err = info.error_message or f"No forward cab video stream available for train {train_num}"
+                    self._set_toast(f"⚠ {err}", is_error=True)
+                    return
+
+                from train_tracker import launch_cab_stream
+                success, player, msg = launch_cab_stream(info)
+                if success:
+                    self._set_toast(f"✓ Launched cab stream ({player}): {train_num}", is_error=False)
+                else:
+                    self._set_toast(f"✗ Failed to launch player: {msg}", is_error=True)
+            except Exception as exc:
+                self._set_toast(f"✗ Cab stream error: {str(exc)}", is_error=True)
+            finally:
+                with self._stream_launch_lock:
+                    self._active_stream_launches.discard(train_num)
+
+        thread = threading.Thread(target=_worker, name=f"cab-stream-{train_num}", daemon=True)
+        thread.start()
 
     # ------------------------------------------------------------------
     # Mouse Interaction & Spatial Hit-Testing (F-3.1)

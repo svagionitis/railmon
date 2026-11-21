@@ -15,14 +15,18 @@ import logging.handlers
 import math
 import os
 import random
+import re
+import shutil
 import signal
 import ssl
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Generator, List, Optional, Tuple
 
@@ -485,6 +489,292 @@ class TrainPosition:
         )
 
 
+@dataclass(frozen=True)
+class CabStreamInfo:
+    """Metadata describing a live locomotive forward cab video stream."""
+
+    train_number: str
+    has_stream: bool
+    status: str  # "ONLINE", "OFFLINE", "UNAVAILABLE", "ERROR"
+    stream_type: str = "hls"
+    playlist_url: Optional[str] = None
+    locomotive_id: Optional[str] = None
+    camera_position: str = "FORWARD_CAB"
+    resolution: Optional[str] = None
+    fps: Optional[int] = None
+    bitrate_kbps: Optional[int] = None
+    latency_sec: Optional[float] = None
+    error_message: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert CabStreamInfo to a serializable dictionary."""
+        return {
+            "trainNumber": self.train_number,
+            "locomotiveId": self.locomotive_id,
+            "hasStream": self.has_stream,
+            "status": self.status,
+            "cameraPosition": self.camera_position,
+            "streamType": self.stream_type,
+            "playlistUrl": self.playlist_url,
+            "resolution": self.resolution,
+            "fps": self.fps,
+            "bitrateKbps": self.bitrate_kbps,
+            "latencySec": self.latency_sec,
+            "errorMessage": self.error_message,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], default_train_number: str = "") -> "CabStreamInfo":
+        """Construct CabStreamInfo defensively from an API payload dictionary."""
+        raw_has_stream = data.get("hasStream", False)
+        raw_url = data.get("playlistUrl") or data.get("url")
+        has_stream = bool(raw_has_stream and raw_url)
+        status = str(data.get("status", "ONLINE" if has_stream else "UNAVAILABLE")).upper()
+        return cls(
+            train_number=str(data.get("trainNumber") or default_train_number),
+            has_stream=has_stream,
+            status=status,
+            stream_type=str(data.get("streamType", "hls")).lower(),
+            playlist_url=str(raw_url) if raw_url else None,
+            locomotive_id=str(data["locomotiveId"]) if data.get("locomotiveId") else None,
+            camera_position=str(data.get("cameraPosition", "FORWARD_CAB")),
+            resolution=str(data["resolution"]) if data.get("resolution") else None,
+            fps=_safe_optional_int(data.get("fps")),
+            bitrate_kbps=_safe_optional_int(data.get("bitrateKbps")),
+            latency_sec=_safe_optional_float(data.get("latencySec")),
+            error_message=str(data["message"]) if data.get("message") else None,
+        )
+
+    @classmethod
+    def unavailable(cls, train_number: str, message: str = "No video stream available.") -> "CabStreamInfo":
+        """Factory for unavailable stream response."""
+        return cls(
+            train_number=train_number,
+            has_stream=False,
+            status="UNAVAILABLE",
+            error_message=message,
+        )
+
+
+def validate_stream_url(url: str) -> str:
+    """Validate that stream URL strictly uses http or https scheme.
+
+    Args:
+        url: URL string to validate.
+
+    Returns:
+        Validated URL string.
+
+    Raises:
+        ValueError: If scheme is not http or https, or URL is malformed.
+    """
+    clean_url = (url or "").strip()
+    if not clean_url:
+        raise ValueError("Stream URL must not be empty.")
+    parts = urllib.parse.urlsplit(clean_url)
+    if parts.scheme.lower() not in ("http", "https"):
+        raise ValueError(
+            f"Insecure or invalid stream URL scheme: '{parts.scheme}'. Only http and https are allowed."
+        )
+    if not parts.netloc:
+        raise ValueError(f"Invalid stream URL missing hostname: '{clean_url}'")
+    return clean_url
+
+
+def sanitize_train_identifier(identifier: str) -> str:
+    """Sanitize train number or identifier against command injection.
+
+    Args:
+        identifier: Train number or identifier string.
+
+    Returns:
+        Sanitized train number string.
+
+    Raises:
+        ValueError: If train number contains illegal characters or is empty.
+    """
+    clean_id = (identifier or "").strip()
+    if not clean_id or not re.match(r"^[A-Za-z0-9\- ]{1,32}$", clean_id):
+        raise ValueError(
+            f"Invalid train identifier: '{identifier}'. Must be 1-32 alphanumeric characters, dashes, or spaces."
+        )
+    return clean_id
+
+
+def detect_video_player(preferred_player: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    """Detect available media player executable in prioritized order.
+
+    Priority:
+        1. Preferred override (preferred_player or RAILMON_PLAYER env var)
+        2. mpv
+        3. ffplay
+        4. vlc
+        5. browser fallback
+
+    Returns:
+        Tuple of (player_name, binary_path). If player is browser, binary_path is None.
+    """
+    override = preferred_player or os.environ.get("RAILMON_PLAYER")
+    if override:
+        clean_override = override.strip()
+        if clean_override.lower() == "browser":
+            return ("browser", None)
+        path = shutil.which(clean_override)
+        if path:
+            return (clean_override.lower(), path)
+        if os.path.isfile(clean_override) and os.access(clean_override, os.X_OK):
+            return (os.path.basename(clean_override).lower(), clean_override)
+
+    for player in ("mpv", "ffplay", "vlc"):
+        path = shutil.which(player)
+        if path:
+            return (player, path)
+
+    return ("browser", None)
+
+
+def build_player_command(
+    player_name: str,
+    binary_path: Optional[str],
+    playlist_url: str,
+    train_number: str,
+) -> List[str]:
+    """Construct argument list for external media player execution.
+
+    Args:
+        player_name: Name of player ('mpv', 'ffplay', 'vlc', or custom).
+        binary_path: Resolved binary path or command name.
+        playlist_url: Validated HLS playlist URL.
+        train_number: Clean train number string.
+
+    Returns:
+        List of command arguments.
+    """
+    exe = binary_path or player_name
+    title = f"railmon: {train_number} Forward Cab View"
+    p_lower = player_name.lower()
+
+    if "mpv" in p_lower:
+        return [
+            exe,
+            f"--title={title}",
+            "--geometry=960x540-20+40",
+            "--no-terminal",
+            "--force-window=yes",
+            "--ontop",
+            playlist_url,
+        ]
+    elif "ffplay" in p_lower:
+        return [
+            exe,
+            "-window_title",
+            title,
+            "-autoexit",
+            "-loglevel",
+            "error",
+            "-x",
+            "960",
+            "-y",
+            "540",
+            playlist_url,
+        ]
+    elif "vlc" in p_lower:
+        return [
+            exe,
+            f"--meta-title={title}",
+            "--play-and-exit",
+            "--video-on-top",
+            playlist_url,
+        ]
+    else:
+        return [exe, playlist_url]
+
+
+def launch_detached_player(
+    cmd_args: List[str],
+    is_windows: Optional[bool] = None,
+) -> subprocess.Popen[Any]:
+    """Launch a media player subprocess fully detached from the terminal session.
+
+    Args:
+        cmd_args: List of command arguments.
+        is_windows: Optional platform override (defaults to sys.platform == 'win32').
+
+    Returns:
+        Running subprocess.Popen instance.
+    """
+    if is_windows is None:
+        is_windows = (sys.platform == "win32")
+
+    if is_windows:
+        detached_flags = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        )
+        return subprocess.Popen(
+            cmd_args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=detached_flags,
+            close_fds=True,
+        )
+    else:
+        return subprocess.Popen(
+            cmd_args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+
+
+def launch_cab_stream(
+    stream_info: CabStreamInfo,
+    preferred_player: Optional[str] = None,
+) -> Tuple[bool, str, str]:
+    """Orchestrate player detection, validation, and detached playback launch.
+
+    Args:
+        stream_info: Populated CabStreamInfo with valid playlist URL.
+        preferred_player: Optional player executable name or 'browser'.
+
+    Returns:
+        Tuple of (success: bool, player_name: str, message: str).
+    """
+    if not stream_info.has_stream or not stream_info.playlist_url:
+        return (False, "none", stream_info.error_message or "No stream available.")
+
+    try:
+        url = validate_stream_url(stream_info.playlist_url)
+        train_num = sanitize_train_identifier(stream_info.train_number)
+    except ValueError as exc:
+        return (False, "invalid", str(exc))
+
+    player_name, binary_path = detect_video_player(preferred_player)
+
+    if player_name == "browser":
+        try:
+            opened = webbrowser.open(url)
+            if opened:
+                return (True, "browser", f"Opened stream in default web browser for train {train_num}.")
+            return (False, "browser", "Failed to launch default web browser.")
+        except Exception as exc:
+            return (False, "browser", f"Web browser launch error: {str(exc)}")
+
+    try:
+        cmd = build_player_command(player_name, binary_path, url, train_num)
+        launch_detached_player(cmd)
+        return (True, player_name, f"Launched {player_name} for train {train_num}.")
+    except Exception as exc:
+        try:
+            webbrowser.open(url)
+            return (True, "browser", f"Player '{player_name}' failed ({exc}); fell back to web browser.")
+        except Exception:
+            return (False, player_name, f"Failed to execute '{player_name}': {str(exc)}")
+
+
 class RailwayGovClient:
     """Client for the Hellenic Railways train-tracker APIs."""
 
@@ -614,6 +904,41 @@ class RailwayGovClient:
         """Fetch GeoJSON rail network features (stations, tracks, signals)."""
         res = self._get("/api/msd/geo", {"mode": "public", "types": types, "limit": limit})
         return res if isinstance(res, dict) else {}
+
+    def get_cab_stream_url(self, train_id_or_number: str) -> CabStreamInfo:
+        """Fetch live locomotive forward cab stream metadata for a train.
+
+        Args:
+            train_id_or_number: Train ID or commercial train number (e.g. '1597', 'IC52').
+
+        Returns:
+            CabStreamInfo populated with playlist URL and status.
+        """
+        clean_id = urllib.parse.quote(str(train_id_or_number).strip())
+        try:
+            payload = self._get(f"/api/public/trains/{clean_id}/stream")
+            if isinstance(payload, dict):
+                return CabStreamInfo.from_dict(payload, default_train_number=train_id_or_number)
+            return CabStreamInfo.unavailable(train_id_or_number, "Invalid stream response format.")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return CabStreamInfo.unavailable(
+                    train_id_or_number,
+                    f"No forward cab camera installed or stream active for train {train_id_or_number}.",
+                )
+            return CabStreamInfo(
+                train_number=str(train_id_or_number),
+                has_stream=False,
+                status="ERROR",
+                error_message=f"HTTP {exc.code}: {exc.reason}",
+            )
+        except Exception as exc:
+            return CabStreamInfo(
+                train_number=str(train_id_or_number),
+                has_stream=False,
+                status="ERROR",
+                error_message=f"Network error: {str(exc)}",
+            )
 
     @staticmethod
     def _decode_sse_positions(payload_str: str) -> Optional[List[TrainPosition]]:
@@ -1011,6 +1336,55 @@ Examples:
         help="Run in offline mock mode with synthetic station timetables.",
     )
     p_dep.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
+    # 5. cab (F-7.1)
+    p_cab = subparsers.add_parser(
+        "cab",
+        aliases=["stream-cab"],
+        help="Launch or inspect live locomotive forward cab video stream.",
+        description="Resolve and launch real-time forward cab camera video feeds for active trains.",
+    )
+    p_cab.add_argument(
+        "train_number",
+        type=str,
+        help="Commercial train number or ID (e.g. '1597', 'IC52', '1599').",
+    )
+    p_cab.add_argument(
+        "--player",
+        type=str,
+        default=None,
+        help="Force player executable (e.g. 'mpv', 'ffplay', 'vlc', 'browser').",
+    )
+    p_cab.add_argument(
+        "--url-only",
+        action="store_true",
+        default=False,
+        help="Print raw HLS playlist URL (.m3u8) to stdout and exit.",
+    )
+    p_cab.add_argument(
+        "--browser",
+        action="store_true",
+        default=False,
+        help="Launch video stream directly in default web browser.",
+    )
+    p_cab.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured stream metadata JSON to stdout.",
+    )
+    p_cab.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Run in offline mock mode with simulated camera feeds.",
+    )
+    p_cab.add_argument(
         "--ascii",
         action="store_true",
         default=argparse.SUPPRESS,
@@ -2007,6 +2381,71 @@ def run_schedule_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_cab_stream_mode(args: argparse.Namespace) -> int:
+    """Handle the 'cab' CLI subcommand execution.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code: 0 on success, 1 on error or stream unavailable.
+    """
+    train_num = getattr(args, "train_number", "").strip()
+    if not train_num:
+        sys.stderr.write("Error: Missing required argument: train_number\n")
+        return 1
+
+    demo = bool(getattr(args, "demo", False))
+    preferred_player = getattr(args, "player", None)
+    url_only = bool(getattr(args, "url_only", False))
+    use_browser = bool(getattr(args, "browser", False))
+    output_json = bool(getattr(args, "json", False))
+    is_ascii = bool(getattr(args, "ascii", False))
+
+    if use_browser:
+        preferred_player = "browser"
+
+    if demo:
+        from tui.mock_engine import generate_mock_cab_stream
+        stream_info = generate_mock_cab_stream(train_num)
+    else:
+        client = RailwayGovClient()
+        stream_info = client.get_cab_stream_url(train_num)
+
+    if output_json:
+        sys.stdout.write(json.dumps(stream_info.to_dict(), indent=2, ensure_ascii=is_ascii) + "\n")
+        return 0 if stream_info.has_stream else 1
+
+    if url_only:
+        if stream_info.has_stream and stream_info.playlist_url:
+            sys.stdout.write(f"{stream_info.playlist_url}\n")
+            return 0
+        else:
+            sys.stderr.write(f"No active stream for train {train_num}: {stream_info.error_message or 'Unavailable'}\n")
+            return 1
+
+    # Standard console launch
+    sys.stdout.write(f"Resolving forward cab video stream for Train {train_num}...\n")
+    if not stream_info.has_stream or not stream_info.playlist_url:
+        sys.stderr.write(f"Error: {stream_info.error_message or 'No stream available.'}\n")
+        return 1
+
+    ok_glyph = "[OK]" if is_ascii else "✓"
+    sys.stdout.write(
+        f"{ok_glyph} Stream Online: {stream_info.stream_type.upper()} "
+        f"({stream_info.resolution or 'HD'} @ {stream_info.fps or 30}fps"
+        f"{f', {stream_info.bitrate_kbps} kbps' if stream_info.bitrate_kbps else ''})\n"
+    )
+
+    success, player_name, msg = launch_cab_stream(stream_info, preferred_player=preferred_player)
+    if success:
+        sys.stdout.write(f"{ok_glyph} {msg}\n")
+        return 0
+    else:
+        sys.stderr.write(f"Error: {msg}\n")
+        return 1
+
+
 def _configure_win32_utf8_console() -> None:
     """Configure Windows console codepage and standard streams for UTF-8 output."""
     if sys.platform != "win32":
@@ -2071,6 +2510,9 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode in ("cab", "stream-cab"):
+        return run_cab_stream_mode(args)
+
     if args.mode == "departures":
         return run_departures_mode(args)
 

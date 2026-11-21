@@ -1384,3 +1384,45 @@ class MockTelemetryEngine:
     def set_time_scale(self, scale: float) -> None:
         """Adjust simulation time scaling factor."""
         self.time_scale = max(0.1, scale)
+
+
+def generate_mock_cab_stream(train_number: str) -> Any:
+    """Generate synthetic forward cab stream metadata for offline simulation.
+
+    Args:
+        train_number: Commercial train number (e.g. '1597', 'IC52').
+
+    Returns:
+        CabStreamInfo populated with synthetic stream parameters.
+    """
+    from train_tracker import CabStreamInfo
+
+    clean_num = str(train_number).strip().upper()
+    compact = clean_num.replace(" ", "").replace("-", "")
+
+    # Modern EMUs and high-speed trainsets equipped with forward cameras
+    has_cam = any(
+        k in compact for k in ("IC52", "IC54", "1597", "1599", "2232", "2236", "2238", "1314")
+    ) or (compact.isdigit() and int(compact) in (1597, 1599, 2232, 2236, 1314))
+
+    if not has_cam:
+        return CabStreamInfo.unavailable(
+            train_number=train_number,
+            message=f"Locomotive operating train {train_number} is not equipped with an active forward video stream.",
+        )
+
+    loco_id = "120-024" if ("52" in compact or "54" in compact) else ("460-105" if "15" in compact else "220-031")
+    return CabStreamInfo(
+        train_number=train_number,
+        has_stream=True,
+        status="ONLINE",
+        stream_type="hls",
+        playlist_url=f"https://stream.railway.gov.gr/hls/mock-loco-{loco_id.replace('-', '')}/live.m3u8",
+        locomotive_id=loco_id,
+        camera_position="FORWARD_CAB",
+        resolution="1080p",
+        fps=30,
+        bitrate_kbps=4500,
+        latency_sec=1.8,
+    )
+

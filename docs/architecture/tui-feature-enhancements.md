@@ -28,7 +28,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 6 (Commuter)** | **F-6.1** | CLI Station Departure & Arrival Boards | `railmon departures` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
 | **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
-| **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
@@ -743,13 +743,15 @@ Enhances spatial realism, infrastructure rendering, and visual ergonomics across
 
 ---
 
-### F-7.1: Live Locomotive Forward Cab Video Stream Launcher (`w` / `W`) — *Planned*
+### F-7.1: Live Locomotive Forward Cab Video Stream Launcher (`w` / `W`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md`](../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md)
 
 #### Overview
-Hellenic Railways operates forward-facing locomotive cameras on several modern trainsets, streaming via HLS at `/api/public/trains/{id}/stream`.
-Pressing `w` resolves the HLS `.m3u8` playlist URL for the currently selected train and launches an external lightweight video player (`mpv`, `ffplay`, or system browser) in a detached subprocess without interrupting TUI rendering.
+Hellenic Railways operates forward-facing locomotive cameras on several modern trainsets (Siemens Desiro Electric 460 EMU, HellasSprinter 120, Alstom ETR 470), streaming live HLS at `/api/public/trains/{id}/stream`.
+Pressing `w` or `W` resolves the HLS `.m3u8` playlist URL for the currently selected train and launches an external lightweight video player (`mpv`, `ffplay`, `vlc`, or default web browser) in a detached asynchronous subprocess without interrupting Curses TUI rendering.
 
-#### Subprocess Launch Flow
+#### Subprocess Launch Flow (Mermaid)
 ```mermaid
 sequenceDiagram
     autonumber
@@ -763,6 +765,38 @@ sequenceDiagram
     Client-->>App: { streamType: "hls", playlistUrl: "..." }
     App->>MPV: subprocess.Popen(["mpv", "--title=railmon: IC52", url])
     App->>App: Show status bar toast: "[✓ Launched Cab Stream (mpv)]"
+```
+
+#### ASCII Architecture Diagram
+```text
++---------------------+      Key 'w' / 'W'     +---------------------+
+|       TUIApp        | ---------------------> |  Background Worker  |
+|  (Curses Main Loop) |                        | (Daemon Thread)     |
++---------------------+                        +---------------------+
+           ^                                              |
+           | Toast: "[✓ Launched Cab Stream (mpv)]"       | 1. get_cab_stream_url()
+           |                                              v
++---------------------+                        +---------------------+
+|  Status Bar Toast   | <--------------------- |  RailwayGovClient   |
++---------------------+                        +---------------------+
+                                                          | 2. detect_video_player()
+                                                          v
+                                               +---------------------+
+                                               | Detached Subprocess |
+                                               | (mpv / ffplay / vlc)|
+                                               +---------------------+
+```
+
+#### CLI Syntax & Usage
+```bash
+# Launch cab video stream for train 1597 in auto-detected player
+railmon cab 1597
+
+# Query raw HLS stream URL without launching player
+railmon cab 1597 --url-only
+
+# Emit machine-readable stream metadata JSON
+railmon cab 1597 --json
 ```
 
 ---
