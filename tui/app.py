@@ -260,6 +260,8 @@ class TUIApp:
         self.stations = stations
         self.tracks = tracks
         self.infrastructure = infrastructure
+        self.store.set_stations(self.stations)
+        self._prev_sensor_alert_count: int = 0
 
         # Initialize renderer and viewport projector
         self.renderer = TUIRenderer(
@@ -1715,6 +1717,17 @@ class TUIApp:
                 if snapshot.watched_train_ids and (frame_start - self._last_watch_eval_ts) >= 1.0:
                     self._last_watch_eval_ts = frame_start
                     self._evaluate_in_tui_watch_alerts(snapshot)
+
+                # 3c. Terminal bell audio trigger on new sensor health alerts (F-5.2)
+                curr_sensor_alerts = getattr(snapshot, "frozen_count", 0) + getattr(snapshot, "dropped_count", 0)
+                if curr_sensor_alerts > self._prev_sensor_alert_count:
+                    try:
+                        from watchdog import dispatch_terminal_bell
+
+                        dispatch_terminal_bell()
+                    except (OSError, RuntimeError, ImportError) as exc:
+                        logger.debug("Failed to dispatch terminal bell on sensor health alert: %s", exc)
+                self._prev_sensor_alert_count = curr_sensor_alerts
 
                 # 4. Extract current signatures for dirty check
                 current_sec = (

@@ -997,9 +997,12 @@ class SimulatedTrain:
     dwell_timer_sec: float = 0.0
     delay_minutes: int = 0
     next_station_name: str = ""
+    is_telemetry_dropped: bool = False
+    is_sensor_frozen: bool = False
     _time_since_delay_update: float = field(default=0.0, init=False, repr=False)
     _initial_distance_m: float = field(default=0.0, init=False, repr=False)
     _initial_direction: int = field(default=1, init=False, repr=False)
+    _frozen_coords: Optional[Tuple[float, float]] = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._initial_distance_m = self.current_distance_m
@@ -1420,9 +1423,35 @@ class MockTelemetryEngine:
         effective_dt = dt_sec * self.time_scale
         positions = []
         for train in self.trains:
+            if getattr(train, "is_telemetry_dropped", False):
+                continue
             pos = train.step(effective_dt)
+            if getattr(train, "is_sensor_frozen", False):
+                if getattr(train, "_frozen_coords", None) is None:
+                    train._frozen_coords = (pos.lat, pos.lng)
+                pos.lat, pos.lng = train._frozen_coords
+            else:
+                train._frozen_coords = None
             positions.append(pos)
         return positions
+
+    def simulate_telemetry_drop(self, train_id: str, dropped: bool = True) -> bool:
+        """Toggle telemetry drop simulation for designated train."""
+        for train in self.trains:
+            if train.id == train_id or train.train_number == train_id:
+                train.is_telemetry_dropped = dropped
+                return True
+        return False
+
+    def simulate_sensor_freeze(self, train_id: str, frozen: bool = True) -> bool:
+        """Toggle coordinate sensor freeze simulation for designated train."""
+        for train in self.trains:
+            if train.id == train_id or train.train_number == train_id:
+                train.is_sensor_frozen = frozen
+                if not frozen:
+                    train._frozen_coords = None
+                return True
+        return False
 
     def stream_positions(
         self,

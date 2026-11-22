@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 import threading
 import time
-from typing import Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from train_tracker import TrainPosition
 from tui.geo import (
@@ -18,8 +18,11 @@ from tui.geo import (
     OverspeedSeverity,
     PATHE_PRESET,
     PROASTIAKOS_PRESET,
+    SensorHealthAssessment,
+    SensorHealthState,
     SlowOrder,
     SpeedEnforcementResult,
+    evaluate_sensor_health,
     evaluate_train_speed,
 )
 from tui.theme import ThemeProfile, get_next_theme
@@ -150,6 +153,10 @@ class TrainRecord:
     last_updated: float = field(default_factory=time.time)
     update_count: int = 1
     speed_result: Optional[SpeedEnforcementResult] = None
+    last_moved_pt: Optional[GeoPoint] = None
+    last_moved_time: float = field(default_factory=time.time)
+    station_dwell_start: Optional[float] = None
+    sensor_health: Optional[SensorHealthAssessment] = None
 
     def clone(self) -> "TrainRecord":
         """Create a thread-isolated shallow copy with an independent trail deque."""
@@ -160,6 +167,10 @@ class TrainRecord:
             last_updated=self.last_updated,
             update_count=self.update_count,
             speed_result=self.speed_result,
+            last_moved_pt=self.last_moved_pt,
+            last_moved_time=self.last_moved_time,
+            station_dwell_start=self.station_dwell_start,
+            sensor_health=self.sensor_health,
         )
 
     def append_breadcrumb(
@@ -255,6 +266,12 @@ class StateSnapshot:
     overspeed_count: int = 0
     active_tsr_count: int = 0
     overspeed_train_ids: Tuple[str, ...] = ()
+    selected_sensor_health: Optional[SensorHealthAssessment] = None
+    frozen_count: int = 0
+    dropped_count: int = 0
+    stale_count: int = 0
+    frozen_train_ids: Tuple[str, ...] = ()
+    dropped_train_ids: Tuple[str, ...] = ()
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -432,6 +449,15 @@ class TrainStateStore:
             self._speed_rules = dict(DEFAULT_CORRIDOR_SPEED_RULES)
             self._active_tsrs = []
 
+        # Station catalog for F-5.2 Sensor Health
+        self._stations: List[Any] = []
+        try:
+            from tui.mock_engine import load_stations
+
+            self._stations = list(load_stations().values())
+        except (OSError, ValueError, KeyError, TypeError):
+            self._stations = []
+
     # ------------------------------------------------------------------
     # Telemetry Ingestion (Called by StreamWorker / ReplayWorker Thread)
     # ------------------------------------------------------------------
@@ -453,7 +479,31 @@ class TrainStateStore:
             rec = self._trains[pos.id]
             rec.append_breadcrumb(pos, now=ts)
             rec.speed_result = speed_res
+            health, new_moved_pt, new_moved_time, new_dwell_start = evaluate_sensor_health(
+                point=pt,
+                current_speed=pos.speed,
+                last_updated=ts,
+                last_moved_pt=rec.last_moved_pt,
+                last_moved_time=rec.last_moved_time,
+                station_dwell_start=rec.station_dwell_start,
+                stations=self._stations,
+                now=ts,
+            )
+            rec.last_moved_pt = new_moved_pt
+            rec.last_moved_time = new_moved_time
+            rec.station_dwell_start = new_dwell_start
+            rec.sensor_health = health
         else:
+            health, new_moved_pt, new_moved_time, new_dwell_start = evaluate_sensor_health(
+                point=pt,
+                current_speed=pos.speed,
+                last_updated=ts,
+                last_moved_pt=None,
+                last_moved_time=ts,
+                station_dwell_start=None,
+                stations=self._stations,
+                now=ts,
+            )
             record = TrainRecord(
                 position=pos,
                 trail=deque(maxlen=self._max_trail_len),
@@ -461,6 +511,10 @@ class TrainStateStore:
                 last_updated=ts,
                 update_count=1,
                 speed_result=speed_res,
+                last_moved_pt=new_moved_pt,
+                last_moved_time=new_moved_time,
+                station_dwell_start=new_dwell_start,
+                sensor_health=health,
             )
             record.trail.append(
                 HistoricalBreadcrumb(
@@ -630,6 +684,39 @@ class TrainStateStore:
                 )
             self._version += 1
 
+    def set_stations(self, stations: Sequence[Any]) -> None:
+        """Update reference railway station list for station dwell detection."""
+        with self._lock:
+            self._stations = list(stations)
+            self._version += 1
+
+    def evaluate_all_sensor_health(self, now: Optional[float] = None) -> None:
+        """Run temporal and kinematic health evaluation across all tracked trains."""
+        with self._lock:
+            ref_now = now if now is not None else time.time()
+            changed = False
+            for rec in self._trains.values():
+                pt = GeoPoint(lat=rec.position.lat, lng=rec.position.lng)
+                prev_state = rec.sensor_health.state if rec.sensor_health else None
+                health, new_moved_pt, new_moved_time, new_dwell_start = evaluate_sensor_health(
+                    point=pt,
+                    current_speed=rec.position.speed,
+                    last_updated=rec.last_updated,
+                    last_moved_pt=rec.last_moved_pt,
+                    last_moved_time=rec.last_moved_time,
+                    station_dwell_start=rec.station_dwell_start,
+                    stations=self._stations,
+                    now=ref_now,
+                )
+                rec.last_moved_pt = new_moved_pt
+                rec.last_moved_time = new_moved_time
+                rec.station_dwell_start = new_dwell_start
+                rec.sensor_health = health
+                if prev_state != health.state:
+                    changed = True
+            if changed:
+                self._version += 1
+
     # ------------------------------------------------------------------
     # UI State & Cursor Navigation (Called by UI Thread)
     # ------------------------------------------------------------------
@@ -640,6 +727,28 @@ class TrainStateStore:
         Operates with minimal lock hold duration.
         """
         with self._lock:
+            ref_now = (
+                self._replay_virtual_time
+                if self._is_replay and self._replay_virtual_time is not None
+                else time.time()
+            )
+            for rec in self._trains.values():
+                pt = GeoPoint(lat=rec.position.lat, lng=rec.position.lng)
+                health, new_moved_pt, new_moved_time, new_dwell_start = evaluate_sensor_health(
+                    point=pt,
+                    current_speed=rec.position.speed,
+                    last_updated=rec.last_updated,
+                    last_moved_pt=rec.last_moved_pt,
+                    last_moved_time=rec.last_moved_time,
+                    station_dwell_start=rec.station_dwell_start,
+                    stations=self._stations,
+                    now=ref_now,
+                )
+                rec.last_moved_pt = new_moved_pt
+                rec.last_moved_time = new_moved_time
+                rec.station_dwell_start = new_dwell_start
+                rec.sensor_health = health
+
             trains_copy = {tid: rec.clone() for tid, rec in self._trains.items()}
             filtered = self._compute_filtered_list(trains_copy)
 
@@ -661,7 +770,20 @@ class TrainStateStore:
                 ):
                     overspeed_ids.append(tid)
 
+            frozen_ids: List[str] = []
+            dropped_ids: List[str] = []
+            stale_cnt: int = 0
+            for tid, rec in trains_copy.items():
+                if rec.sensor_health:
+                    if rec.sensor_health.state == SensorHealthState.FROZEN:
+                        frozen_ids.append(tid)
+                    elif rec.sensor_health.state == SensorHealthState.DROPPED:
+                        dropped_ids.append(tid)
+                    elif rec.sensor_health.state == SensorHealthState.STALE:
+                        stale_cnt += 1
+
             sel_speed_res = selected_record.speed_result if selected_record else None
+            sel_sensor_health = selected_record.sensor_health if selected_record else None
 
             return StateSnapshot(
                 trains=trains_copy,
@@ -697,6 +819,12 @@ class TrainStateStore:
                 overspeed_count=len(overspeed_ids),
                 active_tsr_count=active_tsr_cnt,
                 overspeed_train_ids=tuple(overspeed_ids),
+                selected_sensor_health=sel_sensor_health,
+                frozen_count=len(frozen_ids),
+                dropped_count=len(dropped_ids),
+                stale_count=stale_cnt,
+                frozen_train_ids=tuple(frozen_ids),
+                dropped_train_ids=tuple(dropped_ids),
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:

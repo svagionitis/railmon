@@ -52,6 +52,7 @@ class WatchTriggerType(str, Enum):
     PROXIMITY_ETA = "proximity_eta"
     ARRIVAL = "arrival"
     TELEMETRY_LOST = "telemetry_lost"
+    SENSOR_FROZEN = "sensor_frozen"
 
 
 class NotificationChannel(str, Enum):
@@ -180,6 +181,9 @@ class WatchState:
     eta_alert_fired: bool = False
     arrival_alert_fired: bool = False
     telemetry_lost_fired: bool = False
+    sensor_frozen_fired: bool = False
+    last_moved_point: Optional[GeoPoint] = None
+    last_moved_time: float = 0.0
     last_telemetry_time: float = 0.0
     last_known_speed: float = 0.0
     smoothed_speed: float = 0.0
@@ -561,6 +565,48 @@ class WatchdogEvaluator:
                         )
                     )
 
+            # ------------------------------------------------------------------
+            # Trigger 5: Sensor Freeze Detection (F-5.2)
+            # ------------------------------------------------------------------
+            if spd >= 1.0 and cur_pt is not None:
+                if st.last_moved_point is None:
+                    st.last_moved_point = cur_pt
+                    st.last_moved_time = now_ts
+                else:
+                    disp_m = haversine_distance_km(cur_pt, st.last_moved_point) * 1000.0
+                    if disp_m > 10.0:
+                        st.last_moved_point = cur_pt
+                        st.last_moved_time = now_ts
+                        st.sensor_frozen_fired = False
+                    elif not st.sensor_frozen_fired and (now_ts - st.last_moved_time) >= 45.0:
+                        st.sensor_frozen_fired = True
+                        freeze_headline = f"SENSOR FREEZE: Train {self.config.train_number} Coordinates Static"
+                        freeze_msg = (
+                            f"Train {self.config.train_number} speed is {spd:.0f} km/h but coordinates "
+                            f"have remained unchanged for {int(now_ts - st.last_moved_time)}s."
+                        )
+                        events.append(
+                            WatchAlertEvent(
+                                timestamp=now_iso,
+                                train_number=self.config.train_number,
+                                trigger_type=WatchTriggerType.SENSOR_FROZEN,
+                                headline=freeze_headline,
+                                message=freeze_msg,
+                                current_speed_kmh=spd,
+                                current_delay_min=dly,
+                                delay_delta_min=0.0,
+                                distance_to_dest_km=None,
+                                eta_dest_minutes=None,
+                                destination_name=self.config.destination_name,
+                                current_lat=lat,
+                                current_lng=lng,
+                            )
+                        )
+            else:
+                st.last_moved_point = cur_pt
+                st.last_moved_time = now_ts
+                st.sensor_frozen_fired = False
+
             st.last_point = cur_pt
             st.last_telemetry_time = now_ts
             st.total_alerts_dispatched += len(events)
@@ -800,6 +846,8 @@ def format_watch_event_line(event: WatchAlertEvent, ascii_mode: bool = False) ->
             icon = "⚠️"
         elif "PROXIMITY" in event.trigger_type.value.upper():
             icon = "📍"
+        elif event.trigger_type == WatchTriggerType.SENSOR_FROZEN:
+            icon = "❄️"
         elif event.trigger_type == WatchTriggerType.TELEMETRY_LOST:
             icon = "❌"
 
@@ -820,6 +868,8 @@ def format_watch_ticker(
     status_tag = "ACTIVE (En Route)" if state.has_departed else "WAITING DEPARTURE"
     if state.arrival_alert_fired:
         status_tag = "ARRIVED AT DESTINATION"
+    elif state.sensor_frozen_fired:
+        status_tag = "SENSOR FROZEN"
     elif state.telemetry_lost_fired:
         status_tag = "TELEMETRY LOST"
 

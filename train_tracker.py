@@ -1492,6 +1492,45 @@ Examples:
         help="Force pure 7-bit ASCII rendering fallback.",
     )
 
+    # 6c. sensor-health & telemetry watchdog (F-5.2)
+    p_health = subparsers.add_parser(
+        "sensor-health",
+        aliases=["health", "sensor_health"],
+        help="Audit fleet telemetry freshness and sensor freeze watchdog states (F-5.2).",
+        description="Query and display fleet-wide telemetry sensor health, drops, freezes, and station dwells.",
+    )
+    p_health.add_argument(
+        "--alerts-only",
+        action="store_true",
+        default=False,
+        help="Only display trains with telemetry drops, sensor freezes, or stale packets.",
+    )
+    p_health.add_argument(
+        "--corridor",
+        "-c",
+        type=str,
+        default=None,
+        help="Filter trains by corridor name or substring.",
+    )
+    p_health.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Use simulated mock fleet telemetry for diagnostic verification.",
+    )
+    p_health.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured JSON fleet health report to stdout.",
+    )
+    p_health.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
     # 7. watch (F-6.3)
     p_watch = subparsers.add_parser(
         "watch",
@@ -2866,6 +2905,84 @@ def run_slow_orders_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_sensor_health_mode(args: argparse.Namespace) -> int:
+    """Execute the headless fleet sensor health inspection CLI command (F-5.2).
+
+    Args:
+        args: Parsed CLI namespace arguments.
+
+    Returns:
+        Exit code: 0 on clean execution.
+    """
+    from tui.geo import GeoPoint, evaluate_sensor_health
+    from tui.mock_engine import MockTelemetryEngine, load_stations
+    from storage.cli_formatters import format_sensor_health_table
+
+    is_ascii = bool(getattr(args, "ascii", False))
+    corridor_filter = getattr(args, "corridor", None)
+    alerts_only = bool(getattr(args, "alerts_only", False))
+    output_json = bool(getattr(args, "json", False))
+
+    stations = list(load_stations().values())
+    now_ts = time.time()
+
+    engine = MockTelemetryEngine()
+    train_positions = engine.step(1.0)
+
+    evaluations: List[Tuple[Any, Any]] = []
+    for pos in train_positions:
+        pt = GeoPoint(lat=pos.lat, lng=pos.lng)
+        health, _, _, _ = evaluate_sensor_health(
+            point=pt,
+            current_speed=pos.speed,
+            last_updated=now_ts,
+            last_moved_pt=pt,
+            last_moved_time=now_ts,
+            station_dwell_start=None,
+            stations=stations,
+            now=now_ts,
+        )
+        evaluations.append((pos, health))
+
+    if output_json:
+        data = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now_ts)),
+            "trains": [
+                {
+                    "train_number": getattr(p, "train_number", None) or getattr(p, "id", ""),
+                    "train_type": getattr(p, "train_type", "IC"),
+                    "corridor": getattr(p, "corridor", ""),
+                    "speed_kmh": getattr(p, "speed", 0.0),
+                    "status_code": h.short_code,
+                    "health_state": h.state.value,
+                    "elapsed_sec": h.elapsed_sec,
+                    "static_duration_sec": h.static_duration_sec,
+                    "is_alert": h.is_alert,
+                    "description": h.description,
+                    "nearest_station": h.nearest_station,
+                    "dwell_duration_sec": h.dwell_duration_sec,
+                }
+                for p, h in evaluations
+                if (not corridor_filter or (
+                    corridor_filter.lower() in getattr(p, "corridor", "").lower()
+                    or corridor_filter.lower() in str(getattr(p, "train_number", "")).lower()
+                ))
+                and (not alerts_only or h.is_alert or h.state.value in ("FROZEN", "DROPPED", "STALE"))
+            ],
+        }
+        sys.stdout.write(json.dumps(data, indent=2, ensure_ascii=is_ascii) + "\n")
+        return 0
+
+    table = format_sensor_health_table(
+        assessments=evaluations,
+        alerts_only=alerts_only,
+        corridor_filter=corridor_filter,
+        ascii_mode=is_ascii,
+    )
+    sys.stdout.write(table + "\n")
+    return 0
+
+
 def _emit_watch_events(
     evaluator: Any,
     events: Sequence[Any],
@@ -3095,6 +3212,9 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode in ("sensor-health", "health", "sensor_health"):
+        return run_sensor_health_mode(args)
+
     if args.mode in ("speed-limits", "speeds", "speed_limits"):
         return run_speed_limits_mode(args)
 

@@ -989,3 +989,82 @@ def format_slow_orders_table(
     lines.append(border_char * width)
     return "\n".join(lines)
 
+
+def format_sensor_health_table(
+    assessments: Sequence[Tuple[Any, Any]],
+    alerts_only: bool = False,
+    corridor_filter: Optional[str] = None,
+    ascii_mode: bool = False,
+    title: str = "HELLENIC RAILWAYS - FLEET TELEMETRY & SENSOR HEALTH (F-5.2)",
+) -> str:
+    """Format fleet telemetry and sensor health records into an aligned table.
+
+    Args:
+        assessments: Sequence of tuples of (train_position_or_record, SensorHealthAssessment).
+        alerts_only: If True, only include trains with alerts (FROZEN, DROPPED, STALE).
+        corridor_filter: Optional corridor ID or substring filter.
+        ascii_mode: Whether to force 7-bit ASCII characters.
+        title: Table header title.
+
+    Returns:
+        Formatted multi-line table string.
+    """
+    width = 98
+    border_char = "=" if ascii_mode else "═"
+    divider_char = "-" if ascii_mode else "─"
+
+    norm_filter = corridor_filter.strip().lower() if corridor_filter else None
+
+    filtered = []
+    for train, health in assessments:
+        pos = getattr(train, "position", train)
+        corridor = getattr(pos, "corridor", "") or ""
+        train_no = str(getattr(pos, "train_number", "") or getattr(pos, "id", "") or "")
+
+        if norm_filter and norm_filter not in corridor.lower() and norm_filter not in train_no.lower():
+            continue
+
+        st_val = getattr(health.state, "value", str(health.state))
+        if alerts_only and not getattr(health, "is_alert", False) and st_val not in ("FROZEN", "DROPPED", "STALE"):
+            continue
+
+        filtered.append((pos, health))
+
+    if not filtered:
+        return "No train telemetry sensor records matching filter criteria."
+
+    lines: List[str] = [
+        border_char * width,
+        f" {title} ",
+        border_char * width,
+        f"{'TRAIN':<8} {'TYPE':<6} {'SPEED':<10} {'STATUS':<6} {'STATE':<16} {'AGE':<10} {'DETAILS':<36}",
+        divider_char * width,
+    ]
+
+    for pos, health in filtered:
+        train_no = str(getattr(pos, "train_number", None) or getattr(pos, "id", "") or "N/A")[:7]
+        train_type = str(getattr(pos, "train_type", None) or "IC")[:5]
+        spd = float(getattr(pos, "speed", 0.0) or 0.0)
+        spd_str = f"{spd:5.1f} km/h"
+        st_code = getattr(health, "short_code", "RUN")
+        state_name = getattr(health.state, "value", str(health.state))[:15]
+        age_str = f"{int(getattr(health, 'elapsed_sec', 0.0))}s ago"
+        details = str(getattr(health, "description", ""))[:35]
+
+        lines.append(
+            f"{train_no:<8} {train_type:<6} {spd_str:<10} {st_code:<6} {state_name:<16} {age_str:<10} {details:<36}"
+        )
+
+    lines.append(divider_char * width)
+    alert_count = sum(
+        1 for _, h in filtered
+        if getattr(h, "is_alert", False) or getattr(h.state, "value", str(h.state)) in ("FROZEN", "DROPPED")
+    )
+    stale_count = sum(
+        1 for _, h in filtered
+        if getattr(h.state, "value", str(h.state)) == "STALE"
+    )
+    lines.append(f"Total Trains: {len(filtered)} | Critical Alerts: {alert_count} | Stale Warnings: {stale_count}")
+    lines.append(border_char * width)
+    return "\n".join(lines)
+

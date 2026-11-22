@@ -10,6 +10,7 @@ import locale
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -1742,4 +1743,296 @@ def evaluate_train_speed(
         status_label=status_label,
         color_pair=pair,
     )
+
+
+# ---------------------------------------------------------------------------
+# Feature F-5.2: Telemetry Drop & Sensor Freezing Watchdog
+# ---------------------------------------------------------------------------
+
+
+class SensorHealthState(Enum):
+    """Classification of locomotive telematics and kinematic motion health."""
+
+    NORMAL_MOTION = "NORMAL_MOTION"  # Moving (spd >= 1 km/h), coords advancing, packet <= 30s
+    STATION_DWELL = "STATION_DWELL"  # Stopped (spd < 1 km/h), within 250m of station centroid
+    SIGNAL_HALT = "SIGNAL_HALT"  # Stopped (spd < 1 km/h), open track (> 250m from station)
+    STALE = "STALE"  # Telemetry delayed (30s < elapsed <= 120s)
+    FROZEN = "FROZEN"  # Spd >= 1 km/h, coords static for >= 45s
+    DROPPED = "DROPPED"  # Complete packet loss for >= 120s
+
+
+@dataclass(frozen=True)
+class SensorHealthAssessment:
+    """Detailed immutable assessment of a train's telemetry sensor health."""
+
+    state: SensorHealthState
+    elapsed_sec: float
+    static_duration_sec: float
+    displacement_m: float
+    current_speed_kmh: float
+    nearest_station: Optional[str] = None
+    station_distance_m: Optional[float] = None
+    dwell_duration_sec: float = 0.0
+    is_alert: bool = False
+    short_code: str = "RUN"
+    description: str = "Normal Motion"
+
+    @property
+    def is_critical(self) -> bool:
+        """True if the sensor state represents a safety anomaly (FROZEN or DROPPED)."""
+        return self.state in (SensorHealthState.FROZEN, SensorHealthState.DROPPED)
+
+
+def find_nearest_station_aabb(
+    point: GeoPoint,
+    stations: Sequence[Any],
+    max_radius_m: float = 250.0,
+) -> Tuple[Optional[Any], Optional[float]]:
+    """Find the nearest station within max_radius_m using AABB bounding-box pre-filtering.
+
+    Args:
+        point: Query geographic coordinate.
+        stations: Candidate station nodes.
+        max_radius_m: Maximum search radius in meters (default: 250.0m).
+
+    Returns:
+        Tuple of (nearest_station_node, distance_in_meters), or (None, None) if none within max_radius_m.
+    """
+    if not stations:
+        return None, None
+
+    # Precompute lat/lng bounding box degree thresholds
+    # 1 deg latitude ≈ 111,320 meters
+    delta_lat = max_radius_m / 111320.0
+    lat_rad = math.radians(point.lat)
+    cos_lat = max(0.01, math.cos(lat_rad))
+    delta_lng = max_radius_m / (111320.0 * cos_lat)
+
+    best_stn: Optional[Any] = None
+    best_dist_m: Optional[float] = None
+
+    for stn in stations:
+        stn_pt: Optional[GeoPoint] = getattr(stn, "point", None)
+        if stn_pt is None and isinstance(stn, GeoPoint):
+            stn_pt = stn
+        if stn_pt is None:
+            continue
+
+        # Fast AABB scalar pre-filter
+        if abs(point.lat - stn_pt.lat) > delta_lat or abs(point.lng - stn_pt.lng) > delta_lng:
+            continue
+
+        dist_m = haversine_distance_km(point, stn_pt) * 1000.0
+        if dist_m <= max_radius_m:
+            if best_dist_m is None or dist_m < best_dist_m:
+                best_dist_m = dist_m
+                best_stn = stn
+
+    return best_stn, best_dist_m
+
+
+def evaluate_sensor_health(
+    point: GeoPoint,
+    current_speed: Optional[float],
+    last_updated: float,
+    last_moved_pt: Optional[GeoPoint],
+    last_moved_time: float,
+    station_dwell_start: Optional[float],
+    stations: Sequence[Any],
+    now: Optional[float] = None,
+    telemetry_drop_threshold_sec: float = 120.0,
+    telemetry_stale_threshold_sec: float = 30.0,
+    sensor_freeze_threshold_sec: float = 45.0,
+    station_dwell_radius_m: float = 250.0,
+    displacement_epsilon_m: float = 10.0,
+) -> Tuple[SensorHealthAssessment, Optional[GeoPoint], float, Optional[float]]:
+    """Evaluate kinematic continuity, telemetry freshness, and station dwell.
+
+    Args:
+        point: Current train geographic location.
+        current_speed: Instantaneous velocity in km/h.
+        last_updated: Epoch timestamp of the last received position message.
+        last_moved_pt: Coordinate anchor where displacement last exceeded noise floor.
+        last_moved_time: Epoch timestamp when the train was verified to have displaced.
+        station_dwell_start: Epoch timestamp when station dwell began (if dwelling).
+        stations: Available railway station nodes.
+        now: Reference timestamp (defaults to time.time()).
+        telemetry_drop_threshold_sec: Silence threshold for DROPPED classification (120s).
+        telemetry_stale_threshold_sec: Silence threshold for STALE warning (30s).
+        sensor_freeze_threshold_sec: Static duration threshold for FROZEN classification (45s).
+        station_dwell_radius_m: Distance threshold to station centroid for DWELL classification (250m).
+        displacement_epsilon_m: GNSS multipath noise floor threshold (10m).
+
+    Returns:
+        Tuple of (Assessment, updated_last_moved_pt, updated_last_moved_time, updated_station_dwell_start).
+    """
+    ref_now = time.time() if now is None else now
+    spd = max(0.0, float(current_speed)) if current_speed is not None else 0.0
+    elapsed = max(0.0, ref_now - last_updated)
+
+    # 1. Complete Telemetry Drop Check
+    if elapsed >= telemetry_drop_threshold_sec:
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        age_label = f"{mins}m {secs}s" if mins > 0 else f"{int(elapsed)}s"
+        assessment = SensorHealthAssessment(
+            state=SensorHealthState.DROPPED,
+            elapsed_sec=elapsed,
+            static_duration_sec=max(0.0, ref_now - last_moved_time),
+            displacement_m=0.0,
+            current_speed_kmh=spd,
+            nearest_station=None,
+            station_distance_m=None,
+            dwell_duration_sec=0.0,
+            is_alert=True,
+            short_code="DRP",
+            description=f"TELEMETRY DROPPED ({age_label} silent)",
+        )
+        return assessment, last_moved_pt, last_moved_time, station_dwell_start
+
+    # 2. Kinematic Displacement & Anchor Update
+    if last_moved_pt is None:
+        new_anchor_pt = point
+        new_anchor_time = ref_now
+        disp_m = 0.0
+    else:
+        disp_m = haversine_distance_km(point, last_moved_pt) * 1000.0
+        if disp_m > displacement_epsilon_m:
+            new_anchor_pt = point
+            new_anchor_time = ref_now
+        else:
+            new_anchor_pt = last_moved_pt
+            new_anchor_time = last_moved_time
+
+    static_dur = max(0.0, ref_now - new_anchor_time)
+
+    # 3. Dynamic Health Classification (Moving vs Stationary)
+    if spd >= 1.0:
+        # Moving train: clear any active station dwell
+        new_dwell_start = None
+
+        if disp_m <= displacement_epsilon_m and static_dur >= sensor_freeze_threshold_sec:
+            # Sensor Freeze: Positive speed reported, but coordinates static
+            assessment = SensorHealthAssessment(
+                state=SensorHealthState.FROZEN,
+                elapsed_sec=elapsed,
+                static_duration_sec=static_dur,
+                displacement_m=disp_m,
+                current_speed_kmh=spd,
+                nearest_station=None,
+                station_distance_m=None,
+                dwell_duration_sec=0.0,
+                is_alert=True,
+                short_code="FRZ",
+                description=f"FROZEN ({int(static_dur)}s static, {spd:.0f} km/h)",
+            )
+        elif elapsed > telemetry_stale_threshold_sec:
+            # Delayed packet delivery while in motion
+            assessment = SensorHealthAssessment(
+                state=SensorHealthState.STALE,
+                elapsed_sec=elapsed,
+                static_duration_sec=static_dur,
+                displacement_m=disp_m,
+                current_speed_kmh=spd,
+                nearest_station=None,
+                station_distance_m=None,
+                dwell_duration_sec=0.0,
+                is_alert=False,
+                short_code="STL",
+                description=f"STALE ({int(elapsed)}s delay)",
+            )
+        else:
+            # Normal motion
+            assessment = SensorHealthAssessment(
+                state=SensorHealthState.NORMAL_MOTION,
+                elapsed_sec=elapsed,
+                static_duration_sec=static_dur,
+                displacement_m=disp_m,
+                current_speed_kmh=spd,
+                nearest_station=None,
+                station_distance_m=None,
+                dwell_duration_sec=0.0,
+                is_alert=False,
+                short_code="RUN",
+                description=f"Normal Motion ({spd:.0f} km/h)",
+            )
+    else:
+        # Stationary train (speed < 1.0 km/h)
+        nearest_stn, stn_dist = find_nearest_station_aabb(
+            point, stations, max_radius_m=station_dwell_radius_m
+        )
+
+        if nearest_stn is not None and stn_dist is not None:
+            # Authorized station dwell
+            new_dwell_start = (
+                station_dwell_start if station_dwell_start is not None else ref_now
+            )
+            dwell_sec = max(0.0, ref_now - new_dwell_start)
+            stn_name = getattr(
+                nearest_stn,
+                "name_en",
+                getattr(nearest_stn, "name_el", getattr(nearest_stn, "id", "Station")),
+            )
+            if elapsed > telemetry_stale_threshold_sec:
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.STALE,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=stn_name,
+                    station_distance_m=stn_dist,
+                    dwell_duration_sec=dwell_sec,
+                    is_alert=False,
+                    short_code="STL",
+                    description=f"STATION DWELL [STALE] ({stn_name}, {int(dwell_sec)}s)",
+                )
+            else:
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.STATION_DWELL,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=stn_name,
+                    station_distance_m=stn_dist,
+                    dwell_duration_sec=dwell_sec,
+                    is_alert=False,
+                    short_code="DWL",
+                    description=f"STATION DWELL ({stn_name}, {int(dwell_sec)}s)",
+                )
+        else:
+            # Signal halt / open-line wait outside station
+            new_dwell_start = None
+            if elapsed > telemetry_stale_threshold_sec:
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.STALE,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=None,
+                    station_distance_m=None,
+                    dwell_duration_sec=0.0,
+                    is_alert=False,
+                    short_code="STL",
+                    description=f"SIGNAL HALT [STALE] ({int(elapsed)}s delay)",
+                )
+            else:
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.SIGNAL_HALT,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=None,
+                    station_distance_m=None,
+                    dwell_duration_sec=0.0,
+                    is_alert=False,
+                    short_code="HLT",
+                    description="SIGNAL HALT [Open Track]",
+                )
+
+    return assessment, new_anchor_pt, new_anchor_time, new_dwell_start
+
 

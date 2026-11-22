@@ -24,6 +24,8 @@ from tui.geo import (
     OverspeedSeverity,
     SCALE_BAR_INTERVALS_KM,
     ScaleBarSpec,
+    SensorHealthAssessment,
+    SensorHealthState,
     detect_train_tunnel,
     haversine_distance_km,
 )
@@ -1717,6 +1719,48 @@ class TUIRenderer:
         # 4. Overlay Live Trains and Directional Heading Glyphs
         self._render_map_trains(win, snapshot, projector, canvas, inner_w, inner_h)
 
+    def _format_roster_type(self, train_type: Optional[str]) -> str:
+        """Format 2-character type abbreviation for active trains roster."""
+        t_type = (train_type or "IC")[:4].upper()
+        if "PROAST" in t_type or "SUB" in t_type:
+            return "PR"
+        if "PASS" in t_type or "INTER" in t_type:
+            return "IC"
+        if "FREI" in t_type or "CARG" in t_type:
+            return "FR"
+        if "SHUN" in t_type:
+            return "SH"
+        return t_type[:2] if len(t_type) >= 2 else t_type
+
+    def _resolve_roster_status_and_pair(
+        self, record: TrainRecord, is_overspeed: bool
+    ) -> Tuple[str, int]:
+        """Resolve 3-letter status mnemonic and color pair for active trains roster."""
+        pos = record.position
+        st_code = "RUN" if (pos.speed is None or pos.speed >= 1.0) else "HLT"
+        health = getattr(record, "sensor_health", None)
+        if health is not None:
+            st_code = health.short_code
+            if health.is_critical:
+                return st_code, PAIR_TRAIN_ALERT
+            if health.state == SensorHealthState.STATION_DWELL:
+                return st_code, PAIR_TRAIN_PROAST
+            if health.state == SensorHealthState.STALE:
+                return st_code, PAIR_TRAIN_WARN
+
+        if is_overspeed:
+            return st_code, PAIR_TRAIN_ALERT
+        return st_code, get_train_color_pair(record)
+
+    def _format_roster_header(self, sort_mode: RosterSortMode) -> str:
+        """Construct table header string with sort direction indicator."""
+        if sort_mode == RosterSortMode.SPEED:
+            return f" #   TRAIN  TYPE  SPD{self.glyphs.sort_desc}  DLY  ST"
+        if sort_mode == RosterSortMode.DELAY:
+            return f" #   TRAIN  TYPE  SPD   DLY{self.glyphs.sort_desc} ST"
+        return f" #   TRAIN{self.glyphs.sort_asc} TYPE  SPD   DLY  ST"
+
+
     def render_roster(
         self,
         win: Any,
@@ -1750,15 +1794,8 @@ class TUIRenderer:
         title = f" ACTIVE TRAINS ({train_count}){filter_tag} "
         safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
-        # Table header row with active sort direction indicator
-        # Layout: [Cursor:2][#:3][TRAIN:6][TYPE:5][SPD:5][DLY:5][ST:4]
         sort_mode = getattr(snapshot, "sort_mode", RosterSortMode.TRAIN_ID)
-        if sort_mode == RosterSortMode.SPEED:
-            table_hdr = f" #   TRAIN  TYPE  SPD{self.glyphs.sort_desc}  DLY  ST"
-        elif sort_mode == RosterSortMode.DELAY:
-            table_hdr = f" #   TRAIN  TYPE  SPD   DLY{self.glyphs.sort_desc} ST"
-        else:
-            table_hdr = f" #   TRAIN{self.glyphs.sort_asc} TYPE  SPD   DLY  ST"
+        table_hdr = self._format_roster_header(sort_mode)
         safe_addstr(win, 1, 1, table_hdr, header_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
         inner_h = max_y - 2
@@ -1788,36 +1825,19 @@ class TUIRenderer:
             watch_mark = ("*" if self.ascii_mode else "●") if is_watched else " "
             seq_num = f"{item_idx + 1:2d}"
             train_num = f"{(pos.train_number or pos.id)[:5]:<5}"
-
-            # Format type abbreviation
-            t_type = (pos.train_type or "IC")[:4].upper()
-            if "PROAST" in t_type or "SUB" in t_type:
-                t_type = "PR"
-            elif "PASS" in t_type or "INTER" in t_type:
-                t_type = "IC"
-            elif "FREI" in t_type or "CARG" in t_type:
-                t_type = "FR"
-            elif "SHUN" in t_type:
-                t_type = "SH"
+            t_type = self._format_roster_type(pos.train_type)
 
             spd = int(round(pos.speed or 0))
             overspeed_ids = getattr(snapshot, "overspeed_train_ids", ())
             is_overspeed = pos.id in overspeed_ids
-            if is_overspeed:
-                spd_mark = "!" if not self.ascii_mode else "*"
-                spd_str = f"{spd_mark}{spd:<3d}"
-            else:
-                spd_str = f"{spd:4d}"
+            spd_mark = ("!" if not self.ascii_mode else "*") if is_overspeed else " "
+            spd_str = f"{spd_mark}{spd:<3d}" if is_overspeed else f"{spd:4d}"
 
             dly = int(round(pos.delay or 0))
             dly_str = f"+{dly}m" if dly > 0 else (f"{dly}m" if dly < 0 else " 0m")
 
-            st_code = "RUN"
-            if pos.speed is not None and pos.speed < 1.0:
-                st_code = "HLT"
-
+            st_code, pair = self._resolve_roster_status_and_pair(record, is_overspeed)
             row_line = f"{cursor_mark}{watch_mark}{seq_num}  {train_num:<6}{t_type:<5}{spd_str:>4} {dly_str:>5}  {st_code}"
-            pair = PAIR_TRAIN_ALERT if is_overspeed else get_train_color_pair(record)
             row_attr = select_attr if is_selected else safe_color_pair(pair, curses.A_NORMAL)
             safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
@@ -1993,6 +2013,100 @@ class TUIRenderer:
 
         return spd_display, spd_attr, limit_display, limit_attr
 
+    def _resolve_inspector_delay_display(self, pos: Any) -> Tuple[str, int]:
+        """Resolve inspector delay display text and color attribute."""
+        delay_val = pos.delay or 0.0
+        delay_pair = get_delay_color_pair(delay_val)
+        delay_attr = safe_color_pair(delay_pair, curses.A_BOLD) | curses.A_BOLD
+        dly_int = int(round(delay_val))
+        dly_display = f"+{dly_int} min" if dly_int > 0 else (f"{dly_int} min" if dly_int < 0 else "0 min")
+        if delay_val > 10.0:
+            dly_display += " (Major Delay)"
+        elif delay_val > 3.0:
+            dly_display += " (Minor Delay)"
+        else:
+            dly_display += " (On Time)"
+        return dly_display, delay_attr
+
+    def _resolve_inspector_telemetry_and_sensor(
+        self,
+        record: TrainRecord,
+        ref_now: Optional[float],
+        val_attr: int,
+    ) -> Tuple[str, int, str, int]:
+        """Resolve telemetry age and sensor health strings and color attributes."""
+        telemetry_str, telemetry_pair = format_telemetry_age(
+            record.last_updated,
+            record.update_count,
+            now=ref_now,
+        )
+        telemetry_attr = safe_color_pair(
+            telemetry_pair,
+            curses.A_BOLD if telemetry_pair != PAIR_DEFAULT else curses.A_NORMAL,
+        )
+        if telemetry_pair != PAIR_DEFAULT:
+            telemetry_attr |= curses.A_BOLD
+
+        health = getattr(record, "sensor_health", None)
+        if health is not None:
+            if health.state == SensorHealthState.FROZEN:
+                telemetry_str = f"{int(health.elapsed_sec)}s ago [FROZEN]"
+                telemetry_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            elif health.state == SensorHealthState.DROPPED:
+                telemetry_str = f"{telemetry_str} [DROPPED]"
+                telemetry_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            elif health.state == SensorHealthState.STALE:
+                telemetry_str = f"{telemetry_str} [STALE]"
+                telemetry_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+
+        sensor_health_str = "NORMAL"
+        sensor_health_attr = val_attr
+        if health is not None:
+            sensor_health_str = health.description
+            if health.state in (SensorHealthState.FROZEN, SensorHealthState.DROPPED):
+                sensor_health_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            elif health.state == SensorHealthState.STATION_DWELL:
+                sensor_health_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_BOLD) | curses.A_BOLD
+            elif health.state == SensorHealthState.STALE:
+                sensor_health_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+
+        return telemetry_str, telemetry_attr, sensor_health_str, sensor_health_attr
+
+    def _resolve_inspector_status_text(
+        self,
+        record: TrainRecord,
+        train_pt: GeoPoint,
+        val_attr: int,
+    ) -> Tuple[str, int]:
+        """Resolve inspector operational and tunnel status text and color attribute."""
+        pos = record.position
+        health = getattr(record, "sensor_health", None)
+        tunnel_info = detect_train_tunnel(train_pt, self.tunnels)
+        if tunnel_info is not None:
+            active_tun, _dist_m, _pct = tunnel_info
+            len_km = (active_tun.length_m / 1000.0) if active_tun.length_m else 0.0
+            return (
+                f"RUNNING [TUNNEL: {active_tun.name} ({len_km:.1f}km)]",
+                safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD,
+            )
+        if health is not None:
+            if health.state == SensorHealthState.FROZEN:
+                return (
+                    f"SENSOR FREEZE [{int(health.static_duration_sec)}s static]",
+                    safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD,
+                )
+            if health.state == SensorHealthState.DROPPED:
+                return (
+                    f"SIGNAL LOST [{int(health.elapsed_sec)}s silent]",
+                    safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD,
+                )
+            if health.state == SensorHealthState.STATION_DWELL:
+                return (
+                    f"STATION DWELL [{health.nearest_station or 'Platform'}]",
+                    safe_color_pair(PAIR_TRAIN_PROAST, curses.A_NORMAL),
+                )
+        return f"{pos.status or 'In Service'}", val_attr
+
     def render_inspector(
         self,
         win: Any,
@@ -2045,18 +2159,7 @@ class TUIRenderer:
         heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
         compass_str = get_compass_bearing(heading_deg, ascii_mode=self.ascii_mode)
 
-        delay_val = pos.delay or 0.0
-        delay_pair = get_delay_color_pair(delay_val)
-        delay_attr = safe_color_pair(delay_pair, curses.A_BOLD) | curses.A_BOLD
-        dly_int = int(round(delay_val))
-        dly_display = f"+{dly_int} min" if dly_int > 0 else (f"{dly_int} min" if dly_int < 0 else "0 min")
-        if delay_val > 10.0:
-            dly_display += " (Major Delay)"
-        elif delay_val > 3.0:
-            dly_display += " (Minor Delay)"
-        else:
-            dly_display += " (On Time)"
-
+        dly_display, delay_attr = self._resolve_inspector_delay_display(pos)
         spd_display, spd_attr, limit_display, limit_attr = self._format_inspector_speed(
             pos, record, snapshot, val_attr, dim_attr
         )
@@ -2077,14 +2180,12 @@ class TUIRenderer:
             if getattr(snapshot, "is_replay", False)
             else None
         )
-        telemetry_str, telemetry_pair = format_telemetry_age(
-            record.last_updated,
-            record.update_count,
-            now=ref_now,
-        )
-        telemetry_attr = safe_color_pair(telemetry_pair, curses.A_BOLD if telemetry_pair != PAIR_DEFAULT else curses.A_NORMAL)
-        if telemetry_pair != PAIR_DEFAULT:
-            telemetry_attr |= curses.A_BOLD
+        (
+            telemetry_str,
+            telemetry_attr,
+            sensor_health_str,
+            sensor_health_attr,
+        ) = self._resolve_inspector_telemetry_and_sensor(record, ref_now, val_attr)
 
         matched_station = self.resolve_station(pos.next_station)
         train_pt = GeoPoint(lat=pos.lat, lng=pos.lng)
@@ -2101,14 +2202,7 @@ class TUIRenderer:
         ) or (pos.train_type in ("Intercity", "Proastiakos", "Suburban"))
         cam_display = "ONLINE [w]" if has_cam else "UNAVAILABLE"
 
-        tunnel_info = detect_train_tunnel(train_pt, self.tunnels)
-        status_text = f"{pos.status or 'In Service'}"
-        status_attr = val_attr
-        if tunnel_info is not None:
-            active_tun, dist_m, pct = tunnel_info
-            len_km = (active_tun.length_m / 1000.0) if active_tun.length_m else 0.0
-            status_text = f"RUNNING [TUNNEL: {active_tun.name} ({len_km:.1f}km)]"
-            status_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+        status_text, status_attr = self._resolve_inspector_status_text(record, train_pt, val_attr)
 
         rows = [
             ("Train No:", f"{pos.train_number or pos.id} ({pos.train_type or 'Passenger'})", val_attr),
@@ -2121,6 +2215,7 @@ class TUIRenderer:
             ("Progress:", progress_str, val_attr),
             ("Coordinates:", coords_str, val_attr),
             ("Heading:", compass_str, val_attr),
+            ("Sensor:", sensor_health_str, sensor_health_attr),
             ("Line Limit:", limit_display, limit_attr),
             ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
             ("Cab Camera:", cam_display, val_attr),
@@ -2192,9 +2287,18 @@ class TUIRenderer:
         status = snapshot.connection_status
         if status == ConnectionStatus.CONNECTED:
             overspeed_cnt = getattr(snapshot, "overspeed_count", 0)
+            frozen_cnt = getattr(snapshot, "frozen_count", 0)
+            dropped_cnt = getattr(snapshot, "dropped_count", 0)
+            alert_items = []
             if overspeed_cnt > 0:
+                alert_items.append(f"{overspeed_cnt} OVERSPEED")
+            if frozen_cnt > 0:
+                alert_items.append(f"{frozen_cnt} FROZEN")
+            if dropped_cnt > 0:
+                alert_items.append(f"{dropped_cnt} DROPPED")
+            if alert_items:
                 mark = "!" if self.ascii_mode else "⚠"
-                return f"[{mark} {overspeed_cnt} OVERSPEED] {self.glyphs.badge_live}({msg_rate:3.1f} msg/s) ", alert_attr
+                return f"[{mark} {', '.join(alert_items)}] {self.glyphs.badge_live}({msg_rate:3.1f} msg/s) ", alert_attr
             return f"{self.glyphs.badge_live}({msg_rate:3.1f} msg/s) ", connected_attr
         if status == ConnectionStatus.CONNECTING:
             return self.glyphs.badge_connecting, status_attr
