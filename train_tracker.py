@@ -1439,6 +1439,59 @@ Examples:
         help="Force pure 7-bit ASCII rendering fallback.",
     )
 
+    # 6b. speed-limits & slow-orders (F-5.3)
+    p_spd = subparsers.add_parser(
+        "speed-limits",
+        aliases=["speeds", "speed_limits"],
+        help="Query and inspect railway corridor speed limits and restrictions (F-5.3).",
+        description="Query and display railway corridor line speeds, segment limits, and slow orders.",
+    )
+    p_spd.add_argument(
+        "--corridor",
+        "-c",
+        type=str,
+        default=None,
+        help="Filter speed limits by corridor (e.g. 'pathe-mainline', 'proastiakos').",
+    )
+    p_spd.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured JSON summary to stdout.",
+    )
+    p_spd.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
+    p_tsr = subparsers.add_parser(
+        "slow-orders",
+        aliases=["tsr", "slow_orders"],
+        help="Query active Temporary Speed Restrictions (TSR / Slow Orders) (F-5.3).",
+        description="Query and display active rail slow orders (civil maintenance speed restrictions).",
+    )
+    p_tsr.add_argument(
+        "--corridor",
+        "-c",
+        type=str,
+        default=None,
+        help="Filter slow orders by corridor.",
+    )
+    p_tsr.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured JSON list of slow orders.",
+    )
+    p_tsr.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
     # 7. watch (F-6.3)
     p_watch = subparsers.add_parser(
         "watch",
@@ -2694,6 +2747,125 @@ def run_infrastructure_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_speed_limits_mode(args: argparse.Namespace) -> int:
+    """Execute the headless corridor speed limits inspection CLI command (F-5.3).
+
+    Args:
+        args: Parsed CLI namespace arguments.
+
+    Returns:
+        Exit code: 0 on clean execution.
+    """
+    from tui.mock_engine import load_speed_limits
+    from storage.cli_formatters import format_speed_limits_table
+
+    is_ascii = bool(getattr(args, "ascii", False))
+    corridor_filter = getattr(args, "corridor", None)
+    output_json = bool(getattr(args, "json", False))
+
+    rules, tsrs = load_speed_limits()
+
+    if output_json:
+        data = {
+            "corridors": [
+                {
+                    "id": cid,
+                    "name": rule.name,
+                    "default_speed_kmh": rule.default_speed_kmh,
+                    "description": rule.description,
+                    "segments": [
+                        {
+                            "id": seg.id,
+                            "name": seg.name,
+                            "max_speed_kmh": seg.max_speed_kmh,
+                            "buffer_m": seg.buffer_m,
+                        }
+                        for seg in rule.segments
+                    ],
+                }
+                for cid, rule in sorted(rules.items(), key=lambda x: x[0])
+                if not corridor_filter or (
+                    corridor_filter.lower() in cid.lower()
+                    or corridor_filter.lower() in rule.name.lower()
+                )
+            ],
+            "slow_orders": [
+                {
+                    "id": tsr.id,
+                    "corridor_id": tsr.corridor_id,
+                    "name": tsr.name,
+                    "max_speed_kmh": tsr.max_speed_kmh,
+                    "reason": tsr.reason,
+                    "active": tsr.active,
+                }
+                for tsr in tsrs
+                if not corridor_filter or (
+                    corridor_filter.lower() in tsr.corridor_id.lower()
+                    or corridor_filter.lower() in tsr.name.lower()
+                )
+            ],
+        }
+        sys.stdout.write(json.dumps(data, indent=2, ensure_ascii=is_ascii) + "\n")
+        return 0
+
+    table = format_speed_limits_table(
+        rules=rules,
+        tsrs=tsrs,
+        corridor_filter=corridor_filter,
+        ascii_mode=is_ascii,
+    )
+    sys.stdout.write(table + "\n")
+    return 0
+
+
+def run_slow_orders_mode(args: argparse.Namespace) -> int:
+    """Execute the headless slow orders (TSR) inspection CLI command (F-5.3).
+
+    Args:
+        args: Parsed CLI namespace arguments.
+
+    Returns:
+        Exit code: 0 on clean execution.
+    """
+    from tui.mock_engine import load_slow_orders
+    from storage.cli_formatters import format_slow_orders_table
+
+    is_ascii = bool(getattr(args, "ascii", False))
+    corridor_filter = getattr(args, "corridor", None)
+    output_json = bool(getattr(args, "json", False))
+
+    tsrs = load_slow_orders()
+
+    if output_json:
+        norm_filter = corridor_filter.strip().lower() if corridor_filter else None
+        filtered = [
+            {
+                "id": tsr.id,
+                "corridor_id": tsr.corridor_id,
+                "name": tsr.name,
+                "max_speed_kmh": tsr.max_speed_kmh,
+                "reason": tsr.reason,
+                "active": tsr.active,
+                "points": [[p.lat, p.lng] for p in tsr.points],
+            }
+            for tsr in tsrs
+            if not norm_filter or (
+                norm_filter in tsr.corridor_id.lower()
+                or norm_filter in tsr.name.lower()
+            )
+        ]
+        sys.stdout.write(json.dumps(filtered, indent=2, ensure_ascii=is_ascii) + "\n")
+        return 0
+
+    table = format_slow_orders_table(
+        tsrs=tsrs,
+        corridor_filter=corridor_filter,
+        ascii_mode=is_ascii,
+    )
+    sys.stdout.write(table + "\n")
+    return 0
+
+
 def _emit_watch_events(
     evaluator: Any,
     events: Sequence[Any],
@@ -2923,6 +3095,12 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode in ("speed-limits", "speeds", "speed_limits"):
+        return run_speed_limits_mode(args)
+
+    if args.mode in ("slow-orders", "tsr", "slow_orders"):
+        return run_slow_orders_mode(args)
+
     if args.mode in ("infrastructure", "infra", "geo"):
         return run_infrastructure_mode(args)
 

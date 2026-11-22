@@ -11,10 +11,16 @@ from typing import Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from train_tracker import TrainPosition
 from tui.geo import (
+    DEFAULT_CORRIDOR_SPEED_RULES,
+    CorridorSpeedRule,
     GeoPoint,
     NORTHERN_GREECE_PRESET,
+    OverspeedSeverity,
     PATHE_PRESET,
     PROASTIAKOS_PRESET,
+    SlowOrder,
+    SpeedEnforcementResult,
+    evaluate_train_speed,
 )
 from tui.theme import ThemeProfile, get_next_theme
 
@@ -143,6 +149,7 @@ class TrainRecord:
     first_seen: float = field(default_factory=time.time)
     last_updated: float = field(default_factory=time.time)
     update_count: int = 1
+    speed_result: Optional[SpeedEnforcementResult] = None
 
     def clone(self) -> "TrainRecord":
         """Create a thread-isolated shallow copy with an independent trail deque."""
@@ -152,6 +159,7 @@ class TrainRecord:
             first_seen=self.first_seen,
             last_updated=self.last_updated,
             update_count=self.update_count,
+            speed_result=self.speed_result,
         )
 
     def append_breadcrumb(
@@ -243,6 +251,10 @@ class StateSnapshot:
     replay_end_time: Optional[float] = None
     replay_speed: float = 1.0
     watched_train_ids: FrozenSet[str] = field(default_factory=frozenset)
+    selected_speed_result: Optional[SpeedEnforcementResult] = None
+    overspeed_count: int = 0
+    active_tsr_count: int = 0
+    overspeed_train_ids: Tuple[str, ...] = ()
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -407,6 +419,19 @@ class TrainStateStore:
         self._replay_speed: float = 1.0
         self._watched_train_ids: Set[str] = set()
 
+        # Speed limits and slow orders (F-5.3)
+        self._speed_rules: Dict[str, CorridorSpeedRule] = dict(DEFAULT_CORRIDOR_SPEED_RULES)
+        self._active_tsrs: List[SlowOrder] = []
+        try:
+            from tui.mock_engine import load_speed_limits
+            loaded_rules, loaded_tsrs = load_speed_limits()
+            if loaded_rules:
+                self._speed_rules = loaded_rules
+            self._active_tsrs = loaded_tsrs
+        except (OSError, ValueError, KeyError, TypeError):
+            self._speed_rules = dict(DEFAULT_CORRIDOR_SPEED_RULES)
+            self._active_tsrs = []
+
     # ------------------------------------------------------------------
     # Telemetry Ingestion (Called by StreamWorker / ReplayWorker Thread)
     # ------------------------------------------------------------------
@@ -415,8 +440,19 @@ class TrainStateStore:
         """Insert or update a single TrainPosition at timestamp ts (caller must hold self._lock)."""
         if not pos.id:
             return
+        pt = GeoPoint(lat=pos.lat, lng=pos.lng)
+        speed_res = evaluate_train_speed(
+            point=pt,
+            current_speed=pos.speed,
+            corridor_id=pos.corridor,
+            rules=self._speed_rules,
+            active_tsrs=self._active_tsrs,
+            train_id=pos.train_number or pos.id,
+        )
         if pos.id in self._trains:
-            self._trains[pos.id].append_breadcrumb(pos, now=ts)
+            rec = self._trains[pos.id]
+            rec.append_breadcrumb(pos, now=ts)
+            rec.speed_result = speed_res
         else:
             record = TrainRecord(
                 position=pos,
@@ -424,6 +460,7 @@ class TrainStateStore:
                 first_seen=ts,
                 last_updated=ts,
                 update_count=1,
+                speed_result=speed_res,
             )
             record.trail.append(
                 HistoricalBreadcrumb(
@@ -572,6 +609,27 @@ class TrainStateStore:
                 self._replay_speed = 1.0
             self._version += 1
 
+    def set_speed_rules(
+        self,
+        rules: Dict[str, CorridorSpeedRule],
+        tsrs: Sequence[SlowOrder],
+    ) -> None:
+        """Update active corridor speed limit rules and slow orders, re-evaluating active trains."""
+        with self._lock:
+            self._speed_rules = dict(rules)
+            self._active_tsrs = list(tsrs)
+            for rec in self._trains.values():
+                pt = GeoPoint(lat=rec.position.lat, lng=rec.position.lng)
+                rec.speed_result = evaluate_train_speed(
+                    point=pt,
+                    current_speed=rec.position.speed,
+                    corridor_id=rec.position.corridor,
+                    rules=self._speed_rules,
+                    active_tsrs=self._active_tsrs,
+                    train_id=rec.position.train_number or rec.position.id,
+                )
+            self._version += 1
+
     # ------------------------------------------------------------------
     # UI State & Cursor Navigation (Called by UI Thread)
     # ------------------------------------------------------------------
@@ -593,6 +651,17 @@ class TrainStateStore:
                     if rec.position.id == self._selected_id:
                         sel_idx = idx
                         break
+
+            overspeed_ids: List[str] = []
+            active_tsr_cnt = sum(1 for t in self._active_tsrs if t.active)
+            for tid, rec in trains_copy.items():
+                if rec.speed_result and rec.speed_result.severity in (
+                    OverspeedSeverity.OVERSPEED,
+                    OverspeedSeverity.TSR_VIOLATION,
+                ):
+                    overspeed_ids.append(tid)
+
+            sel_speed_res = selected_record.speed_result if selected_record else None
 
             return StateSnapshot(
                 trains=trains_copy,
@@ -624,6 +693,10 @@ class TrainStateStore:
                 replay_end_time=self._replay_end_time,
                 replay_speed=self._replay_speed,
                 watched_train_ids=frozenset(self._watched_train_ids),
+                selected_speed_result=sel_speed_res,
+                overspeed_count=len(overspeed_ids),
+                active_tsr_count=active_tsr_cnt,
+                overspeed_train_ids=tuple(overspeed_ids),
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:

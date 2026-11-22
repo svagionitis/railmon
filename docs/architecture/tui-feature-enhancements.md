@@ -24,7 +24,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | **Implemented** | [`tui/app.py`](../../tui/app.py), [`tui/stream_worker.py`](../../tui/stream_worker.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 5 (Safety)** | **F-5.1** | Corridor Headway & Opposing Train Conflict Watchdog | *(Auto / Bell)* | Planned | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 5 (Safety)** | **F-5.2** | Telemetry Drop & Sensor Freezing Watchdog | *(Auto)* | Planned | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py) |
-| **Tier 5 (Safety)** | **F-5.3** | Corridor Speed Limit Exceedance & Slow-Order Alerts | *(Auto)* | Planned | [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
+| **Tier 5 (Safety)** | **F-5.3** | Corridor Speed Limit Exceedance & Slow-Order Alerts | *(Auto)* | **Implemented** | [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 6 (Commuter)** | **F-6.1** | CLI Station Departure & Arrival Boards | `railmon departures` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
 | **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` / `a` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`watchdog.py`](../../watchdog.py), [`tui/app.py`](../../tui/app.py), [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py) |
@@ -626,7 +626,9 @@ Locomotives traversing remote mountain passes (e.g., Mount Othrys, Kallidromo tu
 
 ---
 
-### F-5.3: Corridor Speed Limit Exceedance & Slow-Order Alerts — *Planned*
+### F-5.3: Corridor Speed Limit Exceedance & Slow-Order Alerts — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-5-3-corridor-speed-limit-exceedance-and-slow-order-alerts-plan.md`](../plans/features/f-5-3-corridor-speed-limit-exceedance-and-slow-order-alerts-plan.md)
 
 #### Overview
 Maps train instantaneous speeds against maximum design speeds and temporary speed restrictions (TSR) across Greek rail corridors:

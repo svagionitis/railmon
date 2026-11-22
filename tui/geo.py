@@ -11,7 +11,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
@@ -1228,3 +1228,518 @@ def parse_infrastructure_geojson(
             features.append(feat)
 
     return features
+
+
+# -----------------------------------------------------------------------------
+# F-5.3 Corridor Speed Limit Exceedance & Slow-Order (TSR) Domain Models & Math
+# -----------------------------------------------------------------------------
+# Regulatory Reference: Hellenic Railways Network Statement (Δήλωση Δικτύου ΟΣΕ)
+# URL: https://www.hellenicrailways.gr/etaireia/dilosi-diktyou
+# Line speeds and segment restrictions are derived from:
+#   • Παράρτημα ΙΙΙ-Α: «Φόρτιση και Ταχύτητα» (Maximum Permissible Speeds by Track Section)
+#   • Παράρτημα Ι-Α & Ι-Β: «Χαρακτηριστικά των Γραμμών του Δικτύου»
+# -----------------------------------------------------------------------------
+
+
+class SpeedLimitZoneType(Enum):
+    """Categorization of railway speed restriction zones."""
+
+    CORRIDOR_BASE = auto()   # Baseline corridor design speed limit (e.g. PATHE 160 km/h)
+    SEGMENT_LIMIT = auto()   # Civil engineering segment limit (e.g. SKA-Oinoi 110 km/h)
+    SLOW_ORDER_TSR = auto()  # Operational Temporary Speed Restriction (e.g. 40 km/h maintenance)
+
+
+class OverspeedSeverity(Enum):
+    """Hierarchical severity classification for train velocity relative to speed limits."""
+
+    NORMAL = auto()          # Speed strictly under governing limit or compliant
+    ADVISORY = auto()        # Minor speed threshold margin (0.0 <= delta < 10.0 km/h)
+    OVERSPEED = auto()       # General line speed exceedance (delta >= 10.0 km/h)
+    TSR_VIOLATION = auto()   # Critical Slow-Order exceedance (delta >= 5.0 km/h in TSR zone)
+
+
+@dataclass(frozen=True)
+class SlowOrder:
+    """Operational Temporary Speed Restriction (TSR / Βραδυπορία) record."""
+
+    id: str
+    corridor_id: str
+    name: str
+    max_speed_kmh: float
+    points: Tuple[GeoPoint, ...]
+    bbox: BoundingBox
+    start_chainage_km: Optional[float] = None
+    end_chainage_km: Optional[float] = None
+    reason: str = "Track Maintenance"
+    active: bool = True
+    start_time_iso: str = ""
+    end_time_iso: str = ""
+    buffer_m: float = 200.0
+
+    @classmethod
+    def create(
+        cls,
+        id: str,
+        corridor_id: str,
+        name: str,
+        max_speed_kmh: float,
+        points: Sequence[GeoPoint],
+        start_chainage_km: Optional[float] = None,
+        end_chainage_km: Optional[float] = None,
+        reason: str = "Track Maintenance",
+        active: bool = True,
+        start_time_iso: str = "",
+        end_time_iso: str = "",
+        buffer_m: float = 200.0,
+    ) -> "SlowOrder":
+        """Factory method to construct a validated SlowOrder with calculated BoundingBox."""
+        pts = tuple(points)
+        if pts:
+            min_lat = min(p.lat for p in pts)
+            max_lat = max(p.lat for p in pts)
+            min_lng = min(p.lng for p in pts)
+            max_lng = max(p.lng for p in pts)
+        else:
+            min_lat = max_lat = min_lng = max_lng = 0.0
+        pad = 0.003
+        bbox = BoundingBox(
+            min_lat=min_lat - pad,
+            max_lat=max_lat + pad,
+            min_lng=min_lng - pad,
+            max_lng=max_lng + pad,
+        )
+        return cls(
+            id=id,
+            corridor_id=corridor_id,
+            name=name,
+            max_speed_kmh=float(max_speed_kmh),
+            points=pts,
+            bbox=bbox,
+            start_chainage_km=start_chainage_km,
+            end_chainage_km=end_chainage_km,
+            reason=reason,
+            active=active,
+            start_time_iso=start_time_iso,
+            end_time_iso=end_time_iso,
+            buffer_m=buffer_m,
+        )
+
+
+@dataclass(frozen=True)
+class CorridorSegmentLimit:
+    """Civil engineering speed restriction on a localized segment of a rail corridor."""
+
+    id: str
+    corridor_id: str
+    name: str
+    max_speed_kmh: float
+    points: Tuple[GeoPoint, ...]
+    bbox: BoundingBox
+    start_chainage_km: Optional[float] = None
+    end_chainage_km: Optional[float] = None
+    buffer_m: float = 120.0
+
+    @classmethod
+    def create(
+        cls,
+        id: str,
+        corridor_id: str,
+        name: str,
+        max_speed_kmh: float,
+        points: Sequence[GeoPoint],
+        start_chainage_km: Optional[float] = None,
+        end_chainage_km: Optional[float] = None,
+        buffer_m: float = 120.0,
+    ) -> "CorridorSegmentLimit":
+        """Factory method constructing a CorridorSegmentLimit with BoundingBox."""
+        pts = tuple(points)
+        if pts:
+            min_lat = min(p.lat for p in pts)
+            max_lat = max(p.lat for p in pts)
+            min_lng = min(p.lng for p in pts)
+            max_lng = max(p.lng for p in pts)
+        else:
+            min_lat = max_lat = min_lng = max_lng = 0.0
+        pad = 0.003
+        bbox = BoundingBox(
+            min_lat=min_lat - pad,
+            max_lat=max_lat + pad,
+            min_lng=min_lng - pad,
+            max_lng=max_lng + pad,
+        )
+        return cls(
+            id=id,
+            corridor_id=corridor_id,
+            name=name,
+            max_speed_kmh=float(max_speed_kmh),
+            points=pts,
+            bbox=bbox,
+            start_chainage_km=start_chainage_km,
+            end_chainage_km=end_chainage_km,
+            buffer_m=buffer_m,
+        )
+
+
+@dataclass(frozen=True)
+class CorridorSpeedRule:
+    """Master speed configuration for a railway corridor."""
+
+    corridor_id: str
+    name: str
+    default_speed_kmh: float
+    segments: Tuple[CorridorSegmentLimit, ...] = ()
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class SpeedEnforcementResult:
+    """Evaluation result comparing instantaneous locomotive velocity against speed limits."""
+
+    train_id: str
+    current_speed: float
+    governing_limit: float
+    margin_kmh: float
+    severity: OverspeedSeverity
+    governing_name: str
+    is_tsr: bool
+    active_tsr: Optional[SlowOrder] = None
+    status_label: str = ""
+    color_pair: int = 1
+
+
+# Fallback speed limits derived from OSE Network Statement (https://www.hellenicrailways.gr/etaireia/dilosi-diktyou):
+#   - PATHE Mainline (Tithorea-Domokos bypass / Thessaly plain): 160.0 km/h passenger cap
+#   - Proastiakos (Airport-SKA-Kiato express median): 120.0 km/h
+#   - Regional single-track branches (Chalkida 90.0, Thessaly 80.0, W. Macedonia 70.0 km/h)
+#   - Mountain and urban segments: 60.0-110.0 km/h
+DEFAULT_CORRIDOR_SPEED_RULES: Dict[str, CorridorSpeedRule] = {
+    "pathe-mainline": CorridorSpeedRule(
+        corridor_id="pathe-mainline",
+        name="PATHE Mainline",
+        default_speed_kmh=160.0,
+        description="Piraeus - Athens - Thessaloniki Mainline",
+    ),
+    "proastiakos-airport-kiato": CorridorSpeedRule(
+        corridor_id="proastiakos-airport-kiato",
+        name="Proastiakos Airport - Kiato",
+        default_speed_kmh=120.0,
+        description="Athens Airport - SKA - Kiato Suburban Corridor",
+    ),
+    "proastiakos-chalkida": CorridorSpeedRule(
+        corridor_id="proastiakos-chalkida",
+        name="Proastiakos Chalkida Branch",
+        default_speed_kmh=90.0,
+        description="Oinoi - Chalkida Branch Line",
+    ),
+    "thessaloniki-idomeni": CorridorSpeedRule(
+        corridor_id="thessaloniki-idomeni",
+        name="Thessaloniki - Idomeni",
+        default_speed_kmh=120.0,
+        description="Idomeni International Border Corridor",
+    ),
+    "northern-corridor": CorridorSpeedRule(
+        corridor_id="northern-corridor",
+        name="Northern Corridor",
+        default_speed_kmh=90.0,
+        description="Thessaloniki - Alexandroupoli Corridor",
+    ),
+    "thessaly-kalambaka": CorridorSpeedRule(
+        corridor_id="thessaly-kalambaka",
+        name="Thessaly Kalambaka",
+        default_speed_kmh=80.0,
+        description="Palaiofarsalos - Kalambaka Regional Spur",
+    ),
+    "thessaly-volos": CorridorSpeedRule(
+        corridor_id="thessaly-volos",
+        name="Thessaly Volos",
+        default_speed_kmh=80.0,
+        description="Larissa - Volos Regional Branch",
+    ),
+    "western-macedonia": CorridorSpeedRule(
+        corridor_id="western-macedonia",
+        name="Western Macedonia",
+        default_speed_kmh=70.0,
+        description="Platy - Edessa - Florina Mountain Branch",
+    ),
+}
+
+
+def _normalize_corridor_key(corridor_id: Optional[str]) -> Optional[str]:
+    """Normalize Hellenic Railways corridor strings and aliases to standard corridor IDs."""
+    if not corridor_id:
+        return None
+    raw = corridor_id.strip().lower()
+    if raw in DEFAULT_CORRIDOR_SPEED_RULES:
+        return raw
+
+    clean = raw.replace("-", "").replace("_", "")
+    if any(k in clean for k in ("pathe", "e85", "mainline", "athina", "thess")):
+        return "pathe-mainline"
+    if any(k in clean for k in ("airport", "kiato", "pirair")):
+        return "proastiakos-airport-kiato"
+    if "chalk" in clean:
+        return "proastiakos-chalkida"
+    if "idomeni" in clean:
+        return "thessaloniki-idomeni"
+    if "kalambaka" in clean or "farsala" in clean:
+        return "thessaly-kalambaka"
+    if "volos" in clean:
+        return "thessaly-volos"
+    if any(k in clean for k in ("edessa", "florina", "veria", "westmacedonia")):
+        return "western-macedonia"
+    if any(k in clean for k in ("northern", "thrace", "strymon", "alex")):
+        return "northern-corridor"
+    if "proast" in clean:
+        return "proastiakos-airport-kiato"
+    return raw
+
+
+def parse_speed_limits_json(
+    payload: Union[Dict[str, Any], str]
+) -> Tuple[Dict[str, CorridorSpeedRule], List[SlowOrder]]:
+    """Parse speed limits and slow orders JSON payload into domain models.
+
+    Args:
+        payload: Dict or JSON string conforming to speed_limits.json schema.
+
+    Returns:
+        Tuple of (corridor_rules_dict, slow_orders_list).
+    """
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except Exception:
+            return dict(DEFAULT_CORRIDOR_SPEED_RULES), []
+    elif isinstance(payload, dict):
+        data = payload
+    else:
+        return dict(DEFAULT_CORRIDOR_SPEED_RULES), []
+
+    corridor_rules: Dict[str, CorridorSpeedRule] = dict(DEFAULT_CORRIDOR_SPEED_RULES)
+    for c_item in data.get("corridors", []):
+        c_id = str(c_item.get("id") or "").strip()
+        if not c_id:
+            continue
+        c_name = str(c_item.get("name") or c_id)
+        c_def_spd = float(c_item.get("default_speed_kmh", 120.0))
+        seg_list: List[CorridorSegmentLimit] = []
+        for s_item in c_item.get("segments", []):
+            s_id = str(s_item.get("id") or "")
+            s_name = str(s_item.get("name") or s_id)
+            s_spd = float(s_item.get("max_speed_kmh", c_def_spd))
+            s_pts = [
+                GeoPoint(lat=float(coord[0]), lng=float(coord[1]))
+                for coord in s_item.get("points", [])
+                if len(coord) >= 2
+            ]
+            s_buf = float(s_item.get("buffer_m", 120.0))
+            seg_list.append(
+                CorridorSegmentLimit.create(
+                    id=s_id,
+                    corridor_id=c_id,
+                    name=s_name,
+                    max_speed_kmh=s_spd,
+                    points=s_pts,
+                    buffer_m=s_buf,
+                )
+            )
+        corridor_rules[c_id] = CorridorSpeedRule(
+            corridor_id=c_id,
+            name=c_name,
+            default_speed_kmh=c_def_spd,
+            segments=tuple(seg_list),
+            description=str(c_item.get("description") or ""),
+        )
+
+    slow_orders: List[SlowOrder] = []
+    for tsr_item in data.get("slow_orders", []):
+        t_id = str(tsr_item.get("id") or "")
+        t_corr = str(tsr_item.get("corridor_id") or "")
+        t_name = str(tsr_item.get("name") or t_id)
+        t_spd = float(tsr_item.get("max_speed_kmh", 40.0))
+        t_active = bool(tsr_item.get("active", True))
+        t_reason = str(tsr_item.get("reason") or "Track Maintenance")
+        t_buf = float(tsr_item.get("buffer_m", 200.0))
+        t_pts = [
+            GeoPoint(lat=float(coord[0]), lng=float(coord[1]))
+            for coord in tsr_item.get("points", [])
+            if len(coord) >= 2
+        ]
+        slow_orders.append(
+            SlowOrder.create(
+                id=t_id,
+                corridor_id=t_corr,
+                name=t_name,
+                max_speed_kmh=t_spd,
+                points=t_pts,
+                reason=t_reason,
+                active=t_active,
+                buffer_m=t_buf,
+            )
+        )
+
+    return corridor_rules, slow_orders
+
+
+def _is_point_on_polyline(point: GeoPoint, pts: Sequence[GeoPoint], buffer_m: float) -> bool:
+    """Check if point lies within buffer_m perpendicular distance of a polyline."""
+    if len(pts) >= 2:
+        for i in range(len(pts) - 1):
+            _, perp = project_point_to_segment(point, pts[i], pts[i + 1])
+            if perp <= buffer_m:
+                return True
+    elif len(pts) == 1:
+        return haversine_distance_km(point, pts[0]) * 1000.0 <= buffer_m
+    return False
+
+
+def _find_active_tsr(
+    point: GeoPoint,
+    active_tsrs: Sequence[SlowOrder],
+) -> Tuple[Optional[SlowOrder], float]:
+    """Find active slow order with lowest speed limit containing point."""
+    matched: Optional[SlowOrder] = None
+    limit = float("inf")
+    for tsr in active_tsrs:
+        if not tsr.active:
+            continue
+        if tsr.bbox and not tsr.bbox.contains(point):
+            continue
+        if _is_point_on_polyline(point, tsr.points, tsr.buffer_m):
+            if tsr.max_speed_kmh < limit:
+                limit = tsr.max_speed_kmh
+                matched = tsr
+    return matched, limit
+
+
+def _find_segment_limit(
+    point: GeoPoint,
+    corr_key: Optional[str],
+    speed_rules: Dict[str, CorridorSpeedRule],
+) -> Tuple[Optional[CorridorSegmentLimit], float, Optional[CorridorSpeedRule]]:
+    """Find segment speed limit matching point along corridor or network."""
+    matched_seg: Optional[CorridorSegmentLimit] = None
+    limit = float("inf")
+    corr_rule: Optional[CorridorSpeedRule] = None
+
+    if corr_key and corr_key in speed_rules:
+        corr_rule = speed_rules[corr_key]
+        for seg in corr_rule.segments:
+            if seg.bbox and not seg.bbox.contains(point):
+                continue
+            if _is_point_on_polyline(point, seg.points, seg.buffer_m):
+                if seg.max_speed_kmh < limit:
+                    limit = seg.max_speed_kmh
+                    matched_seg = seg
+
+    if matched_seg is None and not corr_rule:
+        for r in speed_rules.values():
+            for seg in r.segments:
+                if seg.bbox and not seg.bbox.contains(point):
+                    continue
+                if _is_point_on_polyline(point, seg.points, seg.buffer_m):
+                    if seg.max_speed_kmh < limit:
+                        limit = seg.max_speed_kmh
+                        matched_seg = seg
+                        corr_rule = r
+
+    return matched_seg, limit, corr_rule
+
+
+def _classify_speed_severity(
+    spd: float,
+    gov_limit: float,
+    margin: float,
+    is_tsr: bool,
+    overspeed_thresh: float,
+    tsr_thresh: float,
+) -> Tuple[OverspeedSeverity, str, int]:
+    """Classify speed severity tier, badge label, and UI color pair."""
+    pair_default = 1
+    pair_train_warn = 8
+    pair_train_alert = 9
+
+    if is_tsr:
+        if margin >= tsr_thresh:
+            return OverspeedSeverity.TSR_VIOLATION, f"[TSR OVERSPEED +{int(round(margin))}]", pair_train_alert
+        if margin >= 0.0:
+            return OverspeedSeverity.ADVISORY, f"[TSR WARN +{int(round(margin))}]", pair_train_warn
+        return OverspeedSeverity.NORMAL, f"[TSR: {int(round(gov_limit))} km/h]", pair_train_warn
+
+    if margin >= overspeed_thresh:
+        return OverspeedSeverity.OVERSPEED, f"[OVERSPEED +{int(round(margin))}]", pair_train_alert
+    if margin >= 0.0:
+        return OverspeedSeverity.ADVISORY, f"[WARN +{int(round(margin))}]", pair_train_warn
+    return OverspeedSeverity.NORMAL, "", pair_default
+
+
+def evaluate_train_speed(
+    point: GeoPoint,
+    current_speed: Optional[float],
+    corridor_id: Optional[str],
+    rules: Optional[Dict[str, CorridorSpeedRule]] = None,
+    active_tsrs: Optional[Sequence[SlowOrder]] = None,
+    default_network_limit_kmh: float = 120.0,
+    overspeed_threshold_kmh: float = 10.0,
+    tsr_overspeed_threshold_kmh: float = 5.0,
+    train_id: str = "",
+) -> SpeedEnforcementResult:
+    """Evaluate train instantaneous velocity against applicable corridor speed limits and active TSRs.
+
+    Args:
+        point: Train live geographic coordinate (lat, lng).
+        current_speed: Locomotive instantaneous speed in km/h (or None/0.0).
+        corridor_id: Active corridor identifier tag (or None).
+        rules: Dictionary of corridor speed limit rules indexed by corridor ID.
+        active_tsrs: List of currently active Slow Orders.
+        default_network_limit_kmh: Fallback speed limit when corridor is unmapped (default: 120.0).
+        overspeed_threshold_kmh: Minimum delta to trigger general overspeed alert (default: 10.0).
+        tsr_overspeed_threshold_kmh: Minimum delta to trigger TSR overspeed violation (default: 5.0).
+        train_id: Train identifier for traceability.
+
+    Returns:
+        SpeedEnforcementResult containing severity, governing limit, margin, and status tags.
+    """
+    speed_rules = rules if rules is not None else DEFAULT_CORRIDOR_SPEED_RULES
+    tsr_list = active_tsrs if active_tsrs is not None else ()
+    spd = max(0.0, float(current_speed)) if current_speed is not None else 0.0
+
+    # 1. Check for Active Temporary Speed Restrictions (TSRs)
+    matched_tsr, tsr_limit = _find_active_tsr(point, tsr_list)
+
+    # 2. Check for Segment-Level Speed Limits
+    corr_key = _normalize_corridor_key(corridor_id)
+    matched_seg, seg_limit, corr_rule = _find_segment_limit(point, corr_key, speed_rules)
+
+    # 3. Macro Corridor Base Limit & Governing Limit Resolution
+    base_limit = corr_rule.default_speed_kmh if corr_rule else default_network_limit_kmh
+    gov_limit = min(tsr_limit, seg_limit, base_limit)
+    is_tsr = (matched_tsr is not None and gov_limit == matched_tsr.max_speed_kmh)
+
+    if is_tsr and matched_tsr:
+        gov_name = f"TSR: {matched_tsr.name}"
+    elif matched_seg and gov_limit == matched_seg.max_speed_kmh:
+        gov_name = matched_seg.name
+    elif corr_rule:
+        gov_name = corr_rule.name
+    else:
+        gov_name = "Network Standard"
+
+    margin = spd - gov_limit
+    severity, status_label, pair = _classify_speed_severity(
+        spd, gov_limit, margin, is_tsr, overspeed_threshold_kmh, tsr_overspeed_threshold_kmh
+    )
+
+    return SpeedEnforcementResult(
+        train_id=train_id,
+        current_speed=spd,
+        governing_limit=gov_limit,
+        margin_kmh=margin,
+        severity=severity,
+        governing_name=gov_name,
+        is_tsr=is_tsr,
+        active_tsr=matched_tsr,
+        status_label=status_label,
+        color_pair=pair,
+    )
+

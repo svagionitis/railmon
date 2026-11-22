@@ -854,3 +854,138 @@ def format_infrastructure_table(
     )
     lines.append(border_char * width)
     return "\n".join(lines)
+
+
+def format_speed_limits_table(
+    rules: Dict[str, Any],
+    tsrs: Sequence[Any] = (),
+    corridor_filter: Optional[str] = None,
+    ascii_mode: bool = False,
+    title: str = "HELLENIC RAILWAYS - CORRIDOR SPEED LIMITS & RESTRICTIONS",
+) -> str:
+    """Format corridor speed limits, micro-segments, and TSRs into an aligned table.
+
+    Args:
+        rules: Dict of corridor ID to CorridorSpeedRule.
+        tsrs: Sequence of SlowOrder records.
+        corridor_filter: Optional corridor ID or substring filter.
+        ascii_mode: Whether to force 7-bit ASCII characters.
+        title: Table header title.
+
+    Returns:
+        Formatted multi-line table string.
+    """
+    width = 96
+    border_char = "=" if ascii_mode else "═"
+    divider_char = "-" if ascii_mode else "─"
+
+    lines: List[str] = [
+        border_char * width,
+        f" {title} ",
+        border_char * width,
+        f"{'CORRIDOR':<26} {'SEGMENT / ZONE':<34} {'SPEED LIMIT':<14} {'TYPE':<12}",
+        divider_char * width,
+    ]
+
+    corr_count = 0
+    seg_count = 0
+    tsr_count = 0
+
+    norm_filter = corridor_filter.strip().lower() if corridor_filter else None
+
+    # Base corridors and segments
+    for cid, rule in sorted(rules.items(), key=lambda x: x[0]):
+        if norm_filter and norm_filter not in cid.lower() and norm_filter not in getattr(rule, "name", "").lower():
+            continue
+        corr_count += 1
+        r_name = getattr(rule, "name", cid)
+        r_spd = getattr(rule, "default_speed_kmh", 120.0)
+        lines.append(
+            f"{cid[:25]:<26} {('Base Line Speed: ' + r_name)[:33]:<34} {r_spd:5.1f} km/h   {'BASE':<12}"
+        )
+        for seg in getattr(rule, "segments", ()):
+            seg_count += 1
+            s_name = getattr(seg, "name", "")
+            s_spd = getattr(seg, "max_speed_kmh", r_spd)
+            lines.append(
+                f"{cid[:25]:<26} {s_name[:33]:<34} {s_spd:5.1f} km/h   {'SEGMENT':<12}"
+            )
+
+    # TSRs
+    for tsr in tsrs:
+        t_corr = getattr(tsr, "corridor_id", "")
+        t_name = getattr(tsr, "name", "")
+        t_spd = getattr(tsr, "max_speed_kmh", 0.0)
+        if norm_filter and norm_filter not in t_corr.lower() and norm_filter not in t_name.lower():
+            continue
+        tsr_count += 1
+        lines.append(
+            f"{t_corr[:25]:<26} {('[TSR] ' + t_name)[:33]:<34} {t_spd:5.1f} km/h   {'SLOW-ORDER':<12}"
+        )
+
+    lines.append(divider_char * width)
+    lines.append(
+        f"Active Corridors: {corr_count} | Segments: {seg_count} | Active Slow Orders (TSR): {tsr_count}"
+    )
+    lines.append(border_char * width)
+    return "\n".join(lines)
+
+
+def format_slow_orders_table(
+    tsrs: Sequence[Any],
+    corridor_filter: Optional[str] = None,
+    ascii_mode: bool = False,
+    title: str = "HELLENIC RAILWAYS - ACTIVE TEMPORARY SPEED RESTRICTIONS (SLOW ORDERS)",
+) -> str:
+    """Format active Slow Orders (TSRs / Βραδυπορίες) into an aligned table.
+
+    Args:
+        tsrs: Sequence of SlowOrder records.
+        corridor_filter: Optional corridor ID or substring filter.
+        ascii_mode: Whether to force 7-bit ASCII characters.
+        title: Table header title.
+
+    Returns:
+        Formatted multi-line table string.
+    """
+    width = 96
+    border_char = "=" if ascii_mode else "═"
+    divider_char = "-" if ascii_mode else "─"
+
+    norm_filter = corridor_filter.strip().lower() if corridor_filter else None
+    filtered_tsrs = [
+        t for t in tsrs
+        if not norm_filter or (
+            norm_filter in getattr(t, "corridor_id", "").lower()
+            or norm_filter in getattr(t, "name", "").lower()
+        )
+    ]
+
+    if not filtered_tsrs:
+        return "No active slow orders matching filter criteria."
+
+    lines: List[str] = [
+        border_char * width,
+        f" {title} ",
+        border_char * width,
+        f"{'TSR ID':<22} {'RESTRICTION NAME':<30} {'MAX SPEED':<12} {'CORRIDOR':<24}",
+        divider_char * width,
+    ]
+
+    for tsr in filtered_tsrs:
+        tid = getattr(tsr, "id", "")
+        name = getattr(tsr, "name", "")
+        spd = getattr(tsr, "max_speed_kmh", 0.0)
+        corr = getattr(tsr, "corridor_id", "")
+        lines.append(
+            f"{tid[:21]:<22} {name[:29]:<30} {spd:5.1f} km/h  {corr[:23]:<24}"
+        )
+        reason = getattr(tsr, "reason", "")
+        if reason:
+            lines.append(f"  Reason: {reason}")
+
+    lines.append(divider_char * width)
+    lines.append(f"Total Active Slow Orders: {len(filtered_tsrs)}")
+    lines.append(border_char * width)
+    return "\n".join(lines)
+

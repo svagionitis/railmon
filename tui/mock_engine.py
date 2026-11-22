@@ -20,7 +20,14 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple
 
 from train_tracker import TrainPosition
-from tui.geo import GeoPoint, InfrastructureFeature, parse_infrastructure_geojson
+from tui.geo import (
+    CorridorSpeedRule,
+    GeoPoint,
+    InfrastructureFeature,
+    SlowOrder,
+    parse_infrastructure_geojson,
+    parse_speed_limits_json,
+)
 
 # Earth radius in meters (WGS84 mean radius)
 EARTH_RADIUS_M = 6371000.0
@@ -33,6 +40,7 @@ DATA_DIR = Path(__file__).parent / "data"
 DEFAULT_STATIONS_FILE = DATA_DIR / "stations.json"
 DEFAULT_TRACKS_FILE = DATA_DIR / "tracks.json"
 DEFAULT_INFRASTRUCTURE_FILE = DATA_DIR / "infrastructure.json"
+DEFAULT_SPEED_LIMITS_FILE = DATA_DIR / "speed_limits.json"
 
 
 def haversine_distance(p1: GeoPoint, p2: GeoPoint) -> float:
@@ -896,6 +904,43 @@ def load_infrastructure(path: Optional[str] = None) -> Dict[str, InfrastructureF
 
     parsed = parse_infrastructure_geojson(data)
     return {f.id: f for f in parsed}
+
+
+def load_speed_limits(
+    path: Optional[str] = None,
+) -> Tuple[Dict[str, CorridorSpeedRule], List[SlowOrder]]:
+    """Load and parse Greek railway corridor speed rules and slow orders.
+
+    Args:
+        path: Path to speed_limits.json. Defaults to package data directory.
+
+    Returns:
+        Tuple of (corridor_speed_rules_dict, slow_orders_list).
+    """
+    file_path = Path(path) if path else DEFAULT_SPEED_LIMITS_FILE
+    if not file_path.exists():
+        from tui.geo import DEFAULT_CORRIDOR_SPEED_RULES
+        return dict(DEFAULT_CORRIDOR_SPEED_RULES), []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return parse_speed_limits_json(data)
+    except Exception:
+        from tui.geo import DEFAULT_CORRIDOR_SPEED_RULES
+        return dict(DEFAULT_CORRIDOR_SPEED_RULES), []
+
+
+def load_slow_orders(path: Optional[str] = None) -> List[SlowOrder]:
+    """Load active Slow Orders (Temporary Speed Restrictions / TSRs).
+
+    Args:
+        path: Path to speed_limits.json. Defaults to package data directory.
+
+    Returns:
+        List of active SlowOrder domain records.
+    """
+    _, tsrs = load_speed_limits(path)
+    return [t for t in tsrs if t.active]
 
 
 class TrainMotionState(Enum):

@@ -1,0 +1,162 @@
+{
+  "version": "1.0",
+  "source": "Hellenic Railways Network Statement (Δήλωση Δικτύου ΟΣΕ)",
+  "source_url": "https://www.hellenicrailways.gr/etaireia/dilosi-diktyou",
+  "source_annex": "Παράρτημα ΙΙΙ-Α: Φόρτιση και Ταχύτητα & Παράρτημα Ι-Α/Β: Χαρακτηριστικά Γραμμών",
+  "corridors": [
+    {
+      "id": "pathe-mainline",
+      "name": "PATHE Mainline (Piraeus - Athens - Thessaloniki)",
+      "default_speed_kmh": 160.0,
+      "segments": [
+        {
+          "id": "pathe-piraeus-athens",
+          "name": "Piraeus - Athens Urban Section",
+          "max_speed_kmh": 80.0,
+          "points": [
+            [37.9482, 23.6425],
+            [37.9620, 23.6700],
+            [37.9730, 23.6940],
+            [37.9855, 23.7155],
+            [37.9926, 23.7203]
+          ]
+        },
+        {
+          "id": "pathe-ska-oinoi",
+          "name": "SKA - Oinoi Mountain Alignment",
+          "max_speed_kmh": 110.0,
+          "points": [
+            [38.0744, 23.7381],
+            [38.1065, 23.7760],
+            [38.1355, 23.8340],
+            [38.1600, 23.8575],
+            [38.2005, 23.8310],
+            [38.2460, 23.7400],
+            [38.2810, 23.6490],
+            [38.3194, 23.6067]
+          ]
+        },
+        {
+          "id": "pathe-tithorea-domokos",
+          "name": "Tithorea - Domokos High-Speed Bypass",
+          "max_speed_kmh": 160.0,
+          "points": [
+            [38.6014, 22.6681],
+            [38.7200, 22.5670],
+            [38.8040, 22.4950],
+            [38.8872, 22.3986],
+            [38.9650, 22.3740],
+            [39.0480, 22.3470],
+            [39.0880, 22.3320]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proastiakos-airport-kiato",
+      "name": "Proastiakos (Airport - SKA - Kiato)",
+      "default_speed_kmh": 120.0,
+      "segments": [
+        {
+          "id": "proastiakos-athens-airport",
+          "name": "Airport Expressway Corridor",
+          "max_speed_kmh": 120.0,
+          "points": [
+            [37.9365, 23.9450],
+            [38.0050, 23.9050],
+            [38.0350, 23.8650],
+            [38.0744, 23.7381]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proastiakos-chalkida",
+      "name": "Proastiakos Chalkida Branch",
+      "default_speed_kmh": 90.0,
+      "segments": []
+    },
+    {
+      "id": "thessaloniki-idomeni",
+      "name": "Thessaloniki - Idomeni International Corridor",
+      "default_speed_kmh": 120.0,
+      "segments": []
+    },
+    {
+      "id": "northern-corridor",
+      "name": "Northern Corridor (Thessaloniki - Alexandroupoli)",
+      "default_speed_kmh": 90.0,
+      "segments": [
+        {
+          "id": "northern-strymonas-gorge",
+          "name": "Strymonas River Mountain Pass",
+          "max_speed_kmh": 60.0,
+          "points": [
+            [41.2200, 23.3600],
+            [41.2450, 23.3650],
+            [41.2700, 23.3700]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thessaly-kalambaka",
+      "name": "Thessaly Regional (Palaiofarsalos - Kalambaka)",
+      "default_speed_kmh": 80.0,
+      "segments": []
+    },
+    {
+      "id": "thessaly-volos",
+      "name": "Thessaly Regional (Larissa - Volos)",
+      "default_speed_kmh": 80.0,
+      "segments": []
+    },
+    {
+      "id": "western-macedonia",
+      "name": "Western Macedonia (Platy - Edessa - Florina)",
+      "default_speed_kmh": 70.0,
+      "segments": []
+    }
+  ],
+  "slow_orders": [
+    {
+      "id": "TSR-PATHE-SPERCHEIOS",
+      "corridor_id": "pathe-mainline",
+      "name": "Spercheios Viaduct Maintenance",
+      "max_speed_kmh": 40.0,
+      "reason": "Bridge Pier Rehabilitation & Structural Sensor Testing",
+      "active": true,
+      "points": [
+        [38.8620, 22.4200],
+        [38.8750, 22.4300]
+      ],
+      "buffer_m": 250.0
+    },
+    {
+      "id": "TSR-PATHE-INOI-SWITCHES",
+      "corridor_id": "pathe-mainline",
+      "name": "Inoi Junction Turnout Renewal",
+      "max_speed_kmh": 60.0,
+      "reason": "Interlocking Switch Machine Calibration",
+      "active": true,
+      "points": [
+        [38.3180, 23.6050],
+        [38.3250, 23.6120]
+      ],
+      "buffer_m": 200.0
+    },
+    {
+      "id": "TSR-PROAST-CORINTH-CANAL",
+      "corridor_id": "proastiakos-airport-kiato",
+      "name": "Corinth Canal Bridge Inspection",
+      "max_speed_kmh": 40.0,
+      "reason": "Periodic Civil Engineering Deflection Assessment",
+      "active": true,
+      "points": [
+        [37.9240, 22.9800],
+        [37.9260, 22.9880]
+      ],
+      "buffer_m": 200.0
+    }
+  ]
+}

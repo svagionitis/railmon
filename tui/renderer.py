@@ -21,6 +21,7 @@ from tui.geo import (
     GeoProjector,
     InfrastructureFeature,
     InfrastructureType,
+    OverspeedSeverity,
     SCALE_BAR_INTERVALS_KM,
     ScaleBarSpec,
     detect_train_tunnel,
@@ -1800,7 +1801,13 @@ class TUIRenderer:
                 t_type = "SH"
 
             spd = int(round(pos.speed or 0))
-            spd_str = f"{spd:3d}"
+            overspeed_ids = getattr(snapshot, "overspeed_train_ids", ())
+            is_overspeed = pos.id in overspeed_ids
+            if is_overspeed:
+                spd_mark = "!" if not self.ascii_mode else "*"
+                spd_str = f"{spd_mark}{spd:<3d}"
+            else:
+                spd_str = f"{spd:4d}"
 
             dly = int(round(pos.delay or 0))
             dly_str = f"+{dly}m" if dly > 0 else (f"{dly}m" if dly < 0 else " 0m")
@@ -1810,7 +1817,7 @@ class TUIRenderer:
                 st_code = "HLT"
 
             row_line = f"{cursor_mark}{watch_mark}{seq_num}  {train_num:<6}{t_type:<5}{spd_str:>4} {dly_str:>5}  {st_code}"
-            pair = get_train_color_pair(record)
+            pair = PAIR_TRAIN_ALERT if is_overspeed else get_train_color_pair(record)
             row_attr = select_attr if is_selected else safe_color_pair(pair, curses.A_NORMAL)
             safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
@@ -1934,6 +1941,58 @@ class TUIRenderer:
             row_attr = select_attr if entry.is_selected else safe_color_pair(entry.color_pair, curses.A_NORMAL)
             safe_addstr(win, y, col_x, row_text, row_attr, max_w=max_x - col_x - 1, ascii_mode=self.ascii_mode)
 
+    @staticmethod
+    def _format_inspector_speed(
+        pos: Any,
+        record: Any,
+        snapshot: Any,
+        val_attr: int,
+        dim_attr: int,
+    ) -> Tuple[str, int, str, int]:
+        """Format locomotive speed display, color attribute, line limit, and limit color attribute."""
+        spd_val = pos.speed or 0.0
+        spd_display = f"{spd_val:5.1f} km/h"
+        spd_attr = val_attr
+        limit_display = "N/A"
+        limit_attr = dim_attr
+
+        speed_result = getattr(snapshot, "selected_speed_result", None) or getattr(record, "speed_result", None)
+        if speed_result is None:
+            return spd_display, spd_attr, limit_display, limit_attr
+
+        spd_val = speed_result.current_speed
+        gov_limit = speed_result.governing_limit
+
+        if speed_result.severity == OverspeedSeverity.TSR_VIOLATION:
+            spd_display = f"{spd_val:5.1f} km/h [TSR OVERSPEED]"
+            spd_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            limit_display = f"{gov_limit:3.0f} km/h [{speed_result.governing_name}]"
+            limit_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+        elif speed_result.severity == OverspeedSeverity.OVERSPEED:
+            delta_int = int(round(speed_result.margin_kmh))
+            spd_display = f"{spd_val:5.1f} km/h [OVERSPEED +{delta_int}]"
+            spd_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            limit_display = f"{gov_limit:3.0f} km/h ({speed_result.governing_name})"
+            limit_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD)
+        elif speed_result.is_tsr:
+            spd_display = f"{spd_val:5.1f} km/h [TSR: {int(round(gov_limit))} km/h]"
+            spd_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD)
+            limit_display = f"{gov_limit:3.0f} km/h [{speed_result.governing_name}]"
+            limit_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_NORMAL)
+        elif speed_result.severity == OverspeedSeverity.ADVISORY:
+            delta_int = int(round(speed_result.margin_kmh))
+            spd_display = f"{spd_val:5.1f} km/h [WARN +{delta_int}]"
+            spd_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD)
+            limit_display = f"{gov_limit:3.0f} km/h ({speed_result.governing_name})"
+            limit_attr = val_attr
+        else:
+            spd_display = f"{spd_val:5.1f} km/h"
+            spd_attr = val_attr
+            limit_display = f"{gov_limit:3.0f} km/h ({speed_result.governing_name})"
+            limit_attr = val_attr
+
+        return spd_display, spd_attr, limit_display, limit_attr
+
     def render_inspector(
         self,
         win: Any,
@@ -1998,8 +2057,9 @@ class TUIRenderer:
         else:
             dly_display += " (On Time)"
 
-        spd_val = pos.speed or 0.0
-        spd_display = f"{spd_val:5.1f} km/h"
+        spd_display, spd_attr, limit_display, limit_attr = self._format_inspector_speed(
+            pos, record, snapshot, val_attr, dim_attr
+        )
 
         origin = pos.origin or "N/A"
         dest = pos.destination or "N/A"
@@ -2054,13 +2114,14 @@ class TUIRenderer:
             ("Train No:", f"{pos.train_number or pos.id} ({pos.train_type or 'Passenger'})", val_attr),
             ("Route:", route_str, val_attr),
             ("Next Station:", next_station_str, val_attr),
-            ("Speed:", spd_display, val_attr),
+            ("Speed:", spd_display, spd_attr),
             ("Speed Trend:", sparkline_str, val_attr),
             ("Delay:", dly_display, delay_attr),
             ("Telemetry:", telemetry_str, telemetry_attr),
             ("Progress:", progress_str, val_attr),
             ("Coordinates:", coords_str, val_attr),
             ("Heading:", compass_str, val_attr),
+            ("Line Limit:", limit_display, limit_attr),
             ("Locomotive:", f"{pos.locomotive_number or 'N/A'}", val_attr),
             ("Cab Camera:", cam_display, val_attr),
             ("Status:", status_text, status_attr),
@@ -2130,6 +2191,10 @@ class TUIRenderer:
 
         status = snapshot.connection_status
         if status == ConnectionStatus.CONNECTED:
+            overspeed_cnt = getattr(snapshot, "overspeed_count", 0)
+            if overspeed_cnt > 0:
+                mark = "!" if self.ascii_mode else "⚠"
+                return f"[{mark} {overspeed_cnt} OVERSPEED] {self.glyphs.badge_live}({msg_rate:3.1f} msg/s) ", alert_attr
             return f"{self.glyphs.badge_live}({msg_rate:3.1f} msg/s) ", connected_attr
         if status == ConnectionStatus.CONNECTING:
             return self.glyphs.badge_connecting, status_attr
