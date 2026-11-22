@@ -1531,6 +1531,39 @@ Examples:
         help="Force pure 7-bit ASCII rendering fallback.",
     )
 
+    # 6d. conflicts & headway watchdog (F-5.1)
+    p_conflict = subparsers.add_parser(
+        "conflicts",
+        aliases=["conflict", "watchdog_conflicts"],
+        help="Audit active corridor headway compression and opposing train collision risks (F-5.1).",
+        description="Evaluate pairwise track conflicts, closing velocities, and passing siding meets across Greek corridors.",
+    )
+    p_conflict.add_argument(
+        "--corridor",
+        "-c",
+        type=str,
+        default=None,
+        help="Filter conflicts by corridor name or identifier (e.g. 'pathe-mainline', 'proastiakos-chalkida').",
+    )
+    p_conflict.add_argument(
+        "--critical-only",
+        action="store_true",
+        default=False,
+        help="Only display CRITICAL severity collision and emergency headway alerts.",
+    )
+    p_conflict.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output structured JSON conflict report to stdout.",
+    )
+    p_conflict.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
     # 7. watch (F-6.3)
     p_watch = subparsers.add_parser(
         "watch",
@@ -2983,6 +3016,59 @@ def run_sensor_health_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_conflicts_mode(args: argparse.Namespace) -> int:
+    """Execute the headless network conflict audit CLI command (F-5.1).
+
+    Args:
+        args: Parsed CLI namespace arguments.
+
+    Returns:
+        Exit code: 0 on clean execution.
+    """
+    from tui.geo import evaluate_train_conflicts, ConflictSeverity
+    from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
+    from storage.cli_formatters import format_conflict_table, format_conflict_json
+
+    is_ascii = bool(getattr(args, "ascii", False))
+    corridor_filter = getattr(args, "corridor", None)
+    crit_only = bool(getattr(args, "critical_only", False))
+    output_json = bool(getattr(args, "json", False))
+
+    stations = list(load_stations().values())
+    tracks = load_tracks()
+    engine = MockTelemetryEngine()
+    train_positions = engine.step(1.0)
+
+    alerts = evaluate_train_conflicts(
+        active_trains=train_positions,
+        tracks_data=tracks,
+        stations=stations,
+        now=time.time(),
+    )
+
+    if corridor_filter:
+        c_filt = corridor_filter.strip().lower()
+        alerts = [
+            a
+            for a in alerts
+            if c_filt in a.corridor_id.lower() or c_filt in a.corridor_name.lower()
+        ]
+
+    if crit_only:
+        alerts = [a for a in alerts if a.severity == ConflictSeverity.CRITICAL]
+
+    if output_json:
+        sys.stdout.write(format_conflict_json(alerts) + "\n")
+        return 0
+
+    table = format_conflict_table(
+        conflicts=alerts,
+        ascii_mode=is_ascii,
+    )
+    sys.stdout.write(table + "\n")
+    return 0
+
+
 def _emit_watch_events(
     evaluator: Any,
     events: Sequence[Any],
@@ -3212,6 +3298,9 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
 
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode in ("conflicts", "conflict", "watchdog_conflicts"):
+        return run_conflicts_mode(args)
+
     if args.mode in ("sensor-health", "health", "sensor_health"):
         return run_sensor_health_mode(args)
 

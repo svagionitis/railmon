@@ -4,6 +4,7 @@ Zero external dependencies; pure Python standard library.
 """
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import unicodedata
 import zoneinfo
@@ -1067,4 +1068,110 @@ def format_sensor_health_table(
     lines.append(f"Total Trains: {len(filtered)} | Critical Alerts: {alert_count} | Stale Warnings: {stale_count}")
     lines.append(border_char * width)
     return "\n".join(lines)
+
+
+def format_conflict_table(
+    conflicts: Sequence[Any],
+    ascii_mode: bool = False,
+    title: str = "HELLENIC RAILWAYS - FLEET HEADWAY & CONFLICT AUDIT (F-5.1)",
+) -> str:
+    """Format detected train conflicts into an aligned CLI terminal table.
+
+    Args:
+        conflicts: Sequence of ConflictAlert objects.
+        ascii_mode: Whether to force 7-bit ASCII box characters.
+        title: Header banner title.
+
+    Returns:
+        Formatted multi-line table string.
+    """
+    width = 100
+    border_char = "=" if ascii_mode else "═"
+    divider_char = "-" if ascii_mode else "─"
+
+    if not conflicts:
+        return (
+            f"{border_char * width}\n"
+            f" {title} \n"
+            f"{border_char * width}\n"
+            f"Zero active train conflicts or headway violations detected across the network.\n"
+            f"{border_char * width}"
+        )
+
+    lines: List[str] = [
+        border_char * width,
+        f" {title} ",
+        border_char * width,
+        f"{'SEV':<9} {'TYPE':<18} {'TRAIN 1':<8} {'TRAIN 2':<8} {'CORRIDOR':<20} {'DIST':<8} {'CLOSING':<10} {'TTC':<6} {'TRACK':<6}",
+        divider_char * width,
+    ]
+
+    for alert in conflicts:
+        sev = getattr(alert.severity, "value", str(alert.severity))[:8]
+        ctype = getattr(alert.conflict_type, "value", str(alert.conflict_type))[:17]
+        t1 = str(alert.train_number_1)[:7]
+        t2 = str(alert.train_number_2)[:7]
+        cname = str(alert.corridor_name)[:19]
+        dist_str = f"{alert.distance_km:.1f}km"
+        cls_str = f"{alert.closing_speed_kmh:.0f}km/h" if alert.closing_speed_kmh > 0 else "--"
+        ttc_str = f"{int(alert.time_to_collision_sec)}s" if alert.time_to_collision_sec is not None else "--"
+        track_str = "SINGLE" if alert.is_single_track else "DOUBLE"
+
+        lines.append(
+            f"{sev:<9} {ctype:<18} {t1:<8} {t2:<8} {cname:<20} {dist_str:<8} {cls_str:<10} {ttc_str:<6} {track_str:<6}"
+        )
+
+    lines.append(divider_char * width)
+    crit_cnt = sum(
+        1 for a in conflicts if getattr(a.severity, "value", str(a.severity)) == "CRITICAL"
+    )
+    warn_cnt = sum(
+        1 for a in conflicts if getattr(a.severity, "value", str(a.severity)) == "WARNING"
+    )
+    adv_cnt = sum(
+        1 for a in conflicts if getattr(a.severity, "value", str(a.severity)) == "ADVISORY"
+    )
+    lines.append(
+        f"Active Conflicts: {len(conflicts)} (Critical: {crit_cnt}, Warning: {warn_cnt}, Advisory: {adv_cnt})"
+    )
+    lines.append(border_char * width)
+    return "\n".join(lines)
+
+
+def format_conflict_json(conflicts: Sequence[Any]) -> str:
+    """Serialize detected train conflicts to formatted JSON string.
+
+    Args:
+        conflicts: Sequence of ConflictAlert objects.
+
+    Returns:
+        JSON string representation with 2-space indentation.
+    """
+    items = []
+    for c in conflicts:
+        items.append(
+            {
+                "alert_id": c.alert_id,
+                "train_id_1": c.train_id_1,
+                "train_number_1": c.train_number_1,
+                "train_id_2": c.train_id_2,
+                "train_number_2": c.train_number_2,
+                "corridor_id": c.corridor_id,
+                "corridor_name": c.corridor_name,
+                "conflict_type": getattr(c.conflict_type, "value", str(c.conflict_type)),
+                "severity": getattr(c.severity, "value", str(c.severity)),
+                "distance_km": round(c.distance_km, 3),
+                "closing_speed_kmh": round(c.closing_speed_kmh, 1),
+                "time_to_collision_sec": (
+                    round(c.time_to_collision_sec, 1)
+                    if c.time_to_collision_sec is not None
+                    else None
+                ),
+                "is_single_track": c.is_single_track,
+                "station_proximity_name": c.station_proximity_name,
+                "description": c.description,
+                "timestamp": c.timestamp,
+            }
+        )
+    return json.dumps({"active_conflicts": items, "count": len(items)}, indent=2)
 

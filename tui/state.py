@@ -12,6 +12,10 @@ from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, T
 from train_tracker import TrainPosition
 from tui.geo import (
     DEFAULT_CORRIDOR_SPEED_RULES,
+    ConflictAlert,
+    ConflictSeverity,
+    ConflictType,
+    ConflictWatchdogConfig,
     CorridorSpeedRule,
     GeoPoint,
     NORTHERN_GREECE_PRESET,
@@ -23,6 +27,7 @@ from tui.geo import (
     SlowOrder,
     SpeedEnforcementResult,
     evaluate_sensor_health,
+    evaluate_train_conflicts,
     evaluate_train_speed,
 )
 from tui.theme import ThemeProfile, get_next_theme
@@ -157,6 +162,7 @@ class TrainRecord:
     last_moved_time: float = field(default_factory=time.time)
     station_dwell_start: Optional[float] = None
     sensor_health: Optional[SensorHealthAssessment] = None
+    active_conflict: Optional[ConflictAlert] = None
 
     def clone(self) -> "TrainRecord":
         """Create a thread-isolated shallow copy with an independent trail deque."""
@@ -171,6 +177,7 @@ class TrainRecord:
             last_moved_time=self.last_moved_time,
             station_dwell_start=self.station_dwell_start,
             sensor_health=self.sensor_health,
+            active_conflict=self.active_conflict,
         )
 
     def append_breadcrumb(
@@ -272,6 +279,10 @@ class StateSnapshot:
     stale_count: int = 0
     frozen_train_ids: Tuple[str, ...] = ()
     dropped_train_ids: Tuple[str, ...] = ()
+    active_conflicts: Tuple[ConflictAlert, ...] = ()
+    critical_conflict_count: int = 0
+    warning_conflict_count: int = 0
+    selected_conflict: Optional[ConflictAlert] = None
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -458,6 +469,19 @@ class TrainStateStore:
         except (OSError, ValueError, KeyError, TypeError):
             self._stations = []
 
+        # Corridor headway & opposing conflict watchdog (F-5.1)
+        self._conflict_config: ConflictWatchdogConfig = ConflictWatchdogConfig()
+        self._tracks_data: Optional[Dict[str, Any]] = None
+        try:
+            from tui.mock_engine import load_tracks
+
+            self._tracks_data = load_tracks()
+        except (OSError, ValueError, KeyError, TypeError):
+            self._tracks_data = None
+        self._active_conflicts: Dict[str, ConflictAlert] = {}
+        self._previous_conflict_keys: Set[str] = set()
+        self._new_conflict_bell_pending: bool = False
+
     # ------------------------------------------------------------------
     # Telemetry Ingestion (Called by StreamWorker / ReplayWorker Thread)
     # ------------------------------------------------------------------
@@ -526,6 +550,65 @@ class TrainStateStore:
             )
             self._trains[pos.id] = record
 
+    def _recompute_conflicts(self, now: float) -> None:
+        """Evaluate and cache pairwise conflicts across all active trains (caller holds self._lock)."""
+        active_positions = [rec.position for rec in self._trains.values()]
+        alerts = evaluate_train_conflicts(
+            active_trains=active_positions,
+            tracks_data=self._tracks_data,
+            stations=self._stations,
+            config=self._conflict_config,
+            now=now,
+        )
+        for rec in self._trains.values():
+            rec.active_conflict = None
+
+        new_conflicts_by_id: Dict[str, ConflictAlert] = {}
+        for alert in alerts:
+            new_conflicts_by_id[alert.alert_id] = alert
+            if alert.train_id_1 in self._trains:
+                if (
+                    self._trains[alert.train_id_1].active_conflict is None
+                    or alert.severity == ConflictSeverity.CRITICAL
+                ):
+                    self._trains[alert.train_id_1].active_conflict = alert
+            if alert.train_id_2 in self._trains:
+                if (
+                    self._trains[alert.train_id_2].active_conflict is None
+                    or alert.severity == ConflictSeverity.CRITICAL
+                ):
+                    self._trains[alert.train_id_2].active_conflict = alert
+
+        # Check for newly elevated conflicts (edge-triggered bell latch)
+        for aid, alert in new_conflicts_by_id.items():
+            if aid not in self._previous_conflict_keys and alert.severity in (
+                ConflictSeverity.CRITICAL,
+                ConflictSeverity.WARNING,
+            ):
+                self._new_conflict_bell_pending = True
+
+        self._previous_conflict_keys = set(new_conflicts_by_id.keys())
+        self._active_conflicts = new_conflicts_by_id
+
+    def consume_conflict_bell(self) -> bool:
+        """Atomically query and reset the edge-triggered conflict bell latch."""
+        with self._lock:
+            pending = self._new_conflict_bell_pending
+            self._new_conflict_bell_pending = False
+            return pending
+
+    def set_conflict_config(self, config: ConflictWatchdogConfig) -> None:
+        """Update operational parameters and thresholds for the conflict watchdog."""
+        with self._lock:
+            self._conflict_config = config
+            self._version += 1
+
+    def set_tracks_data(self, tracks: Dict[str, Any]) -> None:
+        """Explicitly provide or update track corridors for conflict spatial analysis."""
+        with self._lock:
+            self._tracks_data = tracks
+            self._version += 1
+
     def update_positions(
         self,
         positions: List[TrainPosition],
@@ -540,6 +623,8 @@ class TrainStateStore:
             now = float(virtual_now) if virtual_now is not None else time.time()
             for pos in positions:
                 self._upsert_train_position(pos, now)
+
+            self._recompute_conflicts(now)
 
             if virtual_now is not None:
                 self._replay_virtual_time = now
@@ -559,6 +644,7 @@ class TrainStateStore:
         with self._lock:
             for pos, obs_epoch in observations:
                 self._upsert_train_position(pos, float(obs_epoch))
+            self._recompute_conflicts(float(virtual_now))
             self._replay_virtual_time = float(virtual_now)
             if observations:
                 self._total_messages += 1
@@ -579,6 +665,8 @@ class TrainStateStore:
             self._trains.clear()
             for pos, obs_epoch in observations:
                 self._upsert_train_position(pos, float(obs_epoch))
+
+            self._recompute_conflicts(float(virtual_now))
 
             if self._selected_id and self._selected_id not in self._trains:
                 self._selected_id = None
@@ -749,6 +837,8 @@ class TrainStateStore:
                 rec.station_dwell_start = new_dwell_start
                 rec.sensor_health = health
 
+            self._recompute_conflicts(ref_now)
+
             trains_copy = {tid: rec.clone() for tid, rec in self._trains.items()}
             filtered = self._compute_filtered_list(trains_copy)
 
@@ -784,6 +874,14 @@ class TrainStateStore:
 
             sel_speed_res = selected_record.speed_result if selected_record else None
             sel_sensor_health = selected_record.sensor_health if selected_record else None
+            sel_conflict = selected_record.active_conflict if selected_record else None
+
+            critical_conflicts = sum(
+                1 for a in self._active_conflicts.values() if a.severity == ConflictSeverity.CRITICAL
+            )
+            warning_conflicts = sum(
+                1 for a in self._active_conflicts.values() if a.severity == ConflictSeverity.WARNING
+            )
 
             return StateSnapshot(
                 trains=trains_copy,
@@ -825,6 +923,10 @@ class TrainStateStore:
                 stale_count=stale_cnt,
                 frozen_train_ids=tuple(frozen_ids),
                 dropped_train_ids=tuple(dropped_ids),
+                active_conflicts=tuple(self._active_conflicts.values()),
+                critical_conflict_count=critical_conflicts,
+                warning_conflict_count=warning_conflicts,
+                selected_conflict=sel_conflict,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:

@@ -1672,6 +1672,21 @@ class TUIApp:
         # In NORMAL mode, route to standard navigation handlers
         return self._handle_normal_input(key)
 
+    def _check_audio_bell_triggers(self, snapshot: StateSnapshot) -> None:
+        """Trigger terminal bell audio on elevated sensor anomalies or conflict alerts."""
+        curr_sensor_alerts = getattr(snapshot, "frozen_count", 0) + getattr(snapshot, "dropped_count", 0)
+        has_sensor_alert = curr_sensor_alerts > self._prev_sensor_alert_count
+        self._prev_sensor_alert_count = curr_sensor_alerts
+        has_conflict_alert = self.store.consume_conflict_bell()
+
+        if has_sensor_alert or has_conflict_alert:
+            try:
+                from watchdog import dispatch_terminal_bell
+
+                dispatch_terminal_bell()
+            except (OSError, RuntimeError, ImportError) as exc:
+                logger.debug("Failed to dispatch terminal bell: %s", exc)
+
     def run_loop(self) -> None:
         """Execute the double-buffered application event loop at target FPS."""
         self.setup_terminal()
@@ -1718,16 +1733,8 @@ class TUIApp:
                     self._last_watch_eval_ts = frame_start
                     self._evaluate_in_tui_watch_alerts(snapshot)
 
-                # 3c. Terminal bell audio trigger on new sensor health alerts (F-5.2)
-                curr_sensor_alerts = getattr(snapshot, "frozen_count", 0) + getattr(snapshot, "dropped_count", 0)
-                if curr_sensor_alerts > self._prev_sensor_alert_count:
-                    try:
-                        from watchdog import dispatch_terminal_bell
-
-                        dispatch_terminal_bell()
-                    except (OSError, RuntimeError, ImportError) as exc:
-                        logger.debug("Failed to dispatch terminal bell on sensor health alert: %s", exc)
-                self._prev_sensor_alert_count = curr_sensor_alerts
+                # 3c. Audio bell triggers for sensor health and track conflicts (F-5.1 & F-5.2)
+                self._check_audio_bell_triggers(snapshot)
 
                 # 4. Extract current signatures for dirty check
                 current_sec = (

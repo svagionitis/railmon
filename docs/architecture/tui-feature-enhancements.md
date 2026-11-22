@@ -22,7 +22,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 3 (Map & UX)** | **F-3.4** | Dynamic Conformal Map Scale Bar Overlay | *(Auto)* | **Implemented** | [`tui/renderer.py`](../../tui/renderer.py), [`tui/geo.py`](../../tui/geo.py) |
 | **Tier 4 (Storage)** | **F-4.1** | Instant In-TUI GeoJSON / CSV Trajectory Snapshot Export | `e` / `E` | **Implemented** | [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`storage/repository.py`](../../storage/repository.py) |
 | **Tier 4 (Storage)** | **F-4.2** | SQLite Historical DVR Playback & Timeline Scrubbing | `--replay` | **Implemented** | [`tui/app.py`](../../tui/app.py), [`tui/stream_worker.py`](../../tui/stream_worker.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
-| **Tier 5 (Safety)** | **F-5.1** | Corridor Headway & Opposing Train Conflict Watchdog | *(Auto / Bell)* | Planned | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 5 (Safety)** | **F-5.1** | Corridor Headway & Opposing Train Conflict Watchdog | `railmon conflicts` | **Implemented** | [`tui/geo.py`](../../tui/geo.py), [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py), [`train_tracker.py`](../../train_tracker.py), [`watchdog.py`](../../watchdog.py) |
 | **Tier 5 (Safety)** | **F-5.2** | Telemetry Drop & Sensor Freezing Watchdog | *(Auto)* | **Implemented** | [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/geo.py`](../../tui/geo.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 5 (Safety)** | **F-5.3** | Corridor Speed Limit Exceedance & Slow-Order Alerts | *(Auto)* | **Implemented** | [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 6 (Commuter)** | **F-6.1** | CLI Station Departure & Arrival Boards | `railmon departures` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
@@ -545,7 +545,9 @@ Operational rail safety and anomaly detection provide automated surveillance ove
 
 ---
 
-### F-5.1: Corridor Headway & Opposing Train Conflict Watchdog — *Planned*
+### F-5.1: Corridor Headway & Opposing Train Conflict Watchdog — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-5-1-corridor-headway-and-opposing-train-conflict-watchdog-plan.md`](../plans/features/f-5-1-corridor-headway-and-opposing-train-conflict-watchdog-plan.md)
 
 #### Overview
 On the Greek rail network, sections of single-track infrastructure (such as portions of the Peloponnese network, regional spurs, and ongoing maintenance single-line operations on the PATHE corridor) require strict block occupancy. This feature introduces an automated headway and collision vector evaluation engine in [`tui/state.py`](../../tui/state.py) that continuously evaluates spatial distance and course vectors between trains on shared corridors.

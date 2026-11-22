@@ -17,6 +17,9 @@ import unicodedata
 
 from tui.geo import (
     BrailleCanvas,
+    ConflictAlert,
+    ConflictSeverity,
+    ConflictType,
     GeoPoint,
     GeoProjector,
     InfrastructureFeature,
@@ -1560,7 +1563,13 @@ class TUIRenderer:
             is_selected = selected_record is not None and pos.id == selected_record.position.id
             heading_deg = pos.track_heading if pos.track_heading is not None else pos.course
             glyph = get_heading_glyph(heading_deg, ascii_mode=self.ascii_mode)
-            train_attr = safe_color_pair(get_train_color_pair(record), curses.A_BOLD)
+            c_alert = getattr(record, "active_conflict", None)
+            if c_alert and c_alert.severity == ConflictSeverity.CRITICAL:
+                train_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            elif c_alert and c_alert.severity == ConflictSeverity.WARNING:
+                train_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+            else:
+                train_attr = safe_color_pair(get_train_color_pair(record), curses.A_BOLD)
             if is_selected:
                 train_attr |= curses.A_REVERSE | curses.A_BOLD
 
@@ -1736,6 +1745,17 @@ class TUIRenderer:
         self, record: TrainRecord, is_overspeed: bool
     ) -> Tuple[str, int]:
         """Resolve 3-letter status mnemonic and color pair for active trains roster."""
+        conflict = getattr(record, "active_conflict", None)
+        if conflict is not None:
+            if conflict.severity == ConflictSeverity.CRITICAL:
+                code = "!OP" if conflict.conflict_type == ConflictType.OPPOSING_COLLISION else "!HW"
+                return code, PAIR_TRAIN_ALERT
+            if conflict.severity == ConflictSeverity.WARNING:
+                code = "?OP" if conflict.conflict_type == ConflictType.OPPOSING_COLLISION else "?HW"
+                return code, PAIR_TRAIN_WARN
+            if conflict.conflict_type == ConflictType.STATION_MEET:
+                return "MET", PAIR_TRAIN_PROAST
+
         pos = record.position
         st_code = "RUN" if (pos.speed is None or pos.speed >= 1.0) else "HLT"
         health = getattr(record, "sensor_health", None)
@@ -2223,6 +2243,23 @@ class TUIRenderer:
             ("Chainage:", chainage_str, val_attr),
         ]
 
+        conflict = getattr(record, "active_conflict", None)
+        if conflict is not None:
+            c_mark = "!" if self.ascii_mode else "⚠"
+            if conflict.severity == ConflictSeverity.CRITICAL:
+                c_display = f"[{c_mark} CRITICAL] {conflict.conflict_type.value}: {conflict.train_number_2} ({conflict.distance_km:.1f}km)"
+                c_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            elif conflict.severity == ConflictSeverity.WARNING:
+                c_display = f"[{c_mark} WARNING] {conflict.conflict_type.value}: {conflict.train_number_2} ({conflict.distance_km:.1f}km)"
+                c_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+            else:
+                c_display = f"[MEET] Passing at {conflict.station_proximity_name or 'Station'} ({conflict.distance_km:.1f}km)"
+                c_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_NORMAL)
+            rows.insert(3, ("Conflict:", c_display, c_attr))
+            if conflict.time_to_collision_sec is not None:
+                ttc_display = f"~{int(conflict.time_to_collision_sec)}s (Rel: {conflict.closing_speed_kmh:.0f} km/h)"
+                rows.insert(4, ("TTC / Rel:", ttc_display, c_attr))
+
         inner_h = max_y - 2
         for r_idx, (label, value, attr) in enumerate(rows):
             if r_idx >= inner_h:
@@ -2289,7 +2326,13 @@ class TUIRenderer:
             overspeed_cnt = getattr(snapshot, "overspeed_count", 0)
             frozen_cnt = getattr(snapshot, "frozen_count", 0)
             dropped_cnt = getattr(snapshot, "dropped_count", 0)
+            crit_conflicts = getattr(snapshot, "critical_conflict_count", 0)
+            warn_conflicts = getattr(snapshot, "warning_conflict_count", 0)
             alert_items = []
+            if crit_conflicts > 0:
+                alert_items.append(f"{crit_conflicts} CRIT CONFLICT")
+            elif warn_conflicts > 0:
+                alert_items.append(f"{warn_conflicts} CONFLICT")
             if overspeed_cnt > 0:
                 alert_items.append(f"{overspeed_cnt} OVERSPEED")
             if frozen_cnt > 0:
@@ -2407,6 +2450,30 @@ class TUIRenderer:
                 0,
                 toast_text,
                 toast_attr,
+                max_w=max(0, width - badge_w - 1),
+                ascii_mode=self.ascii_mode,
+            )
+        elif getattr(snapshot, "critical_conflict_count", 0) > 0 and snapshot.active_conflicts:
+            crit_c = next(
+                (c for c in snapshot.active_conflicts if c.severity == ConflictSeverity.CRITICAL),
+                snapshot.active_conflicts[0],
+            )
+            mark = "!" if self.ascii_mode else "⚠"
+            ttc_str = (
+                f", TTC {int(crit_c.time_to_collision_sec)}s"
+                if crit_c.time_to_collision_sec is not None
+                else ""
+            )
+            c_text = (
+                f" [{mark} CRITICAL CONFLICT: {crit_c.train_number_1} <-> {crit_c.train_number_2} "
+                f"on {crit_c.corridor_name} ({crit_c.distance_km:.1f}km{ttc_str})] "
+            )
+            safe_addstr(
+                win,
+                0,
+                0,
+                c_text,
+                alert_attr,
                 max_w=max(0, width - badge_w - 1),
                 ascii_mode=self.ascii_mode,
             )

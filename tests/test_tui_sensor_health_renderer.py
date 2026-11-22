@@ -182,8 +182,8 @@ class TestSensorHealthRenderer(unittest.TestCase):
         """Verify status bar anomaly badge renders properly in ASCII fallback mode."""
         store = TrainStateStore()
         now = time.time()
-        pos_frz = _make_pos("t-frz", "1599", speed=140.0)
-        pos_drp = _make_pos("t-drp", "50", speed=120.0)
+        pos_frz = _make_pos("t-frz", "1599", speed=140.0, lat=39.5)
+        pos_drp = _make_pos("t-drp", "50", speed=120.0, lat=40.5)
         store.update_positions([pos_frz, pos_drp])
         store.set_connection_status(ConnectionStatus.CONNECTED)
 

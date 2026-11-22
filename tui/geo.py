@@ -11,9 +11,9 @@ import math
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, Union
 
 
 # Base Unicode code point for Braille Patterns block (U+2800)
@@ -2034,5 +2034,495 @@ def evaluate_sensor_health(
                 )
 
     return assessment, new_anchor_pt, new_anchor_time, new_dwell_start
+
+
+# ---------------------------------------------------------------------------
+# F-5.1: Corridor Headway & Opposing Train Conflict Watchdog
+# ---------------------------------------------------------------------------
+
+DEFAULT_SINGLE_TRACK_CORRIDORS: FrozenSet[str] = frozenset({
+    "proastiakos-chalkida",
+    "thessaloniki-idomeni",
+    "thessaly-kalambaka",
+    "thessaly-volos",
+    "western-macedonia",
+    "northern-corridor",
+})
+
+CORRIDOR_DISPLAY_NAMES: Dict[str, str] = {
+    "pathe-mainline": "PATHE Mainline",
+    "proastiakos-airport-kiato": "Airport - SKA - Kiato",
+    "proastiakos-chalkida": "Chalkida Branch",
+    "thessaloniki-idomeni": "Idomeni International",
+    "northern-corridor": "Eastern Macedonia & Thrace",
+    "thessaly-kalambaka": "Thessaly West Branch",
+    "thessaly-volos": "Thessaly East Branch",
+    "western-macedonia": "Western Macedonia Branch",
+}
+
+
+class ConflictSeverity(str, Enum):
+    """Urgency level of a detected rail conflict."""
+
+    CRITICAL = "CRITICAL"   # Imminent collision / emergency braking limit breached
+    WARNING = "WARNING"     # Headway compression or opposing approach within warning horizon
+    ADVISORY = "ADVISORY"   # Crossing meet or low-speed junction convergence
+
+
+class ConflictType(str, Enum):
+    """Tactical category of train conflict."""
+
+    OPPOSING_COLLISION = "OPPOSING_COLLISION"   # Reciprocal headings on shared single-line infrastructure
+    HEADWAY_VIOLATION = "HEADWAY_VIOLATION"     # Excessive proximity to preceding train in same direction
+    CONVERGING_JUNCTION = "CONVERGING_JUNCTION" # Simultaneous approach to converging switch throat
+    STATION_MEET = "STATION_MEET"               # Authorized train crossing at station with passing siding
+
+
+@dataclass(frozen=True)
+class ConflictWatchdogConfig:
+    """Operational parameters and spatial thresholds for conflict evaluation.
+
+    Attributes:
+        opposing_critical_distance_km: Distance threshold in km for critical opposing collision alert.
+        opposing_warning_distance_km: Distance threshold in km for warning opposing approach alert.
+        headway_critical_distance_km: Distance threshold in km for critical headway violation.
+        headway_warning_distance_km: Distance threshold in km for warning headway compression.
+        station_siding_radius_m: Radius around station centroid in meters considered passing loop.
+        heading_opposing_tolerance_deg: Angular tolerance in degrees around 180° for opposing heading.
+        heading_codirectional_tolerance_deg: Angular tolerance in degrees around 0° for co-directional heading.
+        min_evaluation_speed_kmh: Minimum train speed in km/h to evaluate kinematic vectors.
+        junction_convergence_distance_km: Distance to junction in km for converging approach evaluation.
+        junction_eta_window_sec: Difference in ETA in seconds to junction switch throat triggering advisory.
+        single_line_working_corridors: Set of corridor IDs currently operating under single-line working.
+    """
+
+    opposing_critical_distance_km: float = 10.0
+    opposing_warning_distance_km: float = 20.0
+    headway_critical_distance_km: float = 1.0
+    headway_warning_distance_km: float = 2.5
+    station_siding_radius_m: float = 350.0
+    heading_opposing_tolerance_deg: float = 35.0
+    heading_codirectional_tolerance_deg: float = 40.0
+    min_evaluation_speed_kmh: float = 5.0
+    junction_convergence_distance_km: float = 5.0
+    junction_eta_window_sec: float = 60.0
+    single_line_working_corridors: Set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class ConflictAlert:
+    """Immutable data transfer object representing an active track conflict.
+
+    Attributes:
+        alert_id: Deterministic composite identifier (e.g. '1597_1598_OPPOSING').
+        train_id_1: Primary train identifier.
+        train_number_1: Primary commercial train number.
+        train_id_2: Secondary train identifier.
+        train_number_2: Secondary commercial train number.
+        corridor_id: Corridor identifier (e.g. 'proastiakos-chalkida').
+        corridor_name: Human-readable corridor display name.
+        conflict_type: Category of conflict (opposing, headway, junction, meet).
+        severity: Urgency tier (CRITICAL, WARNING, ADVISORY).
+        distance_km: Spatial geodesic separation in kilometers.
+        closing_speed_kmh: Mutual closing velocity in km/h.
+        time_to_collision_sec: Estimated time to collision in seconds (None if diverging or stationary).
+        is_single_track: True if corridor is physically single-track or in single-line working.
+        station_proximity_name: Name of nearby station if within passing siding radius.
+        description: Operator alert text.
+        timestamp: UNIX epoch timestamp when conflict was generated.
+    """
+
+    alert_id: str
+    train_id_1: str
+    train_number_1: str
+    train_id_2: str
+    train_number_2: str
+    corridor_id: str
+    corridor_name: str
+    conflict_type: ConflictType
+    severity: ConflictSeverity
+    distance_km: float
+    closing_speed_kmh: float
+    time_to_collision_sec: Optional[float]
+    is_single_track: bool
+    station_proximity_name: Optional[str]
+    description: str
+    timestamp: float
+
+
+def compute_forward_bearing(p1: GeoPoint, p2: GeoPoint) -> float:
+    """Compute spherical forward azimuth bearing in degrees [0.0, 360.0) from p1 to p2.
+
+    Args:
+        p1: Origin geographic point.
+        p2: Destination geographic point.
+
+    Returns:
+        Forward bearing angle in degrees [0.0, 360.0), where 0 is North, 90 is East.
+    """
+    phi1 = math.radians(p1.lat)
+    phi2 = math.radians(p2.lat)
+    delta_lambda = math.radians(p2.lng - p1.lng)
+
+    x = math.sin(delta_lambda) * math.cos(phi2)
+    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(delta_lambda)
+    bearing = (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+    return bearing
+
+
+def compute_relative_heading_delta(course1: float, course2: float) -> float:
+    """Compute normalized angular divergence between two heading vectors in degrees [0.0, 180.0].
+
+    Args:
+        course1: Heading angle in degrees for first train.
+        course2: Heading angle in degrees for second train.
+
+    Returns:
+        Absolute normalized divergence angle in [0.0, 180.0].
+    """
+    diff = abs(course1 - course2) % 360.0
+    return min(diff, 360.0 - diff)
+
+
+def compute_closing_velocity_kmh(
+    p1: GeoPoint,
+    speed1_kmh: float,
+    course1_deg: float,
+    p2: GeoPoint,
+    speed2_kmh: float,
+    course2_deg: float,
+) -> float:
+    """Compute mutual closing velocity in km/h between two trains using line-of-sight vector projection.
+
+    A positive value indicates the trains are moving toward each other (distance decreasing).
+    A non-positive value indicates the distance between them is constant or expanding.
+
+    Args:
+        p1: Location of first train.
+        speed1_kmh: Ground velocity of first train in km/h.
+        course1_deg: Heading angle of first train in degrees.
+        p2: Location of second train.
+        speed2_kmh: Ground velocity of second train in km/h.
+        course2_deg: Heading angle of second train in degrees.
+
+    Returns:
+        Closing velocity in km/h.
+    """
+    b12 = compute_forward_bearing(p1, p2)
+    b21 = compute_forward_bearing(p2, p1)
+
+    alpha1 = compute_relative_heading_delta(course1_deg, b12)
+    alpha2 = compute_relative_heading_delta(course2_deg, b21)
+
+    v1_proj = speed1_kmh * math.cos(math.radians(alpha1))
+    v2_proj = speed2_kmh * math.cos(math.radians(alpha2))
+
+    return v1_proj + v2_proj
+
+
+def find_station_passing_meet(
+    pos1: Any,
+    pos2: Any,
+    stations: Optional[Sequence[Any]],
+    radius_m: float = 350.0,
+) -> Optional[str]:
+    """Check if either or both trains are safely dwelling within a station passing siding.
+
+    Args:
+        pos1: Position of first train.
+        pos2: Position of second train.
+        stations: Optional list of station nodes.
+        radius_m: Siding / platform tolerance radius in meters.
+
+    Returns:
+        Canonical station name if an authorized passing meet is detected; None otherwise.
+    """
+    if not stations:
+        return None
+
+    spd1 = float(getattr(pos1, "speed", 0.0) or 0.0)
+    spd2 = float(getattr(pos2, "speed", 0.0) or 0.0)
+
+    # If both trains are in rapid motion (> 15 km/h), this is not an active siding meet
+    if spd1 > 15.0 and spd2 > 15.0:
+        return None
+
+    pt1 = GeoPoint(lat=float(pos1.lat), lng=float(pos1.lng))
+    pt2 = GeoPoint(lat=float(pos2.lat), lng=float(pos2.lng))
+
+    # Check if either train is stopped/dwelling near a station
+    if spd1 <= 5.0:
+        stn1, d1 = find_nearest_station_aabb(pt1, stations, max_radius_m=radius_m)
+        if stn1 is not None:
+            return getattr(stn1, "name_en", getattr(stn1, "name_el", getattr(stn1, "id", "Station")))
+
+    if spd2 <= 5.0:
+        stn2, d2 = find_nearest_station_aabb(pt2, stations, max_radius_m=radius_m)
+        if stn2 is not None:
+            return getattr(stn2, "name_en", getattr(stn2, "name_el", getattr(stn2, "id", "Station")))
+
+    # Check if both trains are inside the same station zone
+    stn_both1, _ = find_nearest_station_aabb(pt1, stations, max_radius_m=radius_m * 1.5)
+    stn_both2, _ = find_nearest_station_aabb(pt2, stations, max_radius_m=radius_m * 1.5)
+    if (
+        stn_both1 is not None
+        and stn_both2 is not None
+        and getattr(stn_both1, "id", None) == getattr(stn_both2, "id", None)
+    ):
+        return getattr(stn_both1, "name_en", getattr(stn_both1, "name_el", "Station"))
+
+    return None
+
+
+def _evaluate_corridor_pair_conflict(
+    t1: Any,
+    t2: Any,
+    cid: str,
+    c_display_name: str,
+    is_single: bool,
+    cfg: ConflictWatchdogConfig,
+    stations: Optional[Sequence[Any]],
+    eval_time: float,
+) -> Optional[ConflictAlert]:
+    """Evaluate kinematic conflict between a single pair of trains on the same corridor."""
+    p1 = GeoPoint(lat=float(t1.lat), lng=float(t1.lng))
+    p2 = GeoPoint(lat=float(t2.lat), lng=float(t2.lng))
+    spd1 = float(getattr(t1, "speed", 0.0) or 0.0)
+    spd2 = float(getattr(t2, "speed", 0.0) or 0.0)
+    c1_raw = getattr(t1, "course", None)
+    c1 = float(c1_raw if c1_raw is not None else getattr(t1, "track_heading", 0.0) or 0.0)
+    c2_raw = getattr(t2, "course", None)
+    c2 = float(c2_raw if c2_raw is not None else getattr(t2, "track_heading", 0.0) or 0.0)
+    t1_id = str(getattr(t1, "id", "t1"))
+    t1_no = str(getattr(t1, "train_number", t1_id))
+    t2_id = str(getattr(t2, "id", "t2"))
+    t2_no = str(getattr(t2, "train_number", t2_id))
+
+    dist_km = haversine_distance_km(p1, p2)
+    max_check_dist = max(cfg.opposing_warning_distance_km, cfg.headway_warning_distance_km)
+    if dist_km > max_check_dist:
+        return None
+
+    heading_delta = compute_relative_heading_delta(c1, c2)
+    closing_spd = compute_closing_velocity_kmh(p1, spd1, c1, p2, spd2, c2)
+
+    ttc_sec: Optional[float] = None
+    if closing_spd > 1.0:
+        ttc_sec = (dist_km / closing_spd) * 3600.0
+
+    meet_stn = find_station_passing_meet(t1, t2, stations, radius_m=cfg.station_siding_radius_m)
+
+    # 1. Opposing Collision Condition
+    is_opposing = heading_delta >= (180.0 - cfg.heading_opposing_tolerance_deg)
+    if is_opposing and (is_single or cid in cfg.single_line_working_corridors):
+        if meet_stn is not None:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STATION_MEET"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.STATION_MEET,
+                severity=ConflictSeverity.ADVISORY,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=ttc_sec,
+                is_single_track=is_single,
+                station_proximity_name=meet_stn,
+                description=f"Passing meet at {meet_stn} ({t1_no} <-> {t2_no}, {dist_km:.1f}km)",
+                timestamp=eval_time,
+            )
+        if closing_spd > 5.0 and dist_km <= cfg.opposing_critical_distance_km:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_OPPOSING"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.OPPOSING_COLLISION,
+                severity=ConflictSeverity.CRITICAL,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=ttc_sec,
+                is_single_track=is_single,
+                station_proximity_name=None,
+                description=(
+                    f"CRITICAL OPPOSING CONFLICT: {t1_no} <-> {t2_no} on {c_display_name} "
+                    f"({dist_km:.1f}km, TTC {int(ttc_sec or 0)}s)"
+                ),
+                timestamp=eval_time,
+            )
+        if closing_spd > 5.0 and dist_km <= cfg.opposing_warning_distance_km:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_OPPOSING"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.OPPOSING_COLLISION,
+                severity=ConflictSeverity.WARNING,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=ttc_sec,
+                is_single_track=is_single,
+                station_proximity_name=None,
+                description=(
+                    f"Opposing approach: {t1_no} <-> {t2_no} on {c_display_name} "
+                    f"({dist_km:.1f}km)"
+                ),
+                timestamp=eval_time,
+            )
+
+    # 2. Co-directional Headway Violation Condition
+    is_codirectional = heading_delta <= cfg.heading_codirectional_tolerance_deg
+    if is_codirectional:
+        is_active_motion = closing_spd > 0.0 or spd1 > 1.0 or spd2 > 1.0
+        if dist_km <= cfg.headway_critical_distance_km and is_active_motion:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_HEADWAY"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.HEADWAY_VIOLATION,
+                severity=ConflictSeverity.CRITICAL,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=ttc_sec,
+                is_single_track=is_single,
+                station_proximity_name=meet_stn,
+                description=(
+                    f"CRITICAL HEADWAY BREACH: {t1_no} / {t2_no} on {c_display_name} "
+                    f"({dist_km:.2f}km)"
+                ),
+                timestamp=eval_time,
+            )
+        if dist_km <= cfg.headway_warning_distance_km and is_active_motion:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_HEADWAY"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.HEADWAY_VIOLATION,
+                severity=ConflictSeverity.WARNING,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=ttc_sec,
+                is_single_track=is_single,
+                station_proximity_name=meet_stn,
+                description=(
+                    f"Headway compression: {t1_no} / {t2_no} on {c_display_name} "
+                    f"({dist_km:.1f}km)"
+                ),
+                timestamp=eval_time,
+            )
+
+    return None
+
+
+def evaluate_train_conflicts(
+    active_trains: Sequence[Any],
+    tracks_data: Optional[Dict[str, Any]] = None,
+    stations: Optional[Sequence[Any]] = None,
+    config: Optional[ConflictWatchdogConfig] = None,
+    now: Optional[float] = None,
+) -> List[ConflictAlert]:
+    """Evaluate pairwise spatial and kinematic conflicts across active trains.
+
+    Identifies:
+    1. Opposing collision risks on single-track lines and single-line working zones.
+    2. Headway compression and braking curve violations for co-directional trains.
+    3. Authorized station passing meets (suppressed to ADVISORY).
+
+    Args:
+        active_trains: Collection of active TrainPosition objects.
+        tracks_data: Optional track corridors dictionary or parsed JSON.
+        stations: Optional collection of station nodes.
+        config: Optional configuration thresholds.
+        now: Reference timestamp in seconds.
+
+    Returns:
+        List of generated ConflictAlert objects ordered by severity (CRITICAL first).
+    """
+    if len(active_trains) < 2:
+        return []
+
+    cfg = config if config is not None else ConflictWatchdogConfig()
+    eval_time = now if now is not None else time.time()
+
+    # Pre-parse double_track map from tracks_data if provided
+    double_track_map: Dict[str, bool] = {}
+    if tracks_data:
+        if "corridors" in tracks_data and isinstance(tracks_data["corridors"], list):
+            for c in tracks_data["corridors"]:
+                if isinstance(c, dict) and "id" in c:
+                    double_track_map[c["id"]] = bool(c.get("double_track", False))
+        else:
+            for cid, obj in tracks_data.items():
+                if hasattr(obj, "double_track"):
+                    double_track_map[cid] = bool(obj.double_track)
+
+    # 1. Group active trains by corridor
+    corridor_buckets: Dict[str, List[Any]] = {}
+    for train in active_trains:
+        cid = getattr(train, "corridor", None)
+        if not cid:
+            cid = "pathe-mainline"
+        norm_cid = _normalize_corridor_key(str(cid)) or str(cid)
+        corridor_buckets.setdefault(norm_cid, []).append(train)
+
+    alerts: List[ConflictAlert] = []
+
+    # 2. Iterate pairwise within each corridor
+    for cid, trains in corridor_buckets.items():
+        if len(trains) < 2:
+            continue
+
+        is_single = False
+        if cid in cfg.single_line_working_corridors:
+            is_single = True
+        elif cid in double_track_map:
+            is_single = not double_track_map[cid]
+        elif cid in DEFAULT_SINGLE_TRACK_CORRIDORS:
+            is_single = True
+
+        c_display_name = CORRIDOR_DISPLAY_NAMES.get(cid, cid.replace("-", " ").title())
+
+        n = len(trains)
+        for i in range(n):
+            t1 = trains[i]
+            for j in range(i + 1, n):
+                t2 = trains[j]
+                conflict = _evaluate_corridor_pair_conflict(
+                    t1, t2, cid, c_display_name, is_single, cfg, stations, eval_time
+                )
+                if conflict is not None:
+                    alerts.append(conflict)
+
+    # Sort alerts: CRITICAL first, then WARNING, then ADVISORY; tie-broken by distance
+    severity_order = {
+        ConflictSeverity.CRITICAL: 0,
+        ConflictSeverity.WARNING: 1,
+        ConflictSeverity.ADVISORY: 2,
+    }
+    alerts.sort(key=lambda a: (severity_order.get(a.severity, 99), a.distance_km))
+
+    return alerts
 
 

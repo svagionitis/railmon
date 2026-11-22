@@ -53,6 +53,8 @@ class WatchTriggerType(str, Enum):
     ARRIVAL = "arrival"
     TELEMETRY_LOST = "telemetry_lost"
     SENSOR_FROZEN = "sensor_frozen"
+    CONFLICT_CRITICAL = "conflict_critical"
+    CONFLICT_WARNING = "conflict_warning"
 
 
 class NotificationChannel(str, Enum):

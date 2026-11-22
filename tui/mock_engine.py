@@ -168,10 +168,15 @@ class TrackPolyline:
     points: List[GeoPoint]
     cumulative_distances_m: List[float]
     total_length_m: float
+    double_track: bool = False
 
     @classmethod
     def from_coordinates(
-        cls, corridor_id: str, name: str, coords: List[Tuple[float, float]]
+        cls,
+        corridor_id: str,
+        name: str,
+        coords: List[Tuple[float, float]],
+        double_track: bool = False,
     ) -> "TrackPolyline":
         """Construct a TrackPolyline from a list of (lat, lng) tuples."""
         if len(coords) < 2:
@@ -192,6 +197,7 @@ class TrackPolyline:
             points=points,
             cumulative_distances_m=cum_dist,
             total_length_m=running_dist,
+            double_track=double_track,
         )
 
     def interpolate_at_distance(self, distance_m: float) -> Tuple[GeoPoint, float]:
@@ -881,7 +887,10 @@ def load_tracks(path: Optional[str] = None) -> Dict[str, TrackPolyline]:
 
         # Flatten segments or take the primary mainline segment
         primary_coords = segments[0]
-        poly = TrackPolyline.from_coordinates(cid, cname, primary_coords)
+        is_double = bool(item.get("double_track", False))
+        poly = TrackPolyline.from_coordinates(
+            cid, cname, primary_coords, double_track=is_double
+        )
         corridors[cid] = poly
 
     return corridors
