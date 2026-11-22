@@ -27,7 +27,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 5 (Safety)** | **F-5.3** | Corridor Speed Limit Exceedance & Slow-Order Alerts | *(Auto)* | Planned | [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py) |
 | **Tier 6 (Commuter)** | **F-6.1** | CLI Station Departure & Arrival Boards | `railmon departures` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
 | **Tier 6 (Commuter)** | **F-6.2** | Train Timetable & Intermediate Stop Inspector | `i` / `I` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
-| **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 6 (Commuter)** | **F-6.3** | Proximity & Delay Push Alerting Engine | `railmon watch` / `a` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`watchdog.py`](../../watchdog.py), [`tui/app.py`](../../tui/app.py), [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.1** | Live Locomotive Forward Cab Video Stream Launcher | `w` / `W` | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | **Implemented** | [`tui/theme.py`](../../tui/theme.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`tui/app.py`](../../tui/app.py), [`train_tracker.py`](../../train_tracker.py) |
@@ -709,7 +709,9 @@ Inspects the full scheduled itinerary of a train, showing intermediate stations,
 
 ---
 
-### F-6.3: Proximity & Delay Push Alerting Engine (`railmon watch`) — *Planned*
+### F-6.3: Proximity & Delay Push Alerting Engine (`railmon watch`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md`](../plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md)
 
 #### Overview
 A background terminal watchdog daemon that monitors a specific train trip or passenger journey and issues desktop notifications or webhook dispatches based on user-defined triggers:
@@ -997,10 +999,10 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 3. **Automated Verification:**
    - Unit tests covering opposing vectors, same-direction safe spacing, stationary false positives, and audio bell rate-limiting.
 
-### Phase 6: Tier 6 Commuter & Route Services (F-6.1 Completed, F-6.2–F-6.3 Planned)
+### Phase 6: Tier 6 Commuter & Route Services (F-6.1, F-6.2 & F-6.3 Implemented)
 1. **F-6.1 (*Completed*):** Added `departures` subparser in [`train_tracker.py`](../../train_tracker.py), multi-key diacritic-insensitive station resolution and suggestion engine in [`tui/mock_engine.py`](../../tui/mock_engine.py), responsive UTF-8 / ASCII tabular formatter in [`storage/cli_formatters.py`](../../storage/cli_formatters.py), offline `--demo` timetable synthesis, and automated test suite in [`tests/test_cli_departures.py`](../../tests/test_cli_departures.py).
 2. **F-6.2 (*Completed*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>` (see detailed plan in [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md)).
-3. **F-6.3 (*Planned*):** Implement `railmon watch <train_num>` background proximity and delay notification engine.
+3. **F-6.3 (*Implemented*):** Added `watch` subparser in [`train_tracker.py`](../../train_tracker.py), train trip watchdog evaluator, proximity calculations, and multimodal alert dispatchers in [`watchdog.py`](../../watchdog.py), in-TUI watchdog alert integration in [`tui/app.py`](../../tui/app.py) (`a`/`A`), and automated test suites in [`tests/test_watchdog.py`](../../tests/test_watchdog.py), [`tests/test_cli_watch.py`](../../tests/test_cli_watch.py), and [`tests/test_tui_watch.py`](../../tests/test_tui_watch.py) (see detailed plan in [`docs/plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md`](../plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md)).
 
 ### Phase 7: Tier 7 Visual Enhancements & GIS Layers (F-7.1, F-7.2 & F-7.3 Implemented)
 1. **F-7.2 (*Implemented*):** Ingest tunnel, bridge, and signal GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`, overlay portals (`∩` / `[ ]`), bridges (`═` / `||`), and interlocking signals (`◆` / `[S]`), detect in-tunnel transit (`[TUNNEL]` badge), and toggle layers via `g` / `G` and CLI `railmon infrastructure` (see detailed plan in [`../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md`](../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md)).

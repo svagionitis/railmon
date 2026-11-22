@@ -1778,7 +1778,13 @@ class TUIRenderer:
             pos = record.position
             is_selected = item_idx == snapshot.selected_index
 
+            watched_ids = getattr(snapshot, "watched_train_ids", ())
+            pos_id_norm = str(pos.id or "").strip().upper()
+            pos_num_norm = str(pos.train_number or "").strip().upper()
+            is_watched = bool(pos_id_norm in watched_ids or pos_num_norm in watched_ids)
+
             cursor_mark = ">" if is_selected else " "
+            watch_mark = ("*" if self.ascii_mode else "●") if is_watched else " "
             seq_num = f"{item_idx + 1:2d}"
             train_num = f"{(pos.train_number or pos.id)[:5]:<5}"
 
@@ -1803,7 +1809,7 @@ class TUIRenderer:
             if pos.speed is not None and pos.speed < 1.0:
                 st_code = "HLT"
 
-            row_line = f"{cursor_mark} {seq_num}  {train_num:<6}{t_type:<5}{spd_str:>4} {dly_str:>5}  {st_code}"
+            row_line = f"{cursor_mark}{watch_mark}{seq_num}  {train_num:<6}{t_type:<5}{spd_str:>4} {dly_str:>5}  {st_code}"
             pair = get_train_color_pair(record)
             row_attr = select_attr if is_selected else safe_color_pair(pair, curses.A_NORMAL)
             safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
@@ -2300,6 +2306,7 @@ class TUIRenderer:
                 ("m / M", "Cycle station departure board / Return to train view"),
                 ("i / I", "Inspect timetable & intermediate stops for selected train"),
                 ("w / W", "Launch live locomotive forward cab video stream"),
+                ("a / A", "Toggle proximity & delay push alerting watchdog"),
                 ("f / F, Dbl-Click", "Toggle auto-follow camera lock (or recenter map)"),
                 ("c / C", "Clear search filter, corridor filter & selection"),
             ]),

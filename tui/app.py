@@ -235,6 +235,10 @@ class TUIApp:
         self._stream_launch_lock: threading.Lock = threading.Lock()
         self._active_stream_launches: set = set()
 
+        # In-TUI Train Watchdog evaluators (F-6.3)
+        self._tui_watch_evaluators: Dict[str, Any] = {}
+        self._last_watch_eval_ts: float = 0.0
+
         # Render cycle optimization & dirty-checking state
         self._force_redraw: bool = True
         self._last_rendered_version: Optional[int] = None
@@ -904,6 +908,10 @@ class TUIApp:
         elif key in (ord("w"), ord("W")):
             self.launch_cab_stream_for_selected_train()
 
+        # Toggle Proximity & Delay Push Alerting Watchdog for Selected Train (F-6.3)
+        elif key in (ord("a"), ord("A")):
+            self.toggle_watch_selected_train()
+
         # Cycle Terminal Color Theme Profile (F-7.3)
         elif key in (getattr(curses, "KEY_F10", 274), ord("K")):
             self.cycle_theme()
@@ -1248,6 +1256,87 @@ class TUIApp:
 
         thread = threading.Thread(target=_worker, name=f"cab-stream-{train_num}", daemon=True)
         thread.start()
+
+    # ------------------------------------------------------------------
+    # In-TUI Train Watchdog Alerting Integration (F-6.3)
+    # ------------------------------------------------------------------
+
+    def toggle_watch_selected_train(self) -> Optional[bool]:
+        """Toggle push alerting watchdog on the currently selected train."""
+        snapshot = self.store.get_snapshot()
+        selected = snapshot.selected_train
+        if selected is None:
+            self._set_toast("[Select a train first to set watch alert]", is_error=True)
+            return None
+
+        pos = selected.position
+        train_no = str(pos.train_number or pos.id or "").strip()
+        is_now_watched = self.store.toggle_watch_train(pos.id)
+        if is_now_watched:
+            self._set_toast(
+                f"[✓ Alert Watch ON: {train_no} (Notifying on delay & proximity)]",
+                is_error=False,
+            )
+            try:
+                from watchdog import dispatch_terminal_bell
+
+                dispatch_terminal_bell()
+            except Exception as exc:
+                logger.debug("Failed to emit audio bell on watch toggle: %s", exc)
+        else:
+            self._set_toast(f"[Watch Alert OFF: {train_no}]", is_error=False)
+        return is_now_watched
+
+    def _evaluate_in_tui_watch_alerts(self, snapshot: StateSnapshot) -> None:
+        """Evaluate active watchdog rules for watched trains and trigger in-TUI toasts/alerts."""
+        from watchdog import (
+            WatchConfig,
+            WatchdogEvaluator,
+            dispatch_desktop_notification,
+            dispatch_terminal_bell,
+        )
+
+        watched = getattr(snapshot, "watched_train_ids", frozenset())
+        if not watched:
+            self._tui_watch_evaluators.clear()
+            return
+
+        # Prune un-watched evaluators
+        for train_id in list(self._tui_watch_evaluators.keys()):
+            if train_id not in watched:
+                del self._tui_watch_evaluators[train_id]
+
+        for train_id in watched:
+            record = snapshot.trains.get(train_id)
+            if not record:
+                for t_id, rec in snapshot.trains.items():
+                    if t_id.upper() == train_id.upper():
+                        record = rec
+                        break
+            if not record:
+                continue
+
+            pos = record.position
+            train_num = str(pos.train_number or pos.id or "").strip()
+
+            if train_id not in self._tui_watch_evaluators:
+                dest_stn = pos.destination or None
+                cfg = WatchConfig(
+                    train_number=train_num,
+                    destination_station=dest_stn,
+                    notify_eta_minutes=15.0,
+                    notify_distance_km=15.0,
+                    delay_delta_threshold_min=3.0,
+                    cooldown_delay_alert_sec=120.0,
+                )
+                self._tui_watch_evaluators[train_id] = WatchdogEvaluator(cfg)
+
+            evaluator = self._tui_watch_evaluators[train_id]
+            events = evaluator.evaluate_position(pos)
+            for ev in events:
+                self._set_toast(f"[!] {ev.headline}: {ev.message}", duration_sec=5.0, is_error=True)
+                dispatch_terminal_bell()
+                dispatch_desktop_notification(ev.headline, ev.message)
 
     # ------------------------------------------------------------------
     # Mouse Interaction & Spatial Hit-Testing (F-3.1)
@@ -1621,6 +1710,11 @@ class TUIApp:
                 if snapshot.follow_mode and snapshot.selected_train:
                     pos = snapshot.selected_train.position
                     self.projector.viewport.center = GeoPoint(lat=pos.lat, lng=pos.lng)
+
+                # 3b. Evaluate In-TUI Watchdog Alerts (F-6.3)
+                if snapshot.watched_train_ids and (frame_start - self._last_watch_eval_ts) >= 1.0:
+                    self._last_watch_eval_ts = frame_start
+                    self._evaluate_in_tui_watch_alerts(snapshot)
 
                 # 4. Extract current signatures for dirty check
                 current_sec = (

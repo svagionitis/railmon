@@ -20,6 +20,7 @@
 - **Live Station Departure & Arrival Boards (`railmon departures`)**: Headless CLI command querying real-time train departures and arrivals for any Greek railway station with Greek/Latin diacritic-tolerant fuzzy search, service type filtering, and `--json` export.
 - **Train Timetable & Intermediate Stop Inspector (`railmon schedule` / `i` in TUI)**: Inspect the complete scheduled itinerary of any commercial train, displaying intermediate calling points, planned versus actual times, scheduled dwell durations, and platform tracks.
 - **Live Locomotive Forward Cab Video Stream Launcher (`railmon cab` / `w` in TUI)**: Launch real-time forward cab camera video feeds (HLS) in an external video player (`mpv`, `ffplay`, `vlc`, or default web browser) directly from the terminal or shell.
+- **Proximity & Delay Push Alerting Engine (`railmon watch` / `a` in TUI)**: Background terminal watchdog daemon and interactive TUI alert monitor tracking train journeys, departure confirmations, dynamic delay increases/recoveries, destination proximity (geodesic distance and ETA), and arrival detections, dispatching push alerts via audio bell, cross-platform native desktop notifications (Linux `notify-send`, macOS `osascript`, Windows PowerShell toast), and outbound JSON webhooks (Telegram, Discord, Slack, generic REST).
 - **Historical Telemetry Recording & Analytics**:
   - Embedded zero-dependency SQLite persistence with Write-Ahead Logging (WAL) for non-blocking concurrent reading and writing.
   - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.
@@ -157,6 +158,13 @@ railmon cab "IC 52" --url-only         # Print raw HLS stream URL to stdout
 railmon cab 1597 --browser             # Open stream in default web browser
 railmon cab 1597 --json                # Output structured stream metadata JSON
 railmon cab 1597 --demo                # Offline mock simulation
+
+# Watch train progress & dispatch proximity and delay push alerts
+./railmon watch "IC 52" --dest Thessaloniki --notify 15m
+railmon watch 1597 --dest Chalkida --distance 10 --delay-delta 5
+railmon watch "IC 52" --webhook https://discord.com/api/webhooks/...
+railmon watch "IC 52" --json --headless  # Output streaming JSON events
+railmon watch 1597 --demo --once         # Demo simulation exiting on arrival
 ```
 
 ### Historical Recording & Terminal Analytics
@@ -202,6 +210,7 @@ railmon cab 1597 --demo                # Offline mock simulation
 | `s` | Cycle train roster sorting (Train ID, Speed, Delay) |
 | `i` / `I` | Inspect full timetable & intermediate stops for selected train |
 | `w` / `W` | Launch live locomotive forward cab video stream (`mpv`/`ffplay`/browser) |
+| `a` / `A` | Toggle proximity & delay push alerting watchdog for train |
 | `m` / `M` | Cycle Station Departure Board & Proximity Inspector / Return to train view |
 | `/` | Filter trains by number, name, or station query |
 | `?` | Show interactive Keyboard Controls modal |
@@ -214,6 +223,7 @@ railmon cab 1597 --demo                # Offline mock simulation
 - [`railmon`](./railmon): Executable wrapper script.
 - [`pyproject.toml`](./pyproject.toml): PEP 517 / PEP 518 / PEP 621 packaging specification, dynamic versioning, and unified tool configuration.
 - [`train_tracker.py`](./train_tracker.py): Core HTTP/SSE API client, data models, and CLI argument parsing.
+- [`watchdog.py`](./watchdog.py): Train trip watchdog evaluator, proximity calculations, and multimodal push alert dispatchers.
 - [`tui/`](./tui): Modular curses terminal user interface:
   - [`tui/geo.py`](./tui/geo.py): EPSG:4326 to Braille canvas (2x4 dot matrix) projection engine.
   - [`tui/state.py`](./tui/state.py): Thread-safe telemetry state store and snapshot generation.

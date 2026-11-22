@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 import threading
 import time
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from train_tracker import TrainPosition
 from tui.geo import (
@@ -242,6 +242,7 @@ class StateSnapshot:
     replay_start_time: Optional[float] = None
     replay_end_time: Optional[float] = None
     replay_speed: float = 1.0
+    watched_train_ids: FrozenSet[str] = field(default_factory=frozenset)
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -404,6 +405,7 @@ class TrainStateStore:
         self._replay_start_time: Optional[float] = None
         self._replay_end_time: Optional[float] = None
         self._replay_speed: float = 1.0
+        self._watched_train_ids: Set[str] = set()
 
     # ------------------------------------------------------------------
     # Telemetry Ingestion (Called by StreamWorker / ReplayWorker Thread)
@@ -621,6 +623,7 @@ class TrainStateStore:
                 replay_start_time=self._replay_start_time,
                 replay_end_time=self._replay_end_time,
                 replay_speed=self._replay_speed,
+                watched_train_ids=frozenset(self._watched_train_ids),
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -996,3 +999,29 @@ class TrainStateStore:
             if rec.position.id == self._selected_id:
                 return idx
         return -1
+
+    def toggle_watch_train(self, train_id: str) -> bool:
+        """Toggle watchdog push alerting on a train ID. Returns True if now watched, False if removed."""
+        with self._lock:
+            raw_id = str(train_id).strip()
+            if not raw_id:
+                return False
+            for existing in list(self._watched_train_ids):
+                if existing == raw_id or existing.upper() == raw_id.upper():
+                    self._watched_train_ids.remove(existing)
+                    self._version += 1
+                    return False
+            self._watched_train_ids.add(raw_id)
+            self._version += 1
+            return True
+
+    def is_train_watched(self, train_id: str) -> bool:
+        """Check if train ID is currently watched."""
+        with self._lock:
+            target = str(train_id).strip().upper()
+            return any(w.upper() == target for w in self._watched_train_ids)
+
+    def get_watched_train_ids(self) -> FrozenSet[str]:
+        """Return frozen copy of all currently watched train identifiers."""
+        with self._lock:
+            return frozenset(self._watched_train_ids)

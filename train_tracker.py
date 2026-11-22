@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Generator, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Generator, List, Optional, Sequence, Tuple
 
 __version__ = "1.0.0"
 __author__ = "Hellenic Train Tracking Contributors"
@@ -1439,6 +1439,111 @@ Examples:
         help="Force pure 7-bit ASCII rendering fallback.",
     )
 
+    # 7. watch (F-6.3)
+    p_watch = subparsers.add_parser(
+        "watch",
+        help="Monitor a train trip and issue proximity and delay push alerts.",
+        description="Background terminal watchdog monitoring train progress, delay spikes, and station proximity.",
+    )
+    p_watch.add_argument(
+        "train_number",
+        type=str,
+        help="Commercial train identifier to monitor (e.g. 'IC52', '1597').",
+    )
+    p_watch.add_argument(
+        "--dest",
+        "-d",
+        type=str,
+        default=None,
+        help="Destination station name, code, or ID.",
+    )
+    p_watch.add_argument(
+        "--notify",
+        "-n",
+        type=str,
+        default="15m",
+        help="Proximity notification ETA threshold (e.g. '15m', '10m', '30m', default: 15m).",
+    )
+    p_watch.add_argument(
+        "--distance",
+        type=float,
+        default=15.0,
+        help="Proximity distance threshold in km (default: 15.0 km).",
+    )
+    p_watch.add_argument(
+        "--delay-delta",
+        type=float,
+        default=3.0,
+        help="Delay increase threshold in minutes triggering an alert (default: 3.0m).",
+    )
+    p_watch.add_argument(
+        "--webhook",
+        type=str,
+        default=None,
+        help="Outbound webhook URL for alert delivery (Telegram, Discord, Slack, or Generic HTTP POST).",
+    )
+    p_watch.add_argument(
+        "--webhook-format",
+        choices=["auto", "generic", "telegram", "discord", "slack"],
+        default="auto",
+        help="Webhook payload format (default: auto).",
+    )
+    p_watch.add_argument(
+        "--webhook-chat-id",
+        type=str,
+        default=None,
+        help="Telegram target chat_id (when using Telegram webhook).",
+    )
+    p_watch.add_argument(
+        "--webhook-token",
+        type=str,
+        default=None,
+        help="Bearer authorization token for webhook delivery.",
+    )
+    p_watch.add_argument(
+        "--no-bell",
+        action="store_true",
+        default=False,
+        help="Disable terminal audio bell.",
+    )
+    p_watch.add_argument(
+        "--no-desktop",
+        action="store_true",
+        default=False,
+        help="Disable OS native desktop notifications.",
+    )
+    p_watch.add_argument(
+        "--once",
+        action="store_true",
+        default=False,
+        help="Exit automatically when train reaches destination station.",
+    )
+    p_watch.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output stream of JSON alert event records to stdout.",
+    )
+    p_watch.add_argument(
+        "--headless",
+        "--daemon",
+        action="store_true",
+        default=False,
+        help="Run in quiet background daemon mode without interactive terminal UI.",
+    )
+    p_watch.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Run against simulated synthetic train movements.",
+    )
+    p_watch.add_argument(
+        "--ascii",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Force pure 7-bit ASCII rendering fallback.",
+    )
+
     # Shared parser for subparsers accepting --db
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument("--db", default=argparse.SUPPRESS, help="SQLite database file path.")
@@ -2589,6 +2694,167 @@ def run_infrastructure_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit_watch_events(
+    evaluator: Any,
+    events: Sequence[Any],
+    output_json: bool,
+    is_ascii: bool,
+) -> bool:
+    """Output and deliver a collection of WatchAlertEvents.
+
+    Returns:
+        True if an arrival event fired and exit_on_arrival is requested, False otherwise.
+    """
+    from watchdog import WatchTriggerType, dispatch_all_channels, format_watch_event_line
+
+    for event in events:
+        if output_json:
+            sys.stdout.write(json.dumps(event.to_dict()) + "\n")
+            sys.stdout.flush()
+        else:
+            sys.stdout.write(format_watch_event_line(event, ascii_mode=is_ascii) + "\n")
+            sys.stdout.flush()
+
+        dispatch_all_channels(evaluator.config, event)
+
+        if event.trigger_type == WatchTriggerType.ARRIVAL and evaluator.config.exit_on_arrival:
+            return True
+    return False
+
+
+def run_watch_mode(args: argparse.Namespace) -> int:
+    """Execute the headless or interactive train watchdog alerting daemon (railmon watch).
+
+    Args:
+        args: Parsed CLI namespace arguments.
+
+    Returns:
+        Exit code: 0 on clean exit, 1 on error.
+    """
+    from watchdog import (
+        WatchConfig,
+        WatchTriggerType,
+        WatchdogEvaluator,
+        WebhookFormat,
+        format_watch_ticker,
+        parse_notify_minutes,
+    )
+
+    train_num = getattr(args, "train_number", "").strip()
+    if not train_num:
+        sys.stderr.write("Error: Missing required argument: train_number\n")
+        return 1
+
+    dest_arg = getattr(args, "dest", None)
+    notify_str = getattr(args, "notify", "15m")
+    notify_eta = parse_notify_minutes(notify_str)
+    notify_dist = float(getattr(args, "distance", 15.0) or 15.0)
+    delay_delta = float(getattr(args, "delay_delta", 3.0) or 3.0)
+    webhook_url = getattr(args, "webhook", None)
+    webhook_format_str = str(getattr(args, "webhook_format", "auto")).lower()
+    try:
+        wb_fmt = WebhookFormat(webhook_format_str)
+    except ValueError:
+        wb_fmt = WebhookFormat.AUTO
+    webhook_chat_id = getattr(args, "webhook_chat_id", None)
+    webhook_token = getattr(args, "webhook_token", None)
+    enable_bell = not bool(getattr(args, "no_bell", False))
+    enable_desktop = not bool(getattr(args, "no_desktop", False))
+    exit_on_arrival = bool(getattr(args, "once", False))
+    output_json = bool(getattr(args, "json", False))
+    headless = bool(getattr(args, "headless", False) or getattr(args, "daemon", False))
+    demo = bool(getattr(args, "demo", False))
+    is_ascii = bool(getattr(args, "ascii", False))
+
+    config = WatchConfig(
+        train_number=train_num,
+        destination_station=dest_arg,
+        notify_eta_minutes=notify_eta,
+        notify_distance_km=notify_dist,
+        delay_delta_threshold_min=delay_delta,
+        enable_bell=enable_bell,
+        enable_desktop=enable_desktop,
+        webhook_url=webhook_url,
+        webhook_format=wb_fmt,
+        webhook_chat_id=webhook_chat_id,
+        webhook_token=webhook_token,
+        exit_on_arrival=exit_on_arrival,
+    )
+
+    evaluator = WatchdogEvaluator(config)
+
+    source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
+    db_path = getattr(args, "db", "railway_history.db")
+    reconnect_delay = float(getattr(args, "reconnect_delay", 3.0))
+
+    stop_event = threading.Event()
+    with install_signal_handlers(stop_event) as stop_event:
+        stream, source_label = _resolve_plain_stream_source(
+            source, db_path, reconnect_delay, stop_event
+        )
+
+        if not output_json and not headless:
+            sys.stdout.write(f"Starting railmon watch daemon for Train {train_num}...\n")
+            dest_desc = evaluator.config.destination_name or evaluator.config.destination_station or "None"
+            sys.stdout.write(
+                f"Source: {source_label} | Destination: {dest_desc} | Notify ETA: {int(notify_eta)}m\n"
+            )
+            sys.stdout.write("Press Ctrl+C to stop.\n\n")
+            sys.stdout.flush()
+
+        last_ticker_time = 0.0
+        matching_pos: Optional[TrainPosition] = None
+
+        try:
+            for batch in stream:
+                if stop_event.is_set():
+                    break
+
+                now_mono = time.time()
+                for pos in batch:
+                    events = evaluator.evaluate_position(pos, now=now_mono)
+                    if not events:
+                        continue
+                    matching_pos = pos
+                    should_exit = _emit_watch_events(evaluator, events, output_json, is_ascii)
+                    if should_exit:
+                        if not output_json and not headless:
+                            sys.stdout.write(
+                                f"\nDestination arrived: Train {train_num}. Watchdog exiting (--once).\n"
+                            )
+                        return 0
+
+                # Check for train telemetry timeout
+                timeout_event = evaluator.evaluate_timeout(now=now_mono)
+                if timeout_event:
+                    _emit_watch_events(evaluator, [timeout_event], output_json, is_ascii)
+
+                # Periodic ticker display in interactive console
+                if not output_json and not headless:
+                    if (now_mono - last_ticker_time) >= 5.0 and matching_pos is not None:
+                        last_ticker_time = now_mono
+                        ticker_box = format_watch_ticker(
+                            evaluator.config,
+                            evaluator.state,
+                            matching_pos,
+                            ascii_mode=is_ascii,
+                        )
+                        sys.stdout.write(f"\n{ticker_box}\n")
+                        sys.stdout.flush()
+
+                if stop_event.wait(timeout=1.0):
+                    break
+
+        except KeyboardInterrupt:
+            if not output_json and not headless:
+                sys.stdout.write("\nWatchdog stopped by user.\n")
+            return 0
+        except BrokenPipeError:
+            return 0
+
+    return 0
+
+
 def _configure_win32_utf8_console() -> None:
     """Configure Windows console codepage and standard streams for UTF-8 output."""
     if sys.platform != "win32":
@@ -2665,6 +2931,9 @@ def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
 
     if args.mode == "departures":
         return run_departures_mode(args)
+
+    if args.mode == "watch":
+        return run_watch_mode(args)
 
     if args.mode == "schedule":
         return run_schedule_mode(args)
