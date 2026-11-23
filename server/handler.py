@@ -1,5 +1,6 @@
 """HTTP request handler for web map SPA, JSON REST APIs, and SSE streams."""
 
+import gzip
 import json
 import logging
 import math
@@ -9,6 +10,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from exporter.formatter import MetricsFormatter, negotiate_metrics_format
 from server.assets import get_geojson_asset, get_spa_html
 
 if TYPE_CHECKING:
@@ -97,6 +99,8 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
             self._handle_conflicts(is_head=is_head)
         elif raw_path == "/api/health":
             self._handle_health(is_head=is_head)
+        elif raw_path in ("/metrics", "/api/metrics"):
+            self._handle_metrics(is_head=is_head)
         elif raw_path.startswith("/api/history/train/"):
             train_id = raw_path.split("/")[-1]
             self._handle_train_history(train_id, is_head=is_head)
@@ -253,6 +257,46 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self._send_bytes_response(
             200, payload_bytes, "application/json; charset=utf-8", is_head=is_head
         )
+
+    def _handle_metrics(self, is_head: bool = False) -> None:
+        """Serve Prometheus & OpenMetrics operational telemetry with content negotiation."""
+        t_start = time.perf_counter()
+        registry = getattr(self.server, "metric_registry", None)
+        if registry is None:
+            self._send_json_error(503, "MetricRegistry not initialized on web daemon")
+            return
+
+        families = registry.collect_all()
+        accept = self.headers.get("Accept", "")
+        content_type, fmt = negotiate_metrics_format(accept)
+
+        if fmt == "openmetrics":
+            body = MetricsFormatter.format_openmetrics_100(families)
+        else:
+            body = MetricsFormatter.format_prometheus_004(families)
+
+        is_compressed = False
+        accept_encoding = self.headers.get("Accept-Encoding", "")
+        if "gzip" in accept_encoding:
+            body = gzip.compress(body, compresslevel=6)
+            is_compressed = True
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if is_compressed:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self._add_cors_headers()
+        self.end_headers()
+
+        duration = time.perf_counter() - t_start
+        proc = getattr(self.server, "process_collector", None)
+        if proc is not None:
+            proc.record_scrape(duration, endpoint="/metrics", status=200)
+
+        if not is_head:
+            self.wfile.write(body)
 
     def _handle_train_history(self, train_id: str, is_head: bool = False) -> None:
         """Return GeoJSON LineString feature of recent breadcrumb coordinates for train."""

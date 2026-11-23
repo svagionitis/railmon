@@ -142,7 +142,11 @@ class Database:
             cursor.execute("PRAGMA foreign_keys = ON;")
             cursor.execute("PRAGMA temp_store = MEMORY;")
             cursor.execute("PRAGMA cache_size = -64000;")  # 64MB cache
-        finally:
+        except Exception:
+            cursor.close()
+            conn.close()
+            raise
+        else:
             cursor.close()
 
         self._ensure_secure_permissions()

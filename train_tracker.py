@@ -1855,6 +1855,73 @@ Examples:
         help="Export pruned observations to gzipped JSONL archive before deletion.",
     )
 
+    # 6. metrics (F-8.2: Prometheus & OpenMetrics Operational Exporter)
+    p_metrics = subparsers.add_parser(
+        "metrics",
+        aliases=["exporter", "prometheus"],
+        help="Launch Prometheus & OpenMetrics operational telemetry exporter daemon.",
+        description=(
+            "Start a lightweight multi-threaded HTTP server daemon exposing real-time Greek rail "
+            "operational metrics conforming to Prometheus 0.0.4 and OpenMetrics 1.0.0 "
+            "standards on port 9100 for scraping by Prometheus, VictoriaMetrics, or Grafana."
+        ),
+    )
+    p_metrics.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Network bind interface IP address (default: 127.0.0.1; use 0.0.0.0 for LAN access).",
+    )
+    p_metrics.add_argument(
+        "--port",
+        type=int,
+        default=9100,
+        help="TCP port to bind Prometheus exporter HTTP server (default: 9100).",
+    )
+    p_metrics.add_argument(
+        "--demo",
+        "--mock",
+        action="store_true",
+        default=False,
+        help="Run exporter using offline synthetic train telemetry simulation feed.",
+    )
+    p_metrics.add_argument(
+        "--db",
+        type=str,
+        default="railway_history.db",
+        help="Path to SQLite WAL database for historical and storage metric reporting (default: railway_history.db).",
+    )
+    p_metrics.add_argument(
+        "--no-db",
+        action="store_true",
+        default=False,
+        help="Disable SQLite storage metrics collection even if database file exists.",
+    )
+    p_metrics.add_argument(
+        "--reconnect-delay",
+        type=float,
+        default=3.0,
+        help="Base reconnection delay in seconds for live SSE upstream connection (default: 3.0s).",
+    )
+    p_metrics.add_argument(
+        "--no-filter-deadband",
+        action="store_true",
+        default=False,
+        help="Disable deadband filtering for upstream coordinate ingestion.",
+    )
+    p_metrics.add_argument(
+        "--no-gzip",
+        action="store_true",
+        default=False,
+        help="Disable transparent Gzip compression on /metrics scrape responses.",
+    )
+    p_metrics.add_argument(
+        "--scrape-timeout",
+        type=float,
+        default=10.0,
+        help="Scrape timeout deadline in seconds (default: 10.0s).",
+    )
+
     return parser
 
 
@@ -3683,44 +3750,218 @@ def run_serve_mode(args: argparse.Namespace) -> int:
     return 0
 
 
-def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
-    """Route parsed CLI arguments to the appropriate execution mode."""
-    if args.mode in ("serve", "server", "web"):
+def _print_metrics_banner(
+    server: Any,
+    source: TelemetrySource,
+    db_path: Optional[str],
+) -> None:
+    """Print informative, formatted startup banner for Prometheus exporter to stdout."""
+    host = server.server_address[0]
+    if host in ("0.0.0.0", ""):
+        display_host = "127.0.0.1"
+    else:
+        display_host = host
+    port = server.server_port
+    base_url = f"http://{display_host}:{port}/"
+
+    print("\n" + "=" * 78)
+    print(f"  RAILMON PROMETHEUS & OPENMETRICS OPERATIONAL EXPORTER v{__version__}")
+    print("=" * 78)
+    print(f"  [INFO] Bound Interface    : {base_url}")
+    print(f"  [INFO] Scrape Endpoint    : {base_url}metrics")
+    print(f"  [INFO] Health Probe       : {base_url}health")
+    print(f"  [INFO] Telemetry Mode     : {source.value.upper()}")
+    print("  [INFO] Standards          : Prometheus 0.0.4 / OpenMetrics 1.0.0 (Negotiated)")
+    gzip_str = "ENABLED" if getattr(server.config, "gzip_compression", True) else "DISABLED"
+    print(f"  [INFO] Gzip Compression   : {gzip_str}")
+    if db_path:
+        print(f"  [INFO] Storage Telemetry  : ENABLED (database: '{db_path}')")
+    else:
+        print("  [INFO] Storage Telemetry  : DISABLED")
+    print("-" * 78)
+    print("  Sample Prometheus Scrape Configuration (prometheus.yml):")
+    print("    scrape_configs:")
+    print("      - job_name: \"railmon\"")
+    print("        scrape_interval: 15s")
+    print("        static_configs:")
+    print(f"          - targets: [\"{display_host}:{port}\"]")
+    print("=" * 78)
+    print("[INFO] Exporter daemon running. Press Ctrl+C to terminate cleanly.\n", flush=True)
+
+
+def run_metrics_mode(args: argparse.Namespace) -> int:
+    """Execute standalone Prometheus and OpenMetrics operational exporter daemon.
+
+    Args:
+        args: Parsed command-line arguments namespace.
+
+    Returns:
+        int: Exit status code (0 for clean shutdown, 1 for fatal server error, 2 for invalid args).
+    """
+    import errno
+    from exporter.collector import (
+        MetricRegistry,
+        ProcessMetricsCollector,
+        StorageMetricsCollector,
+        StreamMetricsCollector,
+        TrainTelemetryCollector,
+        WatchdogMetricsCollector,
+    )
+    from exporter.models import ExporterConfig
+    from exporter.server import MetricsServer
+    from tui.mock_engine import MockTelemetryEngine
+    from tui.state import TrainStateStore
+    from tui.stream_worker import StreamWorker
+
+    host = getattr(args, "host", "127.0.0.1")
+    port = getattr(args, "port", 9100)
+
+    # 1. Parameter Validation
+    if not (1 <= port <= 65535):
+        print(
+            f"[ERROR] Invalid port: {port}. Port must be between 1 and 65535.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 2. Security Audit Notice for Public Network Binding
+    if host in ("0.0.0.0", "::"):
+        print(
+            "\n[SECURITY NOTICE] Server is binding to all network interfaces (0.0.0.0).\n"
+            "The Prometheus exporter endpoint /metrics and health API will be accessible across your local network.\n",
+            file=sys.stderr,
+        )
+
+    # 3. Resolve Telemetry Source & Persistence Flags
+    demo = bool(getattr(args, "demo", False) or getattr(args, "mock", False))
+    source = TelemetrySource.DEMO if demo else TelemetrySource.LIVE
+    no_db = bool(getattr(args, "no_db", False))
+    db_path = getattr(args, "db", "railway_history.db") if not no_db else None
+
+    # 4. Initialize Domain State Store
+    store = TrainStateStore()
+
+    # 5. Configure & Attach Telemetry Ingestion Worker
+    if demo:
+        mock_engine = MockTelemetryEngine()
+        worker = StreamWorker(store=store, mock_engine=mock_engine)
+    else:
+        client = RailwayGovClient()
+        worker = StreamWorker(
+            store=store,
+            client=client,
+            base_backoff_sec=getattr(args, "reconnect_delay", 3.0),
+        )
+    worker.start()
+
+    # 6. Assemble Metric Registry & Domain Collectors
+    registry = MetricRegistry()
+    registry.register(TrainTelemetryCollector(store=store))
+    registry.register(WatchdogMetricsCollector(store=store))
+    registry.register(StreamMetricsCollector(store=store))
+    if db_path:
+        registry.register(StorageMetricsCollector(db_path=db_path))
+    process_collector = ProcessMetricsCollector(version=__version__)
+    registry.register(process_collector)
+
+    # 7. Construct Server Configuration & Instantiate Daemon
+    config = ExporterConfig(
+        host=host,
+        port=port,
+        db_path=db_path,
+        demo_mode=demo,
+        gzip_compression=not bool(getattr(args, "no_gzip", False)),
+        scrape_timeout_seconds=float(getattr(args, "scrape_timeout", 10.0)),
+    )
+
+    try:
+        server = MetricsServer(
+            server_address=(host, port),
+            registry=registry,
+            config=config,
+        )
+    except OSError as exc:
+        worker.stop()
+        if exc.errno == errno.EADDRINUSE:
+            print(
+                f"\n[ERROR] Port {port} is already in use on interface '{host}'.\n"
+                f"Please specify a different port using '--port <number>'.\n",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"\n[ERROR] Failed to start Prometheus exporter: {exc}\n", file=sys.stderr)
+        return 1
+
+    # 8. Print Operator Banner
+    _print_metrics_banner(server, source, db_path)
+
+    # 9. Main Server Execution Loop with Signal Handling
+    with install_signal_handlers() as stop_event:
+        server.start(background=True)
+        try:
+            while not stop_event.is_set():
+                stop_event.wait(timeout=0.5)
+        except KeyboardInterrupt:
+            stop_event.set()
+        finally:
+            server.stop()
+            worker.stop()
+
+    print("\n[INFO] Prometheus exporter daemon shut down cleanly.")
+    return 0
+
+
+def _dispatch_subcommand_mode(args: argparse.Namespace) -> Optional[int]:
+    """Dispatch dedicated CLI subcommands if matched, or return None."""
+    mode = getattr(args, "mode", None)
+    if mode in ("serve", "server", "web"):
         return run_serve_mode(args)
 
-    if args.mode in ("conflicts", "conflict", "watchdog_conflicts"):
+    if mode in ("metrics", "exporter", "prometheus"):
+        return run_metrics_mode(args)
+
+    if mode in ("conflicts", "conflict", "watchdog_conflicts"):
         return run_conflicts_mode(args)
 
-    if args.mode in ("sensor-health", "health", "sensor_health"):
+    if mode in ("sensor-health", "health", "sensor_health"):
         return run_sensor_health_mode(args)
 
-    if args.mode in ("speed-limits", "speeds", "speed_limits"):
+    if mode in ("speed-limits", "speeds", "speed_limits"):
         return run_speed_limits_mode(args)
 
-    if args.mode in ("slow-orders", "tsr", "slow_orders"):
+    if mode in ("slow-orders", "tsr", "slow_orders"):
         return run_slow_orders_mode(args)
 
-    if args.mode in ("infrastructure", "infra", "geo"):
+    if mode in ("infrastructure", "infra", "geo"):
         return run_infrastructure_mode(args)
 
-    if args.mode in ("cab", "stream-cab"):
+    if mode in ("cab", "stream-cab"):
         return run_cab_stream_mode(args)
 
-    if args.mode == "departures":
+    if mode == "departures":
         return run_departures_mode(args)
 
-    if args.mode == "watch":
+    if mode == "watch":
         return run_watch_mode(args)
 
-    if args.mode == "schedule":
+    if mode == "schedule":
         return run_schedule_mode(args)
 
-    if args.mode == "schedules":
+    if mode == "schedules":
         ret = run_schedules_mode()
         return ret if isinstance(ret, int) else 0
 
-    if args.mode == "history":
+    if mode == "history":
         return run_history_mode(args)
+
+    return None
+
+
+def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
+    """Route parsed CLI arguments to the appropriate execution mode."""
+    sub_res = _dispatch_subcommand_mode(args)
+    if sub_res is not None:
+        return sub_res
 
     replay_db = getattr(args, "replay", None)
     if replay_db is not None and str(replay_db).strip():

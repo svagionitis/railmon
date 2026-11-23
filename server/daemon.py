@@ -53,6 +53,30 @@ class WebMapServer(ThreadingHTTPServer):
         self._server_thread: Optional[threading.Thread] = None
         self._started_at: float = time.time()
 
+        # Initialize embedded Prometheus & OpenMetrics Operational Registry (F-8.2)
+        from exporter.collector import (
+            MetricRegistry,
+            ProcessMetricsCollector,
+            StorageMetricsCollector,
+            StreamMetricsCollector,
+            TrainTelemetryCollector,
+            WatchdogMetricsCollector,
+        )
+        import train_tracker
+
+        self.metric_registry = MetricRegistry()
+        self.metric_registry.register(TrainTelemetryCollector(store=self.store))
+        self.metric_registry.register(WatchdogMetricsCollector(store=self.store))
+        self.metric_registry.register(StreamMetricsCollector(store=self.store))
+        if self.config.db_path and self.config.record_enabled:
+            self.metric_registry.register(
+                StorageMetricsCollector(db_path=self.config.db_path)
+            )
+        self.process_collector = ProcessMetricsCollector(
+            version=train_tracker.__version__
+        )
+        self.metric_registry.register(self.process_collector)
+
         try:
             super().__init__(server_address, WebMapRequestHandler)
         except OSError as exc:

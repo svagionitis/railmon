@@ -277,15 +277,19 @@ class TestExporterServer(unittest.TestCase):
 
     def test_tc_srv_13_port_collision_eaddrinuse(self) -> None:
         """TC-SRV-13: Port collision raises OSError and logs actionable guidance."""
-        srv = self._start_server()
-        allocated_port = srv.server_port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        occupied_port = sock.getsockname()[1]
 
-        # Attempt to bind a second server on the identical port
-        with self.assertRaises(OSError):
-            MetricsServer(
-                server_address=(srv.server_address[0], allocated_port),
-                registry=self.registry,
-            )
+        try:
+            with self.assertRaises(OSError):
+                MetricsServer(
+                    server_address=("127.0.0.1", occupied_port),
+                    registry=self.registry,
+                )
+        finally:
+            sock.close()
 
     def test_tc_srv_14_scrape_metrics_recording(self) -> None:
         """TC-SRV-14: Scrape operations record duration and counters in ProcessMetricsCollector."""

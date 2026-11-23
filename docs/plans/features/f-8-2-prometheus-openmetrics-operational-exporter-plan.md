@@ -765,6 +765,9 @@ flowchart LR
   - Test port collision handling (`errno.EADDRINUSE`) and concurrent scraper requests.
 
 ### Phase 4: CLI Subcommand Integration & Web Daemon Cross-Exposing
+
+> **Detailed Phase 4 Implementation Plan:** [`./f-8-2-phase-4-cli-subcommand-integration-and-web-daemon-cross-exposing-plan.md`](./f-8-2-phase-4-cli-subcommand-integration-and-web-daemon-cross-exposing-plan.md)
+
 - **Deliverables:**
   - Register `metrics` subcommand in `train_tracker.py` (`build_parser()` and `_dispatch_cli_mode()`).
   - Implement `run_metrics_mode(args: argparse.Namespace) -> int` in `train_tracker.py`.

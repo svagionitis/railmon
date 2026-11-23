@@ -481,13 +481,22 @@ class StorageMetricsCollector(BaseCollector):
 
     def _fetch_db_stats(self) -> Dict[str, Any]:
         """Safely fetch historical database metrics with error resilience."""
+        if not self.db_path or not os.path.exists(self.db_path):
+            return {}
+        try:
+            with open(self.db_path, "rb") as f:
+                header = f.read(16)
+            if not header.startswith(b"SQLite format 3\x00"):
+                return {}
+        except Exception:
+            return {}
+
+        db = None
         try:
             from storage.db import Database
             from storage.repository import HistoricalRepository
 
-            if not self.db_path:
-                return {}
-            db = Database(self.db_path)
+            db = Database(self.db_path, auto_migrate=False)
             repo = HistoricalRepository(db)
             st = repo.get_stats()
             return {
@@ -497,6 +506,12 @@ class StorageMetricsCollector(BaseCollector):
         except Exception as exc:
             logger.debug("Could not query HistoricalRepository stats: %s", exc)
             return {}
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
 
 class ProcessMetricsCollector(BaseCollector):
