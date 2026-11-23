@@ -110,6 +110,14 @@ class TestCliMetrics(unittest.TestCase):
             self.assertEqual(code_high, 2)
             self.assertIn("Invalid port: 70000", stderr_buf2.getvalue())
 
+    def test_boundary_ports_accepted(self) -> None:
+        """TC-CLI-MET-15: Accept boundary ports 1 and 65535."""
+        args_1 = self.parser.parse_args(["metrics", "--port", "1"])
+        self.assertEqual(args_1.port, 1)
+
+        args_65535 = self.parser.parse_args(["metrics", "--port", "65535"])
+        self.assertEqual(args_65535.port, 65535)
+
     def test_dispatch_routing(self) -> None:
         """TC-CLI-MET-05: _dispatch_cli_mode routes metrics, exporter, prometheus to run_metrics_mode."""
         with patch("train_tracker.run_metrics_mode") as mock_run:

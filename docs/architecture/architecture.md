@@ -553,7 +553,62 @@ python3 train_tracker.py history export IC52 --format geojson --out ic52.geojson
 
 ---
 
-## 10. Implementation References
+## 10. Enterprise Observability & Prometheus Exporter Subsystem
+
+The `exporter/` package provides operational metrics export conforming to **Prometheus 0.0.4** and **OpenMetrics 1.0.0** standards, enabling Hellenic Railways network telemetry to be scraped and visualized in Grafana dashboards, VictoriaMetrics, and Alertmanager.
+
+### 10.1 Observability Architecture
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Exporter Subsystem Architecture                            |
++-----------------------------------------------------------------------------------+
+
+   [ TrainStateStore ] <----+ (RLock Snapshot < 1ms)
+   [ Watchdog Alerts ]      |
+   [ SQLite WAL DB   ]      |
+                            v
+       +-----------------------------------------+
+       |   MetricRegistry (exporter/collector.py) |
+       |   - TrainTelemetryCollector             |
+       |   - WatchdogMetricsCollector            |
+       |   - StreamMetricsCollector              |
+       |   - StorageMetricsCollector             |
+       |   - ProcessMetricsCollector             |
+       +-----------------------------------------+
+                            |
+                            | List[MetricFamily]
+                            v
+       +-----------------------------------------+
+       |   MetricsFormatter (exporter/formatter) |
+       |   - format_prometheus_004()             |
+       |   - format_openmetrics_100()            |
+       +-----------------------------------------+
+                            |
+            +---------------+---------------+
+            |                               |
+            v                               v
+ +----------------------+       +-----------------------+
+ | MetricsServer        |       | WebMapServer          |
+ | (railmon metrics)    |       | (railmon serve)       |
+ | Port 9100 /metrics   |       | Port 8080 /metrics    |
+ +----------------------+       +-----------------------+
+            ^                               ^
+            | Scrape HTTP GET /metrics      |
+            +---------------+---------------+
+                            |
+                    [ Prometheus Scraper ]
+```
+
+### 10.2 Architectural Guarantees
+- **Zero External Dependencies:** Built with pure Python standard library (`http.server`, `socketserver`, `threading`, `time`, `sqlite3`, `gzip`, `argparse`).
+- **Low Lock Contention:** `TrainTelemetryCollector` and `WatchdogMetricsCollector` read immutable `StateSnapshot` instances, holding state read-locks for $< 1.0\text{ ms}$.
+- **Bounded Cardinality:** Train metrics are emitted solely for active journeys and automatically reaped upon trip completion.
+- **Content Negotiation:** Transparently negotiates between OpenMetrics 1.0.0 and Prometheus 0.0.4 via HTTP `Accept` header.
+
+---
+
+## 11. Implementation References
 
 * **Python Source Code:** [`train_tracker.py`](../../train_tracker.py)
 * **TUI Package Entry Point:** [`tui/__init__.py`](../../tui/__init__.py)

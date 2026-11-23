@@ -71,16 +71,19 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, is_head: bool = False) -> None:
         """Route request by URL path."""
-        raw_path = self.path.split("?")[0].rstrip("/") or "/"
+        try:
+            raw_path = self.path.split("?")[0].rstrip("/") or "/"
 
-        if raw_path == "/metrics":
-            self._handle_metrics(is_head=is_head)
-        elif raw_path == "/health":
-            self._handle_health(is_head=is_head)
-        elif raw_path in ("/", "/index.html"):
-            self._handle_index(is_head=is_head)
-        else:
-            self._send_error(404, f"Endpoint '{raw_path}' not found")
+            if raw_path == "/metrics":
+                self._handle_metrics(is_head=is_head)
+            elif raw_path == "/health":
+                self._handle_health(is_head=is_head)
+            elif raw_path in ("/", "/index.html"):
+                self._handle_index(is_head=is_head)
+            else:
+                self._send_error(404, f"Endpoint '{raw_path}' not found")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logger.debug("Client disconnected abruptly during request processing")
 
     def _handle_metrics(self, is_head: bool = False) -> None:
         """Collect, negotiate format, serialize, and emit metrics payload."""
@@ -116,10 +119,16 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
             if not is_head:
                 self.wfile.write(body)
 
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logger.debug("Scraper client disconnected abruptly during metrics write")
+            status_code = 499
         except Exception as exc:
             logger.error("Scrape generation failed: %s", exc, exc_info=True)
             status_code = 500
-            self._send_error(500, f"Internal Scrape Error: {exc}")
+            try:
+                self._send_error(500, f"Internal Scrape Error: {exc}")
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
         finally:
             duration = time.perf_counter() - t_start
             self._record_scrape_telemetry(duration, "/metrics", status_code)
@@ -204,15 +213,18 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
 
     def _send_error(self, status_code: int, message: str) -> None:
         """Emit structured JSON error response."""
-        payload = {"error": message, "status": status_code}
-        body = json.dumps(payload).encode("utf-8")
+        try:
+            payload = {"error": message, "status": status_code}
+            body = json.dumps(payload).encode("utf-8")
 
-        self.send_response(status_code)
-        self._add_cors_headers()
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            self.send_response(status_code)
+            self._add_cors_headers()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logger.debug("Failed sending error response to disconnected client")
 
 
 class MetricsServer(ThreadingHTTPServer):
@@ -220,6 +232,14 @@ class MetricsServer(ThreadingHTTPServer):
 
     daemon_threads: bool = True
     allow_reuse_address: bool = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Handle errors cleanly, suppressing noisy broken pipe / reset exceptions."""
+        exc_type, exc_val, _ = sys.exc_info()
+        if exc_type in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logger.debug("Socket connection dropped by client %s: %s", client_address, exc_val)
+            return
+        super().handle_error(request, client_address)
 
     def __init__(
         self,

@@ -143,13 +143,18 @@ class TestTelemetryRecorder(unittest.TestCase):
         self.recorder.enqueue_batch(positions)
 
         # Wait for timeout to trigger flush
-        time.sleep(0.4)
+        deadline = time.time() + 2.0
+        count = 0
+        while time.time() < deadline:
+            with self.db.connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) AS total FROM telemetry_history")
+                count = cur.fetchone()["total"]
+                if count == 2:
+                    break
+            time.sleep(0.05)
 
-        with self.db.connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) AS total FROM telemetry_history")
-            count = cur.fetchone()["total"]
-            self.assertEqual(count, 2)
+        self.assertEqual(count, 2)
 
         self.recorder.stop()
 
@@ -506,7 +511,7 @@ class TestTelemetryRecorder(unittest.TestCase):
 
     def test_recorder_periodic_filter_prune(self):
         """TC-P2-10: TelemetryRecorder worker loop periodically evicts stale deadband filter states."""
-        deadband_cfg = DeadbandConfig(stale_timeout_sec=0.01, stale_prune_interval_sec=0.01)
+        deadband_cfg = DeadbandConfig(stale_timeout_sec=0.2, stale_prune_interval_sec=0.05)
         config = RecorderConfig(
             batch_size=1,
             flush_interval_sec=0.05,
@@ -518,13 +523,13 @@ class TestTelemetryRecorder(unittest.TestCase):
 
         # Enqueue position to populate filter cache
         self.recorder.enqueue(_create_sample_position("IC50"))
-        time.sleep(0.1)
+        time.sleep(0.05)
 
         # Confirm IC50 was cached
         self.assertIn("IC50", self.recorder.filter._states)
 
         # Wait for periodic worker prune
-        deadline = time.time() + 1.0
+        deadline = time.time() + 1.5
         while time.time() < deadline:
             if "IC50" not in self.recorder.filter._states:
                 break

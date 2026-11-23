@@ -33,7 +33,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | **Implemented** | [`tui/theme.py`](../../tui/theme.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`tui/app.py`](../../tui/app.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/db.py`](../../storage/db.py) |
-| **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py) |
+| **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | **Implemented** | [`exporter/server.py`](../../exporter/server.py), [`exporter/collector.py`](../../exporter/collector.py), [`exporter/formatter.py`](../../exporter/formatter.py), [`exporter/models.py`](../../exporter/models.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 8 (DevOps)** | **F-8.3** | GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter | `railmon export --gtfs-rt` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py) |
 | **Tier 9 (Analytics)** | **F-9.1** | Corridor Bottleneck & Station Dwell Delay Heatmaps | `railmon history bottlenecks` | Planned | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
 | **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* | Planned | [`storage/repository.py`](../../storage/repository.py), [`tui/renderer.py`](../../tui/renderer.py) |
@@ -861,32 +861,111 @@ A lightweight headless service utilizing Python's built-in `http.server` and soc
 
 ---
 
-### F-8.2: Prometheus & OpenMetrics Operational Exporter (`railmon metrics`) — *Planned*
+### F-8.2: Prometheus & OpenMetrics Operational Exporter (`railmon metrics`) — *Implemented*
 
-> **Detailed Implementation Plan:** [`../plans/features/f-8-2-prometheus-openmetrics-operational-exporter-plan.md`](../plans/features/f-8-2-prometheus-openmetrics-operational-exporter-plan.md)
+> **Detailed Master Implementation Plan:** [`../plans/features/f-8-2-prometheus-openmetrics-operational-exporter-plan.md`](../plans/features/f-8-2-prometheus-openmetrics-operational-exporter-plan.md)  
+> **Phase 1 Plan (Primitives & Serialization):** [`../plans/features/f-8-2-phase-1-metric-primitives-and-serialization-engine-plan.md`](../plans/features/f-8-2-phase-1-metric-primitives-and-serialization-engine-plan.md)  
+> **Phase 2 Plan (Domain Collectors & Registry):** [`../plans/features/f-8-2-phase-2-domain-telemetry-collectors-and-registry-plan.md`](../plans/features/f-8-2-phase-2-domain-telemetry-collectors-and-registry-plan.md)  
+> **Phase 3 Plan (HTTP Server Daemon & Negotiation):** [`../plans/features/f-8-2-phase-3-http-server-daemon-and-content-negotiation-plan.md`](../plans/features/f-8-2-phase-3-http-server-daemon-and-content-negotiation-plan.md)  
+> **Phase 4 Plan (CLI & Web Daemon Cross-Exposing):** [`../plans/features/f-8-2-phase-4-cli-subcommand-integration-and-web-daemon-cross-exposing-plan.md`](../plans/features/f-8-2-phase-4-cli-subcommand-integration-and-web-daemon-cross-exposing-plan.md)  
+> **Phase 5 Plan (Verification & Quality Gate):** [`../plans/features/f-8-2-phase-5-verification-ci-quality-gate-and-documentation-plan.md`](../plans/features/f-8-2-phase-5-verification-ci-quality-gate-and-documentation-plan.md)
 
 #### Overview
-Exposes an HTTP `/metrics` endpoint on port `9100` conforming to OpenMetrics and Prometheus standards for monitoring Greek rail operations in Grafana.
+A lightweight, multi-threaded operational telemetry exporter exposing live Hellenic Railways operational status, safety conflicts, and storage metrics to industry-standard monitoring systems (Prometheus, VictoriaMetrics, OpenTelemetry Collector, Grafana). Built with **100% Python standard library purity** without requiring third-party libraries (`pip install prometheus_client` not required).
 
-#### Metrics Schema
-```text
-# HELP railmon_active_trains Total number of currently active trains
-# TYPE railmon_active_trains gauge
-railmon_active_trains{corridor="PATHE"} 6
-railmon_active_trains{corridor="PROASTIAKOS"} 8
+#### Key Capabilities
+- **Content Negotiation:** Transparently negotiates between **Prometheus Text Format 0.0.4** (`text/plain; version=0.0.4`) and **OpenMetrics Standard 1.0.0** (`application/openmetrics-text; version=1.0.0`) with mandatory `# EOF\n` termination and `_total` counter enforcement based on incoming client `Accept` headers.
+- **Dual-Mode Serving:**
+  1. Stand-alone daemon via `railmon metrics` (default port `9100`).
+  2. Cross-exposed endpoint `/metrics` on the web GIS map daemon (`railmon serve` on port `8080`).
+- **Safety & Cardinality Protection:** Dynamic timeseries scoping reaps completed trains upon journey end, preventing memory leaks in Prometheus TSDBs. Snapshot acquisition holds `TrainStateStore` RLock for $< 1.0\text{ ms}$.
 
-# HELP railmon_train_delay_minutes Current delay in minutes
-# TYPE railmon_train_delay_minutes gauge
-railmon_train_delay_minutes{train_number="IC52",type="IC"} 0
-railmon_train_delay_minutes{train_number="1597",type="PR"} 8
+#### CLI Syntax & Usage
+```bash
+# Launch Prometheus exporter daemon in simulation demo mode
+railmon metrics --demo
 
-# HELP railmon_train_speed_kmh Instantaneous train speed in km/h
-# TYPE railmon_train_speed_kmh gauge
-railmon_train_speed_kmh{train_number="IC52"} 142.0
+# Launch operational exporter on custom port and host interface
+railmon metrics --host 0.0.0.0 --port 9100
 
-# HELP railmon_db_records_total Historical telemetry rows stored
-# TYPE railmon_db_records_total counter
-railmon_db_records_total 128450
+# Expose metrics with historical SQLite WAL storage metrics
+railmon metrics --db railway_history.db
+
+# Aliases
+railmon exporter --demo
+railmon prometheus --port 9100
+```
+
+#### Metrics Dictionary Reference
+
+| Metric Identifier | Metric Type | Unit | Description & Dimensions |
+| :--- | :---: | :---: | :--- |
+| `railmon_active_trains` | Gauge | `trains` | Total number of currently active trains operating on the network. Dimensions: `corridor`. |
+| `railmon_train_delay_minutes` | Gauge | `minutes` | Current schedule delay in minutes for an individual train. Dimensions: `train_number`, `type`, `corridor`. |
+| `railmon_train_speed_kmh` | Gauge | `km/h` | Instantaneous GPS speed for an individual train. Dimensions: `train_number`, `type`, `corridor`. |
+| `railmon_train_max_speed_kmh` | Gauge | `km/h` | Peak speed observed along the active journey. Dimensions: `train_number`, `corridor`. |
+| `railmon_trains_delayed_total` | Gauge | `trains` | Count of active trains grouped by delay severity tier (`on_time`, `minor`, `moderate`, `severe`). Dimensions: `corridor`, `severity`. |
+| `railmon_corridor_punctuality_ratio` | Gauge | `ratio` | Ratio ($0.0 - 1.0$) of on-time trains ($\le 5\text{ min}$ delay) per corridor. Dimensions: `corridor`. |
+| `railmon_corridor_average_delay_minutes` | Gauge | `minutes` | Mean delay in minutes across all active trains per corridor. Dimensions: `corridor`. |
+| `railmon_watchdog_conflicts_active` | Gauge | `alerts` | Number of active safety watchdog conflict alerts. Dimensions: `corridor`, `severity`. |
+| `railmon_watchdog_conflicts_total` | Counter | `alerts` | Cumulative count of unique safety conflicts detected. Dimensions: `corridor`, `severity`. |
+| `railmon_sensor_freezes_active` | Gauge | `trains` | Count of locomotives with frozen GPS coordinates ($> 45\text{s}$). Dimensions: `corridor`. |
+| `railmon_telemetry_drops_active` | Gauge | `trains` | Count of locomotives with dropped telemetry packets ($> 120\text{s}$). Dimensions: `corridor`. |
+| `railmon_speed_exceedances_active` | Gauge | `trains` | Count of trains currently exceeding line speed limits. Dimensions: `corridor`. |
+| `railmon_stream_connected` | Gauge | `boolean` | Connection status to upstream SSE stream ($1 = \text{connected}, 0 = \text{disconnected}$). |
+| `railmon_stream_messages_total` | Counter | `messages` | Total number of SSE telemetry frames ingested. |
+| `railmon_stream_reconnects_total` | Counter | `events` | Total number of SSE stream reconnection events. |
+| `railmon_stream_latency_seconds` | Gauge | `seconds` | Telemetry age (seconds elapsed since last upstream packet). |
+| `railmon_db_records_total` | Counter | `rows` | Cumulative telemetry observations stored in the SQLite WAL database. |
+| `railmon_db_file_size_bytes` | Gauge | `bytes` | Current disk file size for main database and WAL. Dimensions: `file_type`. |
+| `railmon_db_write_queue_depth` | Gauge | `rows` | Telemetry rows currently queued in-memory awaiting disk commit. |
+| `railmon_db_deadband_suppressed_total` | Counter | `rows` | Telemetry updates suppressed by deadband filter. |
+| `railmon_exporter_build_info` | Info | — | Exporter build metadata. Dimensions: `version`, `python_version`. |
+| `railmon_exporter_uptime_seconds` | Gauge | `seconds` | Exporter process uptime in seconds. |
+| `railmon_exporter_scrapes_total` | Counter | `scrapes` | Cumulative scrape requests handled. Dimensions: `endpoint`, `status`. |
+| `railmon_exporter_scrape_duration_seconds`| Gauge | `seconds` | Execution duration of the most recent scrape cycle. |
+
+#### Prometheus Scrape Configuration (`prometheus.yml`)
+```yaml
+scrape_configs:
+  - job_name: "railmon"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+```
+
+#### Sample PromQL Alerting Rules
+```yaml
+groups:
+  - name: railmon_safety_alerts
+    rules:
+      - alert: CriticalTrainCollisionRisk
+        expr: railmon_watchdog_conflicts_active{severity="critical"} > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Critical opposing train collision risk detected on Greek rail network"
+          description: "Watchdog detected opposing vectors or headway collapse in corridor {{ $labels.corridor }}."
+
+      - alert: SevereFleetDelaySpike
+        expr: railmon_corridor_punctuality_ratio{corridor="PATHE"} < 0.50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PATHE Mainline punctuality dropped below 50%"
+          description: "Over half of trains on PATHE are delayed by > 5 minutes."
+
+      - alert: UpstreamTelemetryStreamDisconnected
+        expr: railmon_stream_connected == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lost SSE connection to railway.gov.gr"
+          description: "railmon exporter has been disconnected from upstream telemetry for > 1 minute."
 ```
 
 ---

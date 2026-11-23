@@ -26,6 +26,10 @@
   - Spatial deadband filtering reduces database footprint by 40–60% by suppressing uninformative stationary coordinates while preserving motion fidelity.
   - Headless ingestion daemon mode (`railmon record`) for server or background recording.
   - Rich CLI analytics (`railmon history`) for punctuality reports, dwell profiling, trip summaries, and RFC 7946 GeoJSON / CSV trajectory export.
+- **Prometheus & OpenMetrics Operational Exporter (`railmon metrics`)**:
+  - Multi-threaded HTTP daemon exporting Hellenic Railways operations, delays, speeds, and safety conflict gauges on default port `9100`.
+  - Automatic HTTP content negotiation: yields **OpenMetrics 1.0.0** (`# EOF\n` termination, `_total` counter suffixes) or standard **Prometheus 0.0.4** text format based on client `Accept` headers.
+  - 100% Python standard library purity with zero external PyPI dependencies (`pip install prometheus_client` not required).
 - **Offline Simulation Mode (`--demo`)**: Full physics-based kinematic mock engine simulating trains traversing real track geometry without requiring internet access.
 - **Lightweight & Dependency-Free**: Pure standard library implementation on Linux/macOS (Python 3.10+ `curses`, `urllib`, `dataclasses`, `json`). On Windows, `windows-curses` provides native console support.
 
@@ -195,6 +199,25 @@ railmon watch 1597 --demo --once         # Demo simulation exiting on arrival
 ./railmon history export IC52 --format geojson --out ic52.geojson
 ```
 
+### Prometheus & OpenMetrics Operational Exporter
+
+```bash
+# Launch Prometheus exporter daemon in simulation demo mode on port 9100
+./railmon metrics --demo
+
+# Run live exporter listening on all network interfaces
+./railmon metrics --host 0.0.0.0 --port 9100
+
+# Scrape metrics with curl (Prometheus 0.0.4 text format)
+curl -H "Accept: text/plain" http://localhost:9100/metrics
+
+# Scrape metrics with OpenMetrics 1.0.0 content negotiation
+curl -H "Accept: application/openmetrics-text; version=1.0.0" http://localhost:9100/metrics
+
+# Check exporter health probe (JSON)
+curl http://localhost:9100/health
+```
+
 ---
 
 ## Controls Reference (TUI)
@@ -237,6 +260,11 @@ railmon watch 1597 --demo --once         # Demo simulation exiting on arrival
   - [`storage/filter.py`](./storage/filter.py): Deadband filtering and coordinate compression engine.
   - [`storage/repository.py`](./storage/repository.py): Analytical query engine, DTOs, and GeoJSON/CSV exporters.
   - [`storage/cli_formatters.py`](./storage/cli_formatters.py): Zero-dependency tabular terminal reporting formatters.
+- [`exporter/`](./exporter): Zero-dependency Prometheus & OpenMetrics operational exporter subsystem:
+  - [`exporter/models.py`](./exporter/models.py): MetricType, Sample, and MetricFamily data transfer models.
+  - [`exporter/formatter.py`](./exporter/formatter.py): Prometheus 0.0.4 and OpenMetrics 1.0.0 serialization engines.
+  - [`exporter/collector.py`](./exporter/collector.py): Pluggable domain telemetry, watchdog, stream, and storage collectors.
+  - [`exporter/server.py`](./exporter/server.py): Multi-threaded HTTP server daemon with content negotiation and health probe.
 - [`scripts/`](./scripts): Development and profiling utilities:
   - [`scripts/benchmark_storage.py`](./scripts/benchmark_storage.py): Ingestion throughput, read latency, and deadband benchmarking harness.
 - [`docs/historical-storage-sqlite.md`](./docs/architecture/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.

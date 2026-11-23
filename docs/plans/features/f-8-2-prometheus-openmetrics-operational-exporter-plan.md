@@ -777,6 +777,9 @@ flowchart LR
   - Verify banner output, argument parsing, `--demo` mode, and `--port` overrides.
 
 ### Phase 5: Verification, CI Quality Gate & Documentation
+
+> **Detailed Phase 5 Implementation Plan:** [`./f-8-2-phase-5-verification-ci-quality-gate-and-documentation-plan.md`](./f-8-2-phase-5-verification-ci-quality-gate-and-documentation-plan.md)
+
 - **Deliverables:**
   - Update `docs/architecture/tui-feature-enhancements.md` matrix status to Implemented.
   - Run full test suite: `python3 -m unittest discover tests -v`.

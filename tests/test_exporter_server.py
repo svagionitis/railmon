@@ -338,6 +338,44 @@ class TestExporterServer(unittest.TestCase):
         self.assertEqual(len(results), 16)
         self.assertTrue(all(code == 200 for code in results))
 
+    def test_tc_edge_06_abrupt_client_socket_disconnect(self) -> None:
+        """TC-EXP-EDGE-06: Abrupt client socket closure during scrape does not crash server thread."""
+        srv = self._start_server()
+        host, port = srv.server_address
+
+        # Connect raw socket and send request
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((host, port))
+        sock.sendall(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        # Abruptly close socket before reading response
+        sock.close()
+
+        # Verify server remains healthy and responds to subsequent requests
+        time.sleep(0.05)
+        req = Request(f"{srv.server_url}health")
+        with self._open(req) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_tc_edge_17_path_traversal_attack(self) -> None:
+        """TC-EXP-EDGE-17: Path traversal attacks (e.g. /../../etc/passwd) safely return 404."""
+        srv = self._start_server()
+        url = f"{srv.server_url}../../etc/passwd"
+
+        req = Request(url)
+        with self.assertRaises(HTTPError) as ctx:
+            self._open(req)
+        self.assertEqual(ctx.exception.code, 404)
+
+    def test_tc_edge_01_malformed_accept_header_over_http(self) -> None:
+        """TC-EXP-EDGE-01: Malformed Accept header over HTTP defaults safely to text/plain 0.0.4."""
+        srv = self._start_server()
+        url = f"{srv.server_url}metrics"
+
+        req = Request(url, headers={"Accept": "malformed/mime; q=bogus, text/*"})
+        with self._open(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/plain", resp.headers.get("Content-Type", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

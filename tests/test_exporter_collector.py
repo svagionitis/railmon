@@ -541,6 +541,75 @@ class TestCollectorEndToEndIntegration(unittest.TestCase):
         self.assertIn("# UNIT railmon_active_trains trains", open_text)
         self.assertTrue(open_text.endswith("# EOF\n"))
 
+    def test_tc_edge_04_extreme_kinematics_and_none_attributes(self) -> None:
+        """TC-EXP-EDGE-04: Extreme kinematics (NaN speed, None delay, missing corridor) collected safely."""
+        store = TrainStateStore()
+        # Train with None corridor, None delay, NaN speed
+        pos = TrainPosition(
+            id="TRAIN-EDGE",
+            train_number="",
+            locomotive_number=None,
+            name=None,
+            train_type=None,
+            service_type=None,
+            status=None,
+            origin=None,
+            destination=None,
+            next_station=None,
+            speed=float("nan"),
+            course=None,
+            track_heading=None,
+            lat=38.0,
+            lng=23.5,
+            altitude=None,
+            delay=None,
+            progress=None,
+            chainage_m=None,
+            corridor=None,
+            distance_to_destination_m=None,
+            timestamp=None,
+            schedule_id=None,
+        )
+        store.update_positions([pos])
+
+        collector = TrainTelemetryCollector(store)
+        fams = collector.collect()
+        fam_map = {f.name: f for f in fams}
+
+        # Active trains must assign UNKNOWN corridor
+        active_fam = fam_map["railmon_active_trains"]
+        corridors = [dict(s.labels).get("corridor") for s in active_fam.samples]
+        self.assertIn("UNKNOWN", corridors)
+
+        # Delays should default to 0.0 without throwing
+        delay_fam = fam_map["railmon_train_delay_minutes"]
+        self.assertEqual(len(delay_fam.samples), 1)
+        self.assertEqual(delay_fam.samples[0].value, 0.0)
+
+    def test_tc_edge_10_corrupt_or_truncated_sqlite_db(self) -> None:
+        """TC-EXP-EDGE-10: Corrupt or non-SQLite files handle gracefully without raising."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. 0-byte file
+            empty_file = os.path.join(tmpdir, "empty.db")
+            with open(empty_file, "wb") as f:
+                pass
+
+            collector_empty = StorageMetricsCollector(db_path=empty_file)
+            fams_empty = collector_empty.collect()
+            self.assertEqual(len(fams_empty), 5)
+            # Size should be 0
+            file_size_sample = [f for f in fams_empty if f.name == "railmon_db_file_size_bytes"][0].samples[0]
+            self.assertEqual(file_size_sample.value, 0.0)
+
+            # 2. Corrupt garbage file
+            garbage_file = os.path.join(tmpdir, "garbage.db")
+            with open(garbage_file, "wb") as f:
+                f.write(b"NOT_A_SQLITE_DATABASE_HEADER_DATA_PADDING_BYTES")
+
+            collector_garbage = StorageMetricsCollector(db_path=garbage_file)
+            fams_garbage = collector_garbage.collect()
+            self.assertEqual(len(fams_garbage), 5)
+
 
 if __name__ == "__main__":
     unittest.main()

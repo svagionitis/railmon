@@ -100,6 +100,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "dataclasses",
             "enum",
             "errno",
+            "gzip",
             "http",
             "json",
             "logging",
@@ -119,7 +120,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "uuid",
             "webbrowser",
         }
-        allowed_internal = {"server", "storage", "train_tracker", "tui"}
+        allowed_internal = {"server", "storage", "train_tracker", "tui", "exporter"}
         allowed = allowed_stdlib | allowed_internal
 
         for py_file in server_dir.glob("*.py"):

@@ -173,6 +173,94 @@ class TestExporterFormatter(unittest.TestCase):
         self.assertNotIn("railmon_empty_metric", openm)
         self.assertIn("railmon_active_trains", openm)
 
+    def test_tc_edge_01_malformed_accept_headers_fallback(self) -> None:
+        """TC-EXP-EDGE-01: Malformed and unusual Accept headers safely fallback to Prometheus 0.0.4."""
+        malformed_headers = [
+            "invalid/mime; q=bad, text/*",
+            ";;;",
+            ",,,,",
+            "   ",
+            "application/json",
+            "text/html; q=0.9, */*; q=0.1",
+        ]
+        for hdr in malformed_headers:
+            with self.subTest(header=hdr):
+                content_type, mode = negotiate_metrics_format(hdr)
+                self.assertEqual(mode, "prometheus")
+                self.assertIn("text/plain", content_type)
+
+        # Quality weights: when openmetrics is preferred over text/plain
+        content_type, mode = negotiate_metrics_format(
+            "text/plain; q=0.5, application/openmetrics-text; version=1.0.0; q=0.9"
+        )
+        self.assertEqual(mode, "openmetrics")
+
+    def test_tc_edge_02_greek_unicode_polytonic_labels(self) -> None:
+        """TC-EXP-EDGE-02: Greek Unicode polytonic text in labels and help strings format cleanly in UTF-8."""
+        fam = MetricFamily(
+            name="railmon_station_dwell_minutes",
+            documentation="Χρόνος αναμονής σε σταθμούς (Λάρισα, Θεσσαλονίκη)",
+            metric_type=MetricType.GAUGE,
+            unit="minutes",
+        )
+        fam.add_sample(
+            labels={
+                "origin": "Αθήνα",
+                "destination": "Θεσσαλονίκη",
+                "station": "Παλαιοφάρσαλος",
+                "corridor": "ΠΑΘΕ",
+            },
+            value=4.5,
+        )
+
+        prom_bytes = MetricsFormatter.format_prometheus_004([fam])
+        prom_text = prom_bytes.decode("utf-8")
+        self.assertIn("Χρόνος αναμονής σε σταθμούς (Λάρισα, Θεσσαλονίκη)", prom_text)
+        self.assertIn('station="Παλαιοφάρσαλος"', prom_text)
+        self.assertIn('destination="Θεσσαλονίκη"', prom_text)
+
+        open_bytes = MetricsFormatter.format_openmetrics_100([fam])
+        open_text = open_bytes.decode("utf-8")
+        self.assertIn('origin="Αθήνα"', open_text)
+        self.assertTrue(open_text.endswith("# EOF\n"))
+
+    def test_tc_edge_03_injection_attack_sanitization_in_samples(self) -> None:
+        """TC-EXP-EDGE-03: Label injection attack characters are escaped and cannot inject metric lines."""
+        fam = MetricFamily(
+            name="railmon_train_status",
+            documentation="Status of trains",
+            metric_type=MetricType.GAUGE,
+        )
+        # Attempt to inject unauthorized metric via label value
+        malicious_label = 'IC52"}\nrailmon_injected_metric{hacked="true"} 999\n#'
+        fam.add_sample(labels={"train_number": malicious_label}, value=1.0)
+
+        prom_bytes = MetricsFormatter.format_prometheus_004([fam])
+        prom_text = prom_bytes.decode("utf-8")
+
+        # The raw unescaped injection MUST NOT appear as a new line
+        self.assertNotIn('\nrailmon_injected_metric{hacked="true"} 999\n', prom_text)
+        # Quotes and newlines must be safely escaped
+        self.assertIn('train_number="IC52\\"}\\nrailmon_injected_metric{hacked=\\"true\\"} 999\\n#"', prom_text)
+
+    def test_tc_edge_04_floating_point_extremes_in_metrics(self) -> None:
+        """TC-EXP-EDGE-04: Metric families containing NaN, +Inf, -Inf, and negative floats format safely."""
+        fam = MetricFamily(
+            name="railmon_kinematic_extremes",
+            documentation="Extreme kinematic telemetry values",
+            metric_type=MetricType.GAUGE,
+        )
+        fam.add_sample(labels={"kind": "nan"}, value=float("nan"))
+        fam.add_sample(labels={"kind": "pos_inf"}, value=float("inf"))
+        fam.add_sample(labels={"kind": "neg_inf"}, value=float("-inf"))
+        fam.add_sample(labels={"kind": "neg_delay"}, value=-12.5)
+
+        prom_text = MetricsFormatter.format_prometheus_004([fam]).decode("utf-8")
+        self.assertIn('railmon_kinematic_extremes{kind="nan"} NaN\n', prom_text)
+        self.assertIn('railmon_kinematic_extremes{kind="pos_inf"} +Inf\n', prom_text)
+        self.assertIn('railmon_kinematic_extremes{kind="neg_inf"} -Inf\n', prom_text)
+        self.assertIn('railmon_kinematic_extremes{kind="neg_delay"} -12.5\n', prom_text)
+
 
 if __name__ == "__main__":
     unittest.main()
