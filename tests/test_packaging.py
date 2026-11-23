@@ -79,6 +79,18 @@ class TestPackagingAndVersioning(unittest.TestCase):
         self.assertTrue(stations_file.exists(), "tui/data/stations.json missing")
         self.assertTrue(tracks_file.exists(), "tui/data/tracks.json missing")
 
+    def test_server_package_configured_and_importable(self):
+        """TC-PKG-07: server package is registered in pyproject.toml and importable."""
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        content = pyproject_path.read_text(encoding="utf-8")
+        self.assertIn('"server"', content)
+
+        import server
+        self.assertEqual(server.__version__, train_tracker.__version__)
+        self.assertEqual(server.__author__, train_tracker.__author__)
+        self.assertTrue(hasattr(server, "SSEBroadcaster"))
+        self.assertTrue(hasattr(server, "ServerConfig"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -851,6 +851,8 @@ Expands `railmon` into multi-user operations, third-party transit apps, and ente
 
 ### F-8.1: Embedded Zero-Dependency Web Map Daemon (`railmon serve`) — *Planned*
 
+> **Detailed Implementation Plan:** [`../plans/features/f-8-1-embedded-zero-dependency-web-map-daemon-plan.md`](../plans/features/f-8-1-embedded-zero-dependency-web-map-daemon-plan.md)
+
 #### Overview
 A lightweight headless service utilizing Python's built-in `http.server` and socket library to serve a responsive browser GIS dashboard on `http://localhost:8080`.
 - Serves an embedded Leaflet / MapLibre single-page web app with OpenStreetMap / CartoDB tiles.
