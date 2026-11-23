@@ -863,6 +863,8 @@ A lightweight headless service utilizing Python's built-in `http.server` and soc
 
 ### F-8.2: Prometheus & OpenMetrics Operational Exporter (`railmon metrics`) — *Planned*
 
+> **Detailed Implementation Plan:** [`../plans/features/f-8-2-prometheus-openmetrics-operational-exporter-plan.md`](../plans/features/f-8-2-prometheus-openmetrics-operational-exporter-plan.md)
+
 #### Overview
 Exposes an HTTP `/metrics` endpoint on port `9100` conforming to OpenMetrics and Prometheus standards for monitoring Greek rail operations in Grafana.
 

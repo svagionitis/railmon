@@ -68,7 +68,7 @@ version = { attr = "train_tracker.__version__" }
 
 [tool.setuptools]
 py-modules = ["train_tracker"]
-packages = ["storage", "tui", "tui.data", "server"]
+packages = ["storage", "tui", "tui.data", "server", "exporter"]
 
 [tool.setuptools.package-data]
 "tui.data" = ["*.json"]

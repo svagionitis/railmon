@@ -142,6 +142,72 @@ class TestPackagingAndVersioning(unittest.TestCase):
                             f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
                         )
 
+    def test_exporter_package_configured_and_importable(self):
+        """TC-PKG-09: exporter package is registered in pyproject.toml and importable."""
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        content = pyproject_path.read_text(encoding="utf-8")
+        self.assertIn('"exporter"', content)
+
+        import exporter
+        self.assertEqual(exporter.__version__, train_tracker.__version__)
+        self.assertEqual(exporter.__author__, train_tracker.__author__)
+        self.assertTrue(hasattr(exporter, "MetricFamily"))
+        self.assertTrue(hasattr(exporter, "MetricType"))
+        self.assertTrue(hasattr(exporter, "Sample"))
+        self.assertTrue(hasattr(exporter, "ExporterConfig"))
+        self.assertTrue(hasattr(exporter, "MetricsFormatter"))
+
+    def test_exporter_runtime_zero_pypi_dependencies(self):
+        """TC-PKG-10: exporter package imports exclusively from Python stdlib and internal packages."""
+        import ast
+
+        exporter_dir = REPO_ROOT / "exporter"
+        allowed_stdlib = {
+            "dataclasses",
+            "enum",
+            "errno",
+            "gzip",
+            "http",
+            "json",
+            "logging",
+            "math",
+            "os",
+            "pathlib",
+            "queue",
+            "re",
+            "signal",
+            "socket",
+            "socketserver",
+            "sys",
+            "threading",
+            "time",
+            "types",
+            "typing",
+            "urllib",
+        }
+        allowed_internal = {"exporter", "server", "storage", "train_tracker", "tui"}
+        allowed = allowed_stdlib | allowed_internal
+
+        for py_file in exporter_dir.glob("*.py"):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_mod = alias.name.split(".")[0]
+                        self.assertIn(
+                            root_mod,
+                            allowed,
+                            f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
+                        )
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        root_mod = node.module.split(".")[0]
+                        self.assertIn(
+                            root_mod,
+                            allowed,
+                            f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
+                        )
+
 
 if __name__ == "__main__":
     unittest.main()
