@@ -91,6 +91,57 @@ class TestPackagingAndVersioning(unittest.TestCase):
         self.assertTrue(hasattr(server, "SSEBroadcaster"))
         self.assertTrue(hasattr(server, "ServerConfig"))
 
+    def test_server_runtime_zero_pypi_dependencies(self):
+        """TC-PKG-08: server package imports exclusively from Python stdlib and internal packages."""
+        import ast
+
+        server_dir = REPO_ROOT / "server"
+        allowed_stdlib = {
+            "dataclasses",
+            "enum",
+            "errno",
+            "http",
+            "json",
+            "logging",
+            "math",
+            "os",
+            "pathlib",
+            "queue",
+            "signal",
+            "socket",
+            "socketserver",
+            "sys",
+            "threading",
+            "time",
+            "types",
+            "typing",
+            "urllib",
+            "uuid",
+            "webbrowser",
+        }
+        allowed_internal = {"server", "storage", "train_tracker", "tui"}
+        allowed = allowed_stdlib | allowed_internal
+
+        for py_file in server_dir.glob("*.py"):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_mod = alias.name.split(".")[0]
+                        self.assertIn(
+                            root_mod,
+                            allowed,
+                            f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
+                        )
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        root_mod = node.module.split(".")[0]
+                        self.assertIn(
+                            root_mod,
+                            allowed,
+                            f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
+                        )
+
 
 if __name__ == "__main__":
     unittest.main()

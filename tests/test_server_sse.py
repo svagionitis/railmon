@@ -157,6 +157,37 @@ class TestServerSSE(unittest.TestCase):
         metrics = broadcaster.get_health_metrics()
         self.assertEqual(metrics.total_broadcasts, 200)
 
+    def test_rapid_connect_disconnect_memory_neutrality(self) -> None:
+        """TC-SSE-07: 1,000 connect/disconnect cycles exhibit zero unbounded memory growth."""
+        import gc
+        import tracemalloc
+
+        broadcaster = SSEBroadcaster(max_queue_depth=10)
+        gc.collect()
+        tracemalloc.start()
+
+        snapshot_start = tracemalloc.take_snapshot()
+
+        for i in range(1000):
+            conn = broadcaster.register_client(f"client-{i}")
+            broadcaster.broadcast("tick", '{"data": 1}')
+            broadcaster.unregister_client(conn.client_id)
+
+        gc.collect()
+        snapshot_end = tracemalloc.take_snapshot()
+        tracemalloc.stop()
+
+        top_stats = snapshot_end.compare_to(snapshot_start, "lineno")
+        total_growth_kb = sum(stat.size_diff for stat in top_stats) / 1024.0
+
+        # Max acceptable residual memory growth after 1000 iterations: < 250 KB
+        self.assertLess(
+            total_growth_kb,
+            250.0,
+            f"Possible memory leak detected: {total_growth_kb:.2f} KB heap growth",
+        )
+        self.assertEqual(broadcaster.client_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

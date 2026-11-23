@@ -210,6 +210,26 @@ class TestServerAssets(unittest.TestCase):
                 f"Prohibited external dependency '{mod}' found in server/assets.py",
             )
 
+    def test_geo_asset_cache_corrupt_and_zero_byte_fault_injection(self) -> None:
+        """TC-AST-19 / TC-EDGE-10: Corrupt and 0-byte JSON files return safe empty FeatureCollection."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            # Create a 0-byte file
+            zero_byte_file = tmp_path / "zero_byte.json"
+            zero_byte_file.write_text("", encoding="utf-8")
+
+            # Create a corrupted malformed JSON file
+            corrupt_file = tmp_path / "corrupt.json"
+            corrupt_file.write_text("{malformed: json, [unclosed", encoding="utf-8")
+
+            cache = GeoAssetCache(data_dir=tmp_path)
+
+            res_zero = json.loads(cache.get_asset_json_string("zero_byte.json"))
+            self.assertEqual(res_zero, {"type": "FeatureCollection", "features": []})
+
+            res_corrupt = json.loads(cache.get_asset_json_string("corrupt.json"))
+            self.assertEqual(res_corrupt, {"type": "FeatureCollection", "features": []})
+
 
 if __name__ == "__main__":
     unittest.main()

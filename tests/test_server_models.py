@@ -51,8 +51,18 @@ class TestServerModels(unittest.TestCase):
 
     def test_server_config_validation(self) -> None:
         """TC-MOD-04: ServerConfig enforces port bounds and positive replay speed."""
+        # Valid boundary port numbers
+        cfg_min = ServerConfig(port=1)
+        self.assertEqual(cfg_min.port, 1)
+        cfg_max = ServerConfig(port=65535)
+        self.assertEqual(cfg_max.port, 65535)
+
+        # Invalid port numbers
         with self.assertRaises(ValueError):
             ServerConfig(port=0)
+
+        with self.assertRaises(ValueError):
+            ServerConfig(port=-1)
 
         with self.assertRaises(ValueError):
             ServerConfig(port=65536)
@@ -62,6 +72,16 @@ class TestServerModels(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             ServerConfig(replay_speed=-1.5)
+
+    def test_server_config_immutability(self) -> None:
+        """TC-MOD-08: ServerConfig is frozen dataclass preventing attribute mutation."""
+        from dataclasses import FrozenInstanceError
+
+        cfg = ServerConfig()
+        with self.assertRaises(FrozenInstanceError):
+            cfg.port = 9090  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            cfg.host = "0.0.0.0"  # type: ignore[misc]
 
     def test_client_connection_lifecycle(self) -> None:
         """TC-MOD-05: ClientConnection initializes unique ID, queue, and tracks activity."""

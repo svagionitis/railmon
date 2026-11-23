@@ -2,7 +2,9 @@
 
 import http.client
 import json
+import math
 import socket
+import struct
 import time
 import unittest
 from typing import Any, Optional
@@ -36,7 +38,11 @@ def _create_sample_train(
         name=train_number,
         train_type="InterCity",
         service_type="Passenger",
-        status="Κανονική" if speed > 5.0 else "Στάση",
+        status=(
+            "Κανονική"
+            if (isinstance(speed, (int, float)) and not math.isnan(speed) and speed > 5.0)
+            else "Στάση"
+        ),
         origin=origin,
         destination=destination,
         next_station="SKA",
@@ -46,7 +52,7 @@ def _create_sample_train(
         lat=lat,
         lng=lng,
         altitude=45.0,
-        delay=int(delay),
+        delay=int(delay) if (isinstance(delay, (int, float)) and math.isfinite(delay)) else 0,
         progress=0.15,
         chainage_m=12000,
         corridor=corridor,
@@ -366,6 +372,126 @@ class TestWebMapServerDaemon(unittest.TestCase):
                 )
         finally:
             sock.close()
+
+    def test_path_traversal_rejection_tc_edge_01(self) -> None:
+        """TC-EDGE-01: Directory traversal attacks return 404/400 without leaking filesystem content."""
+        server = self._start_server()
+        malicious_paths = [
+            "/../../../etc/passwd",
+            "/%2e%2e/%2e%2e/etc/shadow",
+            "/api/tracks/../../train_tracker.py",
+            "/..%2f..%2fpyproject.toml",
+        ]
+        for path in malicious_paths:
+            req = Request(f"http://127.0.0.1:{server.server_port}{path}")
+            try:
+                res = self._open(req)
+                self.assertIn(res.status, (400, 404))
+            except HTTPError as err:
+                self.assertIn(err.code, (400, 404))
+
+    def test_instant_client_rst_disconnect_tc_edge_03(self) -> None:
+        """TC-EDGE-03: Abrupt TCP RST before handshake is cleanly handled without hanging threads."""
+        server = self._start_server()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", server.server_port))
+        sock.sendall(b"GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        # Set SO_LINGER to 0 for instant TCP RST on close
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+
+        # Push telemetry broadcast; server should not raise or leak client
+        server.broadcaster.broadcast("tick", '{"status": "ok"}')
+        time.sleep(0.05)
+        server.service_actions()
+        self.assertEqual(server.broadcaster.client_count, 0)
+
+    def test_slow_reader_saturation_does_not_block_fast_clients_tc_edge_04(self) -> None:
+        """TC-EDGE-04: Saturated client queue drops frames without blocking broadcast to fast clients."""
+        server = self._start_server()
+        broadcaster = server.broadcaster
+
+        slow_conn = broadcaster.register_client("slow-client")
+        fast_conn = broadcaster.register_client("fast-client")
+
+        # Push frames to saturate slow queue
+        for i in range(120):
+            broadcaster.broadcast("tick", f"msg-{i}")
+            while not fast_conn.queue.empty():
+                fast_conn.queue.get_nowait()
+
+        # Slow client queue should remain bounded at MAX_CLIENT_QUEUE_DEPTH (100)
+        self.assertLessEqual(slow_conn.queue.qsize(), 100)
+        self.assertGreater(slow_conn.frames_dropped, 0)
+
+        # Unregister test clients
+        broadcaster.unregister_client(slow_conn.client_id)
+        broadcaster.unregister_client(fast_conn.client_id)
+
+    def test_telemetry_cold_start_empty_state_tc_edge_06(self) -> None:
+        """TC-EDGE-06: Server returns empty JSON array and valid init frame on cold start."""
+        server = self._start_server()
+        req = Request(f"http://127.0.0.1:{server.server_port}/api/trains")
+        res = self._open(req)
+        self.assertEqual(res.status, 200)
+        data = json.loads(res.read().decode("utf-8"))
+        self.assertEqual(data, [])
+
+    def test_telemetry_float_nan_and_infinity_sanitization_tc_edge_07(self) -> None:
+        """TC-EDGE-07: Telemetry containing NaN or Infinity is safely sanitized to valid JSON."""
+        anomalous_train = _create_sample_train(
+            train_id="anom-1",
+            speed=float("nan"),
+            delay=float("inf"),
+        )
+        self.store.update_positions([anomalous_train])
+
+        server = self._start_server()
+        req = Request(f"http://127.0.0.1:{server.server_port}/api/trains")
+        res = self._open(req)
+        self.assertEqual(res.status, 200)
+        raw_body = res.read().decode("utf-8")
+        # Ensure it decodes cleanly with json.loads (which would raise if invalid)
+        data = json.loads(raw_body)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["speed"], 0.0)
+        self.assertEqual(data[0]["delay"], 0.0)
+
+    def test_extreme_speeds_and_coordinates_tc_edge_08(self) -> None:
+        """TC-EDGE-08: Telemetry with supersonic and negative speeds formats safely."""
+        train_fast = _create_sample_train(train_id="supersonic", speed=5000.0)
+        train_neg = _create_sample_train(train_id="neg-speed", speed=-85.0)
+        self.store.update_positions([train_fast, train_neg])
+
+        server = self._start_server()
+        req = Request(f"http://127.0.0.1:{server.server_port}/api/trains")
+        res = self._open(req)
+        self.assertEqual(res.status, 200)
+        data = json.loads(res.read().decode("utf-8"))
+        self.assertEqual(len(data), 2)
+        speeds = {t["id"]: t["speed"] for t in data}
+        self.assertEqual(speeds["supersonic"], 5000.0)
+        self.assertEqual(speeds["neg-speed"], -85.0)
+
+    def test_unicode_and_polytonic_greek_encoding_safety_tc_edge_09(self) -> None:
+        """TC-EDGE-09: Greek polytonic station names and emoji train IDs serialize cleanly in UTF-8."""
+        train = _create_sample_train(
+            train_id="ic-emoji-🚂",
+            train_number="IC 54 🚂",
+            origin="Αθήνα (Σ.Σ. Λαρίσης)",
+            destination="Θεσσαλονίκη",
+        )
+        self.store.update_positions([train])
+
+        server = self._start_server()
+        req = Request(f"http://127.0.0.1:{server.server_port}/api/trains")
+        res = self._open(req)
+        self.assertEqual(res.status, 200)
+        data = json.loads(res.read().decode("utf-8"))
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["id"], "ic-emoji-🚂")
+        self.assertEqual(data[0]["train_number"], "IC 54 🚂")
+        self.assertEqual(data[0]["origin"], "Αθήνα (Σ.Σ. Λαρίσης)")
 
 
 if __name__ == "__main__":

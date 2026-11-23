@@ -641,6 +641,7 @@ options:
 9. Implement conflict alert banner subscribing to `conflictAlert` SSE events.
 
 ### Phase 5: Comprehensive Automated Testing Suite
+*(Detailed implementation plan: [`./f-8-1-phase-5-comprehensive-automated-testing-suite-plan.md`](./f-8-1-phase-5-comprehensive-automated-testing-suite-plan.md))*
 1. Author [`tests/test_server_sse.py`](../../../tests/test_server_sse.py):
    - Validates client registration, unregistration, queue bounds, and FIFO delivery.
    - Validates memory leak prevention under saturated subscriber queues.

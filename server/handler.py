@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import queue
 import socket
 import time
@@ -14,6 +15,19 @@ if TYPE_CHECKING:
     from server.daemon import WebMapServer
 
 logger = logging.getLogger("railmon.server.handler")
+
+
+def _sanitize_float(val: Any, default: float = 0.0) -> float:
+    """Sanitize float values, guarding against None, NaN, and Infinity."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
 
 
 class WebMapRequestHandler(BaseHTTPRequestHandler):
@@ -111,18 +125,18 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
             p = record.position
             train_id_val = str(getattr(p, "train_id", getattr(p, "id", "")))
             train_num_val = str(getattr(p, "train_number", train_id_val))
-            speed_val = round(float(p.speed), 1) if p.speed is not None else 0.0
-            delay_val = round(float(p.delay), 1) if p.delay is not None else 0.0
+            speed_val = round(_sanitize_float(p.speed, 0.0), 1)
+            delay_val = round(_sanitize_float(p.delay, 0.0), 1)
             heading_raw = getattr(
                 p, "heading", getattr(p, "track_heading", getattr(p, "course", 0.0))
             )
-            heading_val = round(float(heading_raw), 1) if heading_raw is not None else 0.0
+            heading_val = round(_sanitize_float(heading_raw, 0.0), 1)
 
             train_dict: Dict[str, Any] = {
                 "id": train_id_val,
                 "train_number": train_num_val,
-                "lat": float(p.lat),
-                "lng": float(p.lng),
+                "lat": _sanitize_float(p.lat, 0.0),
+                "lng": _sanitize_float(p.lng, 0.0),
                 "speed": speed_val,
                 "delay": delay_val,
                 "heading": heading_val,
@@ -251,10 +265,13 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
 
         coords: List[List[float]] = []
         for crumb in record.trail:
-            coords.append([float(crumb.lng), float(crumb.lat)])
+            coords.append([_sanitize_float(crumb.lng, 0.0), _sanitize_float(crumb.lat, 0.0)])
 
         # Append current position as final point
-        coords.append([float(record.position.lng), float(record.position.lat)])
+        coords.append([
+            _sanitize_float(record.position.lng, 0.0),
+            _sanitize_float(record.position.lat, 0.0),
+        ])
 
         geojson_feature = {
             "type": "Feature",
@@ -266,8 +283,8 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
             "properties": {
                 "train_id": train_id,
                 "breadcrumb_count": len(coords),
-                "speed": float(record.position.speed or 0.0),
-                "delay": float(record.position.delay or 0.0),
+                "speed": _sanitize_float(record.position.speed, 0.0),
+                "delay": _sanitize_float(record.position.delay, 0.0),
             },
         }
 

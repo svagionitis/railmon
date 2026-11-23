@@ -359,6 +359,44 @@ class TestCliServe(unittest.TestCase):
         self.assertFalse(server_thread.is_alive())
         self.assertEqual(exit_holder, [0])
 
+    def test_cli_missing_replay_file_tc_edge_15(self) -> None:
+        """TC-EDGE-15: Specifying a non-existent replay database file returns exit code 2 with error."""
+        args = self.parser.parse_args(["serve", "--replay", "/path/to/non_existent_replay.db"])
+        stderr_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf):
+            ret = run_serve_mode(args)
+        self.assertEqual(ret, 2)
+        self.assertIn("Historical replay database not found", stderr_buf.getvalue())
+
+    def test_cli_invalid_replay_speed_tc_edge_14(self) -> None:
+        """TC-EDGE-14: Specifying non-positive replay speed returns exit code 2."""
+        args = self.parser.parse_args(["serve", "--speed", "0.0"])
+        stderr_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf):
+            ret = run_serve_mode(args)
+        self.assertEqual(ret, 2)
+        self.assertIn("Invalid replay speed", stderr_buf.getvalue())
+
+    def test_cli_public_lan_security_notice_tc_edge_16(self) -> None:
+        """TC-EDGE-16: Binding to 0.0.0.0 triggers a prominent [SECURITY NOTICE] on stderr."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free_port = s.getsockname()[1]
+
+        args = self.parser.parse_args(["serve", "--host", "0.0.0.0", "--port", str(free_port), "--demo"])
+        stop_event = threading.Event()
+        stop_event.set()  # Stop immediately
+
+        stderr_buf = io.StringIO()
+        stdout_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf), patch("sys.stdout", stdout_buf), patch(
+            "train_tracker.install_signal_handlers"
+        ) as mock_sig:
+            mock_sig.return_value.__enter__.return_value = stop_event
+            run_serve_mode(args)
+
+        self.assertIn("[SECURITY NOTICE]", stderr_buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
