@@ -38,7 +38,7 @@ class StreamWorker:
         recorder: Optional[Any] = None,
         base_backoff_sec: float = 3.0,
         max_backoff_sec: float = 60.0,
-        prune_interval_sec: float = 60.0,
+        prune_interval_sec: float = 5.0,
     ) -> None:
         self.store = store
         self.client = client

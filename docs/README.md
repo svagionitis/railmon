@@ -101,6 +101,9 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p0-4-tui-pause-stream-worker-fix-plan.md`](./plans/fixes/p0/p0-4-tui-pause-stream-worker-fix-plan.md) | Proper thread pausing in `StreamWorker` during TUI pause mode |
 | [`p0-5-sqlite-connection-churn-memory-sharing-fix-plan.md`](./plans/fixes/p0/p0-5-sqlite-connection-churn-memory-sharing-fix-plan.md) | Connection pool churn mitigation and safe cross-thread `:memory:` sharing |
 | [`p0-6-unbounded-storage-disk-circuit-breaker-fix-plan.md`](./plans/fixes/p0/p0-6-unbounded-storage-disk-circuit-breaker-fix-plan.md) | Disk-full circuit breaker and zero-data-loss telemetry archival strategy |
+| [`p0-7-train-itinerary-schema-and-time-display-fix-plan.md`](./plans/fixes/p0/p0-7-train-itinerary-schema-and-time-display-fix-plan.md) | Timetable schema alignment, station name resolution & Athens timezone |
+| [`p0-8-tui-timetable-modal-scrolling-fix-plan.md`](./plans/fixes/p0/p0-8-tui-timetable-modal-scrolling-fix-plan.md) | Timetable modal window scrolling boundaries & page-down overflow |
+| [`p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](./plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md) | Stale train eviction (90s cutoff) & screen warning / conflict clearance |
 
 #### P1 — High-Priority Plans (`plans/fixes/p1/`)
 
@@ -135,6 +138,9 @@ Root cause investigations, reproduction steps, and technical resolutions for obs
 | Document | Subject |
 |---|---|
 | [`corridor-presets-filtering-issue.md`](./investigations/corridor-presets-filtering-issue.md) | Corridor preset filter edge cases and train assignment resolution |
+| [`telemetry-anomalies-and-duplicate-train-numbers-investigation.md`](./investigations/telemetry-anomalies-and-duplicate-train-numbers-investigation.md) | Telemetry drops, sensor freeze, track conflicts & duplicate train numbers |
+| [`train-itinerary-schema-and-time-display-issue.md`](./investigations/train-itinerary-schema-and-time-display-issue.md) | Train timetable hex station IDs and 2026 timestamp display resolution |
 | [`tui-breadcrumb-corrupted-characters-investigation.md`](./investigations/tui-breadcrumb-corrupted-characters-investigation.md) | Corrupted breadcrumb glyphs (`M-7`, `7`) in non-UTF-8 console environments |
+| [`tui-timetable-modal-scrolling-issue.md`](./investigations/tui-timetable-modal-scrolling-issue.md) | Timetable inspector modal scrolling boundaries and line-wrap handling |
 | [`tui-train-track-misalignment-zoom-issue.md`](./investigations/tui-train-track-misalignment-zoom-issue.md) | Visual misalignment between train vectors and track paths under viewport zoom |
 | [`tui-windows-zoom-and-deque-mutation-issue.md`](./investigations/tui-windows-zoom-and-deque-mutation-issue.md) | Windows Terminal zoom hotkeys and multithreaded `deque` iteration crash |

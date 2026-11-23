@@ -148,6 +148,10 @@ class TrainTimetableDTO:
     fetched_at: float = 0.0
 
 
+DEFAULT_LIVE_STALE_TIMEOUT_SEC: float = 90.0
+DEFAULT_REPLAY_STALE_TIMEOUT_SEC: float = 1800.0
+
+
 @dataclass
 class TrainRecord:
     """Stateful wrapper around TrainPosition maintaining motion history."""
@@ -231,8 +235,8 @@ class TrainRecord:
             return speeds[-max_samples:]
         return speeds
 
-    def is_stale(self, threshold_sec: float = 1800.0) -> bool:
-        """Check if train has stopped receiving updates beyond threshold (default: 30 minutes)."""
+    def is_stale(self, threshold_sec: float = DEFAULT_LIVE_STALE_TIMEOUT_SEC) -> bool:
+        """Check if train has stopped receiving updates beyond threshold (default: 90 seconds)."""
         return (time.time() - self.last_updated) > threshold_sec
 
 
@@ -400,12 +404,13 @@ def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
     return (-dly, _natural_sort_key(rec))
 
 
+
 class TrainStateStore:
     """Thread-safe state repository for live train positions and UI view state."""
 
     def __init__(
         self,
-        stale_timeout_sec: float = 1800.0,
+        stale_timeout_sec: float = DEFAULT_LIVE_STALE_TIMEOUT_SEC,
         max_trail_len: int = 15,
         initial_theme: Optional[ThemeProfile] = None,
     ) -> None:
@@ -677,6 +682,17 @@ class TrainStateStore:
             self._total_messages += 1
             self._version += 1
 
+    def get_stale_timeout(self) -> float:
+        """Return the current stale train eviction threshold in seconds."""
+        with self._lock:
+            return self._stale_timeout_sec
+
+    def set_stale_timeout(self, timeout_sec: float) -> None:
+        """Update the stale train eviction threshold in seconds."""
+        with self._lock:
+            self._stale_timeout_sec = max(1.0, float(timeout_sec))
+            self._version += 1
+
     def prune_stale_trains(
         self,
         max_age_sec: Optional[float] = None,
@@ -684,7 +700,8 @@ class TrainStateStore:
     ) -> int:
         """
         Remove trains that have not received telemetry updates within max_age_sec.
-        Returns the number of pruned trains.
+        Atomically clears associated conflicts, resets orphaned selections,
+        and returns the number of pruned trains.
         """
         cutoff = max_age_sec if max_age_sec is not None else self._stale_timeout_sec
         with self._lock:
@@ -698,15 +715,34 @@ class TrainStateStore:
                 tid for tid, rec in self._trains.items()
                 if (ref_now - rec.last_updated) > cutoff
             ]
+            if not stale_ids:
+                self._last_prune_ts = ref_now
+                return 0
+
+            stale_set = set(stale_ids)
             for tid in stale_ids:
                 del self._trains[tid]
                 if self._selected_id == tid:
                     self._selected_id = None
                     self._follow_mode = False
 
-            if stale_ids:
-                self._version += 1
-                self._total_trains_pruned += len(stale_ids)
+            # Clean up watched IDs for pruned trains
+            self._watched_train_ids.difference_update(stale_set)
+
+            # Immediately purge active conflicts referencing any pruned train
+            orphaned_conflict_keys = [
+                cid for cid, c in self._active_conflicts.items()
+                if c.train_id_1 in stale_set or c.train_id_2 in stale_set
+            ]
+            for cid in orphaned_conflict_keys:
+                del self._active_conflicts[cid]
+                self._previous_conflict_keys.discard(cid)
+
+            # Re-evaluate conflicts across remaining active trains
+            self._recompute_conflicts(ref_now)
+
+            self._version += 1
+            self._total_trains_pruned += len(stale_ids)
             self._last_prune_ts = ref_now
             return len(stale_ids)
 
@@ -736,7 +772,14 @@ class TrainStateStore:
     ) -> None:
         """Update SQLite historical DVR replay metadata and virtual clock state."""
         with self._lock:
+            was_replay = self._is_replay
             self._is_replay = bool(is_replay)
+            if self._is_replay and not was_replay:
+                if self._stale_timeout_sec == DEFAULT_LIVE_STALE_TIMEOUT_SEC:
+                    self._stale_timeout_sec = DEFAULT_REPLAY_STALE_TIMEOUT_SEC
+            elif not self._is_replay and was_replay:
+                if self._stale_timeout_sec == DEFAULT_REPLAY_STALE_TIMEOUT_SEC:
+                    self._stale_timeout_sec = DEFAULT_LIVE_STALE_TIMEOUT_SEC
             if db_path is not None or not is_replay:
                 self._replay_db = db_path
             if virtual_time is not None or not is_replay:

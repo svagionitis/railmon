@@ -295,7 +295,7 @@ class TUIApp:
 
         # Periodic stale train cleanup (defense-in-depth against stream stall)
         self._last_prune_time = time.monotonic()
-        self._prune_interval_sec: float = 60.0
+        self._prune_interval_sec: float = 5.0
 
     def setup_terminal(self) -> None:
         """Configure curses terminal modes for responsive, non-blocking UI."""

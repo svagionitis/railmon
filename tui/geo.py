@@ -1875,6 +1875,38 @@ def evaluate_sensor_health(
         mins = int(elapsed // 60)
         secs = int(elapsed % 60)
         age_label = f"{mins}m {secs}s" if mins > 0 else f"{int(elapsed)}s"
+
+        nearest_stn, stn_dist = (None, None)
+        if spd < 1.0 and stations:
+            nearest_stn, stn_dist = find_nearest_station_aabb(
+                point, stations, max_radius_m=station_dwell_radius_m
+            )
+
+        if nearest_stn is not None and stn_dist is not None:
+            stn_name = getattr(
+                nearest_stn,
+                "name_en",
+                getattr(nearest_stn, "name_el", getattr(nearest_stn, "id", "Station")),
+            )
+            new_dwell_start = (
+                station_dwell_start if station_dwell_start is not None else ref_now
+            )
+            dwell_sec = max(0.0, ref_now - new_dwell_start)
+            assessment = SensorHealthAssessment(
+                state=SensorHealthState.STATION_DWELL,
+                elapsed_sec=elapsed,
+                static_duration_sec=max(0.0, ref_now - last_moved_time),
+                displacement_m=0.0,
+                current_speed_kmh=spd,
+                nearest_station=stn_name,
+                station_distance_m=stn_dist,
+                dwell_duration_sec=dwell_sec,
+                is_alert=False,
+                short_code="DWL",
+                description=f"STATION DWELL [IDLE] ({stn_name}, {age_label} silent)",
+            )
+            return assessment, last_moved_pt, last_moved_time, new_dwell_start
+
         assessment = SensorHealthAssessment(
             state=SensorHealthState.DROPPED,
             elapsed_sec=elapsed,

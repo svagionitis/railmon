@@ -135,23 +135,26 @@ class TestTrainStateStore(unittest.TestCase):
         self.assertFalse(snapshot.follow_mode)
 
     def test_default_stale_timeout_30_minutes(self):
-        """TC-P2-01 & TC-P2-02: Verify default stale timeout is 1800s (30m) for store and TrainRecord."""
+        """TC-P2-01 & TC-P2-02 & TC-P0-09: Verify default stale timeout is 90s (live) and 1800s (replay) for store and TrainRecord."""
         default_store = TrainStateStore()
-        self.assertEqual(default_store._stale_timeout_sec, 1800.0)
+        self.assertEqual(default_store._stale_timeout_sec, 90.0)
+
+        replay_store = TrainStateStore(stale_timeout_sec=1800.0)
+        self.assertEqual(replay_store._stale_timeout_sec, 1800.0)
 
         t = _create_sample_train("ic-50", "IC 50")
         rec = TrainRecord(position=t)
-        # Inactive for 1700s (< 1800s) -> not stale
-        rec.last_updated = time.time() - 1700.0
+        # Inactive for 80s (< 90s) -> not stale
+        rec.last_updated = time.time() - 80.0
         self.assertFalse(rec.is_stale())
 
-        # Inactive for 1801s (> 1800s) -> stale
-        rec.last_updated = time.time() - 1801.0
+        # Inactive for 95s (> 90s) -> stale
+        rec.last_updated = time.time() - 95.0
         self.assertTrue(rec.is_stale())
 
     def test_prune_stale_trains_30m_boundary_and_counters(self):
-        """TC-P2-03: Verify 30m boundary enforcement, total_trains_pruned tracking, and idempotency."""
-        store = TrainStateStore()
+        """TC-P2-03: Verify 1800s boundary enforcement, total_trains_pruned tracking, and idempotency."""
+        store = TrainStateStore(stale_timeout_sec=1800.0)
         t1 = _create_sample_train("ic-50", "IC 50")
         t2 = _create_sample_train("ic-51", "IC 51")
         t3 = _create_sample_train("ic-52", "IC 52")
@@ -163,7 +166,7 @@ class TestTrainStateStore(unittest.TestCase):
         store._trains["ic-52"].last_updated = now - 1850.0  # Stale (> 1800s)
 
         v_before = store._version
-        pruned = store.prune_stale_trains()  # Default 1800s cutoff
+        pruned = store.prune_stale_trains()  # Default 1800s cutoff for this store
         self.assertEqual(pruned, 1)
         self.assertEqual(store._total_trains_pruned, 1)
         self.assertGreater(store._last_prune_ts, 0.0)
