@@ -1753,7 +1753,7 @@ class TUIRenderer:
             if conflict.severity == ConflictSeverity.WARNING:
                 code = "?OP" if conflict.conflict_type == ConflictType.OPPOSING_COLLISION else "?HW"
                 return code, PAIR_TRAIN_WARN
-            if conflict.conflict_type == ConflictType.STATION_MEET:
+            if conflict.severity == ConflictSeverity.ADVISORY or conflict.conflict_type == ConflictType.STATION_MEET:
                 return "MET", PAIR_TRAIN_PROAST
 
         pos = record.position
@@ -2261,7 +2261,10 @@ class TUIRenderer:
                 c_display = f"[{c_mark} WARNING] {conflict.conflict_type.value}: {conflict.train_number_2} ({conflict.distance_km:.1f}km)"
                 c_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
             else:
-                c_display = f"[MEET] Passing at {conflict.station_proximity_name or 'Station'} ({conflict.distance_km:.1f}km)"
+                tag = "MEET" if conflict.conflict_type == ConflictType.STATION_MEET else "ADVISORY"
+                c_display = f"[{tag}] {conflict.description}"
+                if len(c_display) > 52:
+                    c_display = f"[{tag}] {conflict.station_proximity_name or conflict.conflict_type.value} ({conflict.distance_km:.2f}km)"
                 c_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_NORMAL)
             rows.insert(3, ("Conflict:", c_display, c_attr))
             if conflict.time_to_collision_sec is not None:

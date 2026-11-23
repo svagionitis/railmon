@@ -291,6 +291,7 @@ class StateSnapshot:
     active_conflicts: Tuple[ConflictAlert, ...] = ()
     critical_conflict_count: int = 0
     warning_conflict_count: int = 0
+    advisory_conflict_count: int = 0
     selected_conflict: Optional[ConflictAlert] = None
 
 
@@ -408,6 +409,49 @@ def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
     dly = float(rec.position.delay) if rec.position.delay is not None else 0.0
     return (-dly, _natural_sort_key(rec))
 
+
+
+def _tally_snapshot_train_metrics(
+    trains: Dict[str, TrainRecord],
+) -> Tuple[List[str], List[str], List[str], int]:
+    """Tally overspeed, frozen, dropped train IDs and stale count in a single pass."""
+    overspeed_ids: List[str] = []
+    frozen_ids: List[str] = []
+    dropped_ids: List[str] = []
+    stale_cnt: int = 0
+
+    for tid, rec in trains.items():
+        if rec.speed_result and rec.speed_result.severity in (
+            OverspeedSeverity.OVERSPEED,
+            OverspeedSeverity.TSR_VIOLATION,
+        ):
+            overspeed_ids.append(tid)
+
+        sh = rec.sensor_health
+        if sh:
+            if sh.state == SensorHealthState.FROZEN:
+                frozen_ids.append(tid)
+            elif sh.state == SensorHealthState.DROPPED:
+                dropped_ids.append(tid)
+            elif sh.state == SensorHealthState.STALE:
+                stale_cnt += 1
+
+    return overspeed_ids, frozen_ids, dropped_ids, stale_cnt
+
+
+def _tally_conflicts_by_severity(
+    conflicts: Dict[str, ConflictAlert],
+) -> Tuple[int, int, int]:
+    """Count critical, warning, and advisory conflicts in a single pass."""
+    critical, warning, advisory = 0, 0, 0
+    for a in conflicts.values():
+        if a.severity == ConflictSeverity.CRITICAL:
+            critical += 1
+        elif a.severity == ConflictSeverity.WARNING:
+            warning += 1
+        elif a.severity == ConflictSeverity.ADVISORY:
+            advisory += 1
+    return critical, warning, advisory
 
 
 class TrainStateStore:
@@ -638,6 +682,11 @@ class TrainStateStore:
             pending = self._new_conflict_bell_pending
             self._new_conflict_bell_pending = False
             return pending
+
+    def get_conflict_config(self) -> ConflictWatchdogConfig:
+        """Return the current operational conflict watchdog parameters."""
+        with self._lock:
+            return self._conflict_config
 
     def set_conflict_config(self, config: ConflictWatchdogConfig) -> None:
         """Update operational parameters and thresholds for the conflict watchdog."""
@@ -997,36 +1046,15 @@ class TrainStateStore:
                         sel_idx = idx
                         break
 
-            overspeed_ids: List[str] = []
+            overspeed_ids, frozen_ids, dropped_ids, stale_cnt = _tally_snapshot_train_metrics(trains_copy)
             active_tsr_cnt = sum(1 for t in self._active_tsrs if t.active)
-            for tid, rec in trains_copy.items():
-                if rec.speed_result and rec.speed_result.severity in (
-                    OverspeedSeverity.OVERSPEED,
-                    OverspeedSeverity.TSR_VIOLATION,
-                ):
-                    overspeed_ids.append(tid)
-
-            frozen_ids: List[str] = []
-            dropped_ids: List[str] = []
-            stale_cnt: int = 0
-            for tid, rec in trains_copy.items():
-                if rec.sensor_health:
-                    if rec.sensor_health.state == SensorHealthState.FROZEN:
-                        frozen_ids.append(tid)
-                    elif rec.sensor_health.state == SensorHealthState.DROPPED:
-                        dropped_ids.append(tid)
-                    elif rec.sensor_health.state == SensorHealthState.STALE:
-                        stale_cnt += 1
 
             sel_speed_res = selected_record.speed_result if selected_record else None
             sel_sensor_health = selected_record.sensor_health if selected_record else None
             sel_conflict = selected_record.active_conflict if selected_record else None
 
-            critical_conflicts = sum(
-                1 for a in self._active_conflicts.values() if a.severity == ConflictSeverity.CRITICAL
-            )
-            warning_conflicts = sum(
-                1 for a in self._active_conflicts.values() if a.severity == ConflictSeverity.WARNING
+            critical_conflicts, warning_conflicts, advisory_conflicts = _tally_conflicts_by_severity(
+                self._active_conflicts
             )
 
             return StateSnapshot(
@@ -1072,6 +1100,7 @@ class TrainStateStore:
                 active_conflicts=tuple(self._active_conflicts.values()),
                 critical_conflict_count=critical_conflicts,
                 warning_conflict_count=warning_conflicts,
+                advisory_conflict_count=advisory_conflicts,
                 selected_conflict=sel_conflict,
             )
 

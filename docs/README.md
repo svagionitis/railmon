@@ -106,6 +106,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](./plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md) | Stale train eviction (90s cutoff) & screen warning / conflict clearance |
 | [`p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](./plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md) | Telemetry drop watchdog resilience, tunnel deadbands & station layover preemption |
 | [`p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](./plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md) | Sensor freeze watchdog resilience, packet freshness qualification & station crawl filtering |
+| [`p0-12-track-conflict-detection-resilience-fix-plan.md`](./plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md) | Track conflict watchdog resilience, dynamic corridor snapping & station siding headway suppression |
 
 #### P1 — High-Priority Plans (`plans/fixes/p1/`)
 

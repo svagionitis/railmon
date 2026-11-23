@@ -215,6 +215,59 @@ class TestConflictWatchdogState(unittest.TestCase):
         assert rec1 is not None
         self.assertIsNone(rec1.active_conflict)
 
+    def test_station_advisory_conflict_does_not_trip_bell(self) -> None:
+        """Verify that ADVISORY station conflicts do not latch the audible conflict bell."""
+        stn_athens = StationNode(
+            id="ath",
+            code=1001,
+            name_el="Αθήνα",
+            name_en="Athens Central",
+            point=GeoPoint(lat=37.9926, lng=23.7203),
+            corridor="pathe-mainline",
+            is_hub=True,
+        )
+        self.store.set_stations([stn_athens])
+
+        t1 = _make_pos(
+            train_id="2232",
+            train_number="2232",
+            lat=37.9926,
+            lng=23.7203,
+            speed=2.0,
+            course=355.0,
+            corridor="pathe-mainline",
+        )
+        t2 = _make_pos(
+            train_id="1597",
+            train_number="1597",
+            lat=37.9928,
+            lng=23.7205,
+            speed=0.0,
+            course=355.0,
+            corridor="pathe-mainline",
+        )
+
+        self.store.update_positions([t1, t2])
+        snap = self.store.get_snapshot()
+
+        # Station headway is ADVISORY
+        self.assertEqual(snap.critical_conflict_count, 0)
+        self.assertEqual(snap.warning_conflict_count, 0)
+        self.assertEqual(snap.advisory_conflict_count, 1)
+
+        # Bell latch MUST NOT be set for ADVISORY
+        self.assertFalse(self.store.consume_conflict_bell())
+
+    def test_get_and_set_conflict_config(self) -> None:
+        """Verify conflict config getter and setter on TrainStateStore."""
+        cfg = self.store.get_conflict_config()
+        self.assertIsInstance(cfg, ConflictWatchdogConfig)
+        self.assertEqual(cfg.headway_critical_distance_km, 1.0)
+
+        new_cfg = ConflictWatchdogConfig(headway_critical_distance_km=0.8)
+        self.store.set_conflict_config(new_cfg)
+        self.assertEqual(self.store.get_conflict_config().headway_critical_distance_km, 0.8)
+
 
 if __name__ == "__main__":
     unittest.main()

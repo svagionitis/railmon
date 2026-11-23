@@ -2279,12 +2279,17 @@ class ConflictWatchdogConfig:
         headway_critical_distance_km: Distance threshold in km for critical headway violation.
         headway_warning_distance_km: Distance threshold in km for warning headway compression.
         station_siding_radius_m: Radius around station centroid in meters considered passing loop.
+        terminal_siding_radius_m: Radius around terminal hub centroid in meters for multi-track sidings.
         heading_opposing_tolerance_deg: Angular tolerance in degrees around 180° for opposing heading.
         heading_codirectional_tolerance_deg: Angular tolerance in degrees around 0° for co-directional heading.
         min_evaluation_speed_kmh: Minimum train speed in km/h to evaluate kinematic vectors.
         junction_convergence_distance_km: Distance to junction in km for converging approach evaluation.
         junction_eta_window_sec: Difference in ETA in seconds to junction switch throat triggering advisory.
         single_line_working_corridors: Set of corridor IDs currently operating under single-line working.
+        max_corridor_snap_distance_m: Maximum perpendicular distance in meters to snap untagged train to track.
+        headway_closing_speed_threshold_kmh: Mutual closing velocity in km/h required to trigger critical headway.
+        double_track_headway_critical_km: Distance threshold in km for critical headway on double-track corridors.
+        stale_conflict_threshold_sec: Telemetry silence age in seconds beyond which conflicts are demoted to advisory.
     """
 
     opposing_critical_distance_km: float = 10.0
@@ -2292,12 +2297,17 @@ class ConflictWatchdogConfig:
     headway_critical_distance_km: float = 1.0
     headway_warning_distance_km: float = 2.5
     station_siding_radius_m: float = 350.0
+    terminal_siding_radius_m: float = 650.0
     heading_opposing_tolerance_deg: float = 35.0
     heading_codirectional_tolerance_deg: float = 40.0
     min_evaluation_speed_kmh: float = 5.0
     junction_convergence_distance_km: float = 5.0
     junction_eta_window_sec: float = 60.0
     single_line_working_corridors: Set[str] = field(default_factory=set)
+    max_corridor_snap_distance_m: float = 1500.0
+    headway_closing_speed_threshold_kmh: float = 3.0
+    double_track_headway_critical_km: float = 0.5
+    stale_conflict_threshold_sec: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -2411,19 +2421,131 @@ def compute_closing_velocity_kmh(
     return v1_proj + v2_proj
 
 
+def _find_nearest_track_corridor(
+    pt: GeoPoint,
+    tracks_data: Dict[str, Any],
+) -> Tuple[Optional[str], float]:
+    """Find the nearest track corridor and distance in meters to a geographic point."""
+    best_cid: Optional[str] = None
+    best_dist_m = float("inf")
+
+    # Case 1: Dict[str, TrackPolyline] (from load_tracks)
+    if any(hasattr(v, "project_point") for v in tracks_data.values()):
+        for cid, track_obj in tracks_data.items():
+            if hasattr(track_obj, "project_point"):
+                try:
+                    _, dist_m, _ = track_obj.project_point(pt)
+                    if dist_m < best_dist_m:
+                        best_dist_m = dist_m
+                        best_cid = getattr(track_obj, "corridor_id", cid)
+                except Exception:
+                    continue
+        return best_cid, best_dist_m
+
+    # Case 2: Dict containing "corridors" key (from raw tracks.json)
+    if "corridors" in tracks_data and isinstance(tracks_data["corridors"], list):
+        for c in tracks_data["corridors"]:
+            if not isinstance(c, dict):
+                continue
+            cid = str(c.get("id") or "")
+            for seg in c.get("segments", []):
+                if not isinstance(seg, list) or len(seg) < 2:
+                    continue
+                for k in range(1, len(seg)):
+                    p0 = GeoPoint(lat=float(seg[k - 1][0]), lng=float(seg[k - 1][1]))
+                    p1 = GeoPoint(lat=float(seg[k][0]), lng=float(seg[k][1]))
+                    _, dist_m = project_point_to_segment(pt, p0, p1)
+                    if dist_m < best_dist_m:
+                        best_dist_m = dist_m
+                        best_cid = cid
+        return best_cid, best_dist_m
+
+    # Case 3: Generic mapping of objects with points list
+    for cid, obj in tracks_data.items():
+        pts = getattr(obj, "points", None)
+        if pts and isinstance(pts, list) and len(pts) >= 2:
+            for k in range(1, len(pts)):
+                _, dist_m = project_point_to_segment(pt, pts[k - 1], pts[k])
+                if dist_m < best_dist_m:
+                    best_dist_m = dist_m
+                    best_cid = getattr(obj, "corridor_id", cid)
+
+    return best_cid, best_dist_m
+
+
+def resolve_train_corridor(
+    train: Any,
+    tracks_data: Optional[Dict[str, Any]] = None,
+    max_snap_distance_m: float = 1500.0,
+) -> str:
+    """Resolve the operational railway corridor for a train using metadata or track projection.
+
+    If the train object contains an explicit corridor attribute, normalizes and returns it.
+    If the corridor is absent or empty, searches tracks_data for the geometrically nearest
+    track polyline within max_snap_distance_m. If tracks_data is omitted, attempts to load
+    default package track corridors. If no track matches within threshold, returns 'unassigned'.
+
+    Args:
+        train: Train position object (must have lat, lng, and optional corridor).
+        tracks_data: Track network data (either dict of TrackPolyline or dict from tracks.json).
+        max_snap_distance_m: Maximum perpendicular distance in meters to snap to track.
+
+    Returns:
+        Canonical corridor identifier, or 'unassigned'.
+    """
+    raw_cid = getattr(train, "corridor", None)
+    if raw_cid:
+        norm = _normalize_corridor_key(str(raw_cid))
+        return norm if norm else str(raw_cid).strip() or "unassigned"
+
+    if not hasattr(train, "lat") or not hasattr(train, "lng"):
+        return "unassigned"
+
+    try:
+        pt = GeoPoint(lat=float(train.lat), lng=float(train.lng))
+    except (ValueError, TypeError):
+        return "unassigned"
+
+    td = tracks_data
+    if td is None:
+        try:
+            from tui.mock_engine import load_tracks
+
+            td = load_tracks()
+        except Exception:
+            td = None
+
+    if not td or not isinstance(td, dict):
+        return "unassigned"
+
+    best_cid, best_dist_m = _find_nearest_track_corridor(pt, td)
+
+    if best_cid is not None and best_dist_m <= max_snap_distance_m:
+        norm = _normalize_corridor_key(best_cid)
+        return norm if norm else best_cid
+
+    return "unassigned"
+
+
 def find_station_passing_meet(
     pos1: Any,
     pos2: Any,
     stations: Optional[Sequence[Any]],
     radius_m: float = 350.0,
+    terminal_radius_m: float = 650.0,
 ) -> Optional[str]:
     """Check if either or both trains are safely dwelling within a station passing siding.
+
+    Supports tiered siding radius: terminal_radius_m for hub/terminal stations with long
+    platforms and switch throats (Athens Central, SKA, Thessaloniki, Larissa), and radius_m
+    for intermediate rural sidings. Also accommodates station approach crawl speeds (<= 15 km/h).
 
     Args:
         pos1: Position of first train.
         pos2: Position of second train.
         stations: Optional list of station nodes.
-        radius_m: Siding / platform tolerance radius in meters.
+        radius_m: Siding / platform tolerance radius in meters (default: 350.0m).
+        terminal_radius_m: Siding / platform tolerance radius for major hubs in meters (default: 650.0m).
 
     Returns:
         Canonical station name if an authorized passing meet is detected; None otherwise.
@@ -2434,33 +2556,38 @@ def find_station_passing_meet(
     spd1 = float(getattr(pos1, "speed", 0.0) or 0.0)
     spd2 = float(getattr(pos2, "speed", 0.0) or 0.0)
 
-    # If both trains are in rapid motion (> 15 km/h), this is not an active siding meet
-    if spd1 > 15.0 and spd2 > 15.0:
+    # If both trains are in rapid line-speed motion (> 25 km/h), this is not an active siding meet
+    if spd1 > 25.0 and spd2 > 25.0:
         return None
 
     pt1 = GeoPoint(lat=float(pos1.lat), lng=float(pos1.lng))
     pt2 = GeoPoint(lat=float(pos2.lat), lng=float(pos2.lng))
 
-    # Check if either train is stopped/dwelling near a station
-    if spd1 <= 5.0:
-        stn1, d1 = find_nearest_station_aabb(pt1, stations, max_radius_m=radius_m)
-        if stn1 is not None:
-            return getattr(stn1, "name_en", getattr(stn1, "name_el", getattr(stn1, "id", "Station")))
+    max_search_r = max(radius_m, terminal_radius_m)
 
-    if spd2 <= 5.0:
-        stn2, d2 = find_nearest_station_aabb(pt2, stations, max_radius_m=radius_m)
-        if stn2 is not None:
-            return getattr(stn2, "name_en", getattr(stn2, "name_el", getattr(stn2, "id", "Station")))
+    # Check if either train is stopped/dwelling/crawling (<= 15 km/h) near a station
+    for spd, pt in ((spd1, pt1), (spd2, pt2)):
+        if spd <= 15.0:
+            stn, d = find_nearest_station_aabb(pt, stations, max_radius_m=max_search_r)
+            if stn is not None and d is not None:
+                is_hub = bool(getattr(stn, "is_hub", False)) or str(getattr(stn, "id", "") or "").lower() in TERMINAL_STATION_IDS
+                eff_r = terminal_radius_m if is_hub else radius_m
+                if d <= eff_r:
+                    return getattr(stn, "name_en", getattr(stn, "name_el", getattr(stn, "id", "Station")))
 
     # Check if both trains are inside the same station zone
-    stn_both1, _ = find_nearest_station_aabb(pt1, stations, max_radius_m=radius_m * 1.5)
-    stn_both2, _ = find_nearest_station_aabb(pt2, stations, max_radius_m=radius_m * 1.5)
+    zone_search_r = max_search_r * 1.5
+    stn_both1, d1 = find_nearest_station_aabb(pt1, stations, max_radius_m=zone_search_r)
+    stn_both2, d2 = find_nearest_station_aabb(pt2, stations, max_radius_m=zone_search_r)
     if (
         stn_both1 is not None
         and stn_both2 is not None
         and getattr(stn_both1, "id", None) == getattr(stn_both2, "id", None)
     ):
-        return getattr(stn_both1, "name_en", getattr(stn_both1, "name_el", "Station"))
+        is_hub = bool(getattr(stn_both1, "is_hub", False)) or str(getattr(stn_both1, "id", "") or "").lower() in TERMINAL_STATION_IDS
+        eff_zone_r = (terminal_radius_m if is_hub else radius_m) * 1.5
+        if (d1 is not None and d1 <= eff_zone_r) and (d2 is not None and d2 <= eff_zone_r):
+            return getattr(stn_both1, "name_en", getattr(stn_both1, "name_el", "Station"))
 
     return None
 
@@ -2501,7 +2628,16 @@ def _evaluate_corridor_pair_conflict(
     if closing_spd > 1.0:
         ttc_sec = (dist_km / closing_spd) * 3600.0
 
-    meet_stn = find_station_passing_meet(t1, t2, stations, radius_m=cfg.station_siding_radius_m)
+    meet_stn = find_station_passing_meet(
+        t1, t2, stations, radius_m=cfg.station_siding_radius_m, terminal_radius_m=cfg.terminal_siding_radius_m
+    )
+
+    # Check for stale telemetry / ghost train preemption
+    t1_ts = getattr(t1, "last_updated", getattr(t1, "last_updated_time", None))
+    t2_ts = getattr(t2, "last_updated", getattr(t2, "last_updated_time", None))
+    is_t1_stale = (eval_time - float(t1_ts)) > cfg.stale_conflict_threshold_sec if t1_ts is not None else False
+    is_t2_stale = (eval_time - float(t2_ts)) > cfg.stale_conflict_threshold_sec if t2_ts is not None else False
+    is_stale_ghost = is_t1_stale or is_t2_stale
 
     # 1. Opposing Collision Condition
     is_opposing = heading_delta >= (180.0 - cfg.heading_opposing_tolerance_deg)
@@ -2524,6 +2660,26 @@ def _evaluate_corridor_pair_conflict(
                 is_single_track=is_single,
                 station_proximity_name=meet_stn,
                 description=f"Passing meet at {meet_stn} ({t1_no} <-> {t2_no}, {dist_km:.1f}km)",
+                timestamp=eval_time,
+            )
+        if is_stale_ghost:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STALE_OBSTRUCTION"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.OPPOSING_COLLISION,
+                severity=ConflictSeverity.ADVISORY,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=None,
+                is_single_track=is_single,
+                station_proximity_name=None,
+                description=f"Stale telemetry track occupancy caution: {t1_no} <-> {t2_no} on {c_display_name} ({dist_km:.1f}km)",
                 timestamp=eval_time,
             )
         if closing_spd > 5.0 and dist_km <= cfg.opposing_critical_distance_km:
@@ -2576,8 +2732,56 @@ def _evaluate_corridor_pair_conflict(
     # 2. Co-directional Headway Violation Condition
     is_codirectional = heading_delta <= cfg.heading_codirectional_tolerance_deg
     if is_codirectional:
+        # Station passing siding & platform demotion
+        if meet_stn is not None:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STATION_HEADWAY"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.STATION_MEET,
+                severity=ConflictSeverity.ADVISORY,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=ttc_sec,
+                is_single_track=is_single,
+                station_proximity_name=meet_stn,
+                description=f"Station headway alignment at {meet_stn} ({t1_no} / {t2_no}, {dist_km:.2f}km)",
+                timestamp=eval_time,
+            )
+
+        if is_stale_ghost:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STALE_HEADWAY"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.HEADWAY_VIOLATION,
+                severity=ConflictSeverity.ADVISORY,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=None,
+                is_single_track=is_single,
+                station_proximity_name=None,
+                description=f"Stale telemetry preceding train caution: {t1_no} / {t2_no} on {c_display_name} ({dist_km:.2f}km)",
+                timestamp=eval_time,
+            )
+
         is_active_motion = closing_spd > 0.0 or spd1 > 1.0 or spd2 > 1.0
-        if dist_km <= cfg.headway_critical_distance_km and is_active_motion:
+        crit_dist = cfg.headway_critical_distance_km if is_single else cfg.double_track_headway_critical_km
+
+        if dist_km <= crit_dist and is_active_motion:
+            # Gating: Critical severity requires positive closing speed exceeding threshold
+            severity = ConflictSeverity.CRITICAL if closing_spd > cfg.headway_closing_speed_threshold_kmh else ConflictSeverity.WARNING
+            desc_prefix = "CRITICAL HEADWAY BREACH" if severity == ConflictSeverity.CRITICAL else "Headway compression"
             alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_HEADWAY"
             return ConflictAlert(
                 alert_id=alert_id,
@@ -2588,14 +2792,14 @@ def _evaluate_corridor_pair_conflict(
                 corridor_id=cid,
                 corridor_name=c_display_name,
                 conflict_type=ConflictType.HEADWAY_VIOLATION,
-                severity=ConflictSeverity.CRITICAL,
+                severity=severity,
                 distance_km=dist_km,
                 closing_speed_kmh=closing_spd,
                 time_to_collision_sec=ttc_sec,
                 is_single_track=is_single,
-                station_proximity_name=meet_stn,
+                station_proximity_name=None,
                 description=(
-                    f"CRITICAL HEADWAY BREACH: {t1_no} / {t2_no} on {c_display_name} "
+                    f"{desc_prefix}: {t1_no} / {t2_no} on {c_display_name} "
                     f"({dist_km:.2f}km)"
                 ),
                 timestamp=eval_time,
@@ -2616,7 +2820,7 @@ def _evaluate_corridor_pair_conflict(
                 closing_speed_kmh=closing_spd,
                 time_to_collision_sec=ttc_sec,
                 is_single_track=is_single,
-                station_proximity_name=meet_stn,
+                station_proximity_name=None,
                 description=(
                     f"Headway compression: {t1_no} / {t2_no} on {c_display_name} "
                     f"({dist_km:.1f}km)"
@@ -2669,12 +2873,16 @@ def evaluate_train_conflicts(
                 if hasattr(obj, "double_track"):
                     double_track_map[cid] = bool(obj.double_track)
 
-    # 1. Group active trains by corridor
+    # 1. Group active trains by corridor (with dynamic geometric snapping)
     corridor_buckets: Dict[str, List[Any]] = {}
     for train in active_trains:
-        cid = getattr(train, "corridor", None)
-        if not cid:
-            cid = "pathe-mainline"
+        cid = resolve_train_corridor(
+            train,
+            tracks_data=tracks_data,
+            max_snap_distance_m=cfg.max_corridor_snap_distance_m,
+        )
+        if not cid or cid == "unassigned":
+            continue
         norm_cid = _normalize_corridor_key(str(cid)) or str(cid)
         corridor_buckets.setdefault(norm_cid, []).append(train)
 
