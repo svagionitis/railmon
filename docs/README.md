@@ -30,6 +30,7 @@ Core architectural blueprints, reverse-engineering analyses of `railway.gov.gr`,
 | Document | Description |
 |---|---|
 | [`architecture.md`](./architecture/architecture.md) | Hellenic Railways SSE telemetry stream reverse engineering, data models & system architecture |
+| [`railway-gov-gr-api-reference.md`](./architecture/railway-gov-gr-api-reference.md) | Comprehensive `railway.gov.gr` REST, MSD GeoJSON, SSE streaming & auth endpoint specification |
 | [`historical-storage-sqlite.md`](./architecture/historical-storage-sqlite.md) | Embedded SQLite persistence manual, WAL concurrent operation, deadband filtering & CLI guide |
 | [`misra-autosar-python-safety-guidelines.md`](./architecture/misra-autosar-python-safety-guidelines.md) | High-assurance safety guidelines (MISRA C++, AUTOSAR C++14, NASA JPL) applied to Python |
 | [`production-readiness-review.md`](./architecture/production-readiness-review.md) | Comprehensive production readiness audit, resilience findings & prioritized fix backlog |

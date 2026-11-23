@@ -268,7 +268,8 @@ curl http://localhost:9100/health
 - [`scripts/`](./scripts): Development and profiling utilities:
   - [`scripts/benchmark_storage.py`](./scripts/benchmark_storage.py): Ingestion throughput, read latency, and deadband benchmarking harness.
 - [`docs/historical-storage-sqlite.md`](./docs/architecture/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.
-- [`docs/architecture.md`](./docs/architecture/architecture.md): In-depth architectural analysis and reverse engineering report of the `railway.gov.gr` platform.
+- [`docs/architecture/architecture.md`](./docs/architecture/architecture.md): In-depth architectural analysis and reverse engineering report of the `railway.gov.gr` platform.
+- [`docs/architecture/railway-gov-gr-api-reference.md`](./docs/architecture/railway-gov-gr-api-reference.md): Detailed `railway.gov.gr` REST, GeoJSON MSD, SSE streaming, media proxy, and auth API reference.
 - [`docs/tui-feature-enhancements.md`](./docs/architecture/tui-feature-enhancements.md): Interactive, analytical, and geospatial Curses TUI feature enhancement specification.
 - [`tests/`](./tests): Comprehensive automated test suite (380+ tests).
 
