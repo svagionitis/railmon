@@ -9,6 +9,13 @@ from server.assets import (
     get_geojson_asset,
     get_spa_html,
 )
+from server.daemon import (
+    WebMapServer,
+    install_signal_handlers,
+)
+from server.handler import (
+    WebMapRequestHandler,
+)
 from server.models import (
     ClientConnection,
     ServerConfig,
@@ -32,6 +39,9 @@ __all__: List[str] = [
     "SSEBroadcaster",
     "SSEMessage",
     "TileProvider",
+    "WebMapRequestHandler",
+    "WebMapServer",
     "get_geojson_asset",
     "get_spa_html",
+    "install_signal_handlers",
 ]

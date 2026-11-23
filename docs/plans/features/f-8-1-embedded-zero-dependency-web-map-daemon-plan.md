@@ -607,6 +607,7 @@ options:
 4. Author [`server/assets.py`](../../../server/assets.py) implementing embedded HTML/CSS/JS generator and GeoJSON asset loaders.
 
 ### Phase 2: Web Server Daemon & HTTP Request Handler
+*(Detailed implementation plan: [`./f-8-1-phase-2-web-server-daemon-and-http-handler-plan.md`](./f-8-1-phase-2-web-server-daemon-and-http-handler-plan.md))*
 1. Author [`server/handler.py`](../../../server/handler.py) implementing `WebMapRequestHandler` covering:
    - Route dispatching (`/`, `/api/stream`, `/api/trains`, `/api/tracks`, `/api/stations`, `/api/infrastructure`, `/api/speed-limits`, `/api/conflicts`, `/api/health`).
    - Content-Type negotiation, CORS headers, HTTP 404/500 error handling.
