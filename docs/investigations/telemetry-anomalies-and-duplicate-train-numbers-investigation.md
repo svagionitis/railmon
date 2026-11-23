@@ -1,7 +1,7 @@
 # Technical Investigation: Telemetry Drop, Sensor Freezing, Track Conflict Aggressiveness & Duplicate Train Numbers
 
 > **Target Modules:** [`../../tui/geo.py`](../../tui/geo.py), [`../../tui/state.py`](../../tui/state.py), [`../../tui/renderer.py`](../../tui/renderer.py), [`../../train_tracker.py`](../../train_tracker.py)  
-> **Related Fix Plans:** [`../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md), [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md), [`../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md), [`../plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md`](../plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md)  
+> **Related Fix Plans:** [`../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md), [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md), [`../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md), [`../plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md`](../plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md), [`../plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md`](../plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md)  
 > **Relevant Rules & Skills:** [`../../.agents/skills/diagrams-and-documentation/SKILL.md`](../../.agents/skills/diagrams-and-documentation/SKILL.md), [`../../.agents/skills/markdown-relative-paths/SKILL.md`](../../.agents/skills/markdown-relative-paths/SKILL.md)  
 > **Reference Upstream Chunks:** [`../../reference/chunks/47794.19386b2538c55881.js`](../../reference/chunks/47794.19386b2538c55881.js), [`../../reference/chunks/79801.a0cbc95dac2cd2a3.js`](../../reference/chunks/79801.a0cbc95dac2cd2a3.js)
 
@@ -211,6 +211,8 @@ Three compounding factors in [`tui/geo.py`](../../tui/geo.py#L2099-L2525) create
 
 ### 3.5 Issue 5: Duplicate Train Numbers in Active Trains List
 
+> **Implementation Fix Plan:** [`../plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md`](../plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md)
+
 #### Root Cause & Operational Realities
 
 Having two records with the same commercial `train_number` (e.g. `2232` or `1597`) in the roster is **operationally normal and expected** on Hellenic Railways for several reasons:
@@ -298,6 +300,7 @@ flowchart LR
 
 ### 4.4 Improvement 4: Multi-Unit Locomotive Disambiguation in Roster
 * **Action:** Update the Active Trains roster table in [`tui/renderer.py`](../../tui/renderer.py#L1847) to disambiguate duplicate train numbers.
+* **Plan:** Full engineering specification in [`../plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md`](../plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md).
 * **Mechanism:** If multiple trains share the same `train_number`, append the last 3 digits of `locomotive_number` or `id` (e.g. `2232·103` and `2232·108`).
 * **Benefit:** Operators immediately see that both records represent coupled Desiro trainsets rather than a display bug.
 

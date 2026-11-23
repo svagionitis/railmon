@@ -2308,6 +2308,7 @@ class ConflictWatchdogConfig:
     headway_closing_speed_threshold_kmh: float = 3.0
     double_track_headway_critical_km: float = 0.5
     stale_conflict_threshold_sec: float = 60.0
+    coupled_consist_max_distance_km: float = 0.45
 
 
 @dataclass(frozen=True)
@@ -2732,6 +2733,36 @@ def _evaluate_corridor_pair_conflict(
     # 2. Co-directional Headway Violation Condition
     is_codirectional = heading_delta <= cfg.heading_codirectional_tolerance_deg
     if is_codirectional:
+        # Coupled multiple-unit consist detection (Διπλή Έλξη)
+        # Coupled units of the same physical train share commercial train number
+        # and travel co-directionally within coupler separation distance.
+        is_coupled_consist = (
+            t1_no == t2_no
+            and t1_no not in ("", "0", "Unknown")
+            and t1_id != t2_id
+            and dist_km <= cfg.coupled_consist_max_distance_km
+        )
+        if is_coupled_consist:
+            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_COUPLED_CONSIST"
+            return ConflictAlert(
+                alert_id=alert_id,
+                train_id_1=t1_id,
+                train_number_1=t1_no,
+                train_id_2=t2_id,
+                train_number_2=t2_no,
+                corridor_id=cid,
+                corridor_name=c_display_name,
+                conflict_type=ConflictType.HEADWAY_VIOLATION,
+                severity=ConflictSeverity.ADVISORY,
+                distance_km=dist_km,
+                closing_speed_kmh=closing_spd,
+                time_to_collision_sec=None,
+                is_single_track=is_single,
+                station_proximity_name=meet_stn,
+                description=f"Coupled multiple-unit consist: {t1_no} on {c_display_name} ({dist_km * 1000.0:.0f}m separation)",
+                timestamp=eval_time,
+            )
+
         # Station passing siding & platform demotion
         if meet_stn is not None:
             alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STATION_HEADWAY"

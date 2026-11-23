@@ -293,6 +293,7 @@ class StateSnapshot:
     warning_conflict_count: int = 0
     advisory_conflict_count: int = 0
     selected_conflict: Optional[ConflictAlert] = None
+    duplicate_train_numbers: FrozenSet[str] = field(default_factory=frozenset)
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -389,22 +390,27 @@ def _train_matches_corridor(p: TrainPosition, target: str) -> bool:
     return False
 
 
-def _natural_sort_key(rec: TrainRecord) -> Tuple[int, str]:
-    """Helper to sort trains by number naturally (e.g. 50 before 1597)."""
+def _natural_sort_key(rec: TrainRecord) -> Tuple[int, str, str, str]:
+    """Helper to sort trains by number naturally (e.g. 50 before 1597), breaking ties
+
+    deterministically via locomotive number and transponder ID.
+    """
     tn = (rec.position.train_number or "").strip()
+    loco = (rec.position.locomotive_number or "").strip()
+    tid = str(rec.position.id or "").strip()
     digits = "".join(ch for ch in tn if ch.isdigit())
     if digits:
-        return (0, f"{int(digits):010d}_{tn}")
-    return (1, tn or rec.position.id)
+        return (0, f"{int(digits):010d}_{tn}", loco, tid)
+    return (1, tn or tid, loco, tid)
 
 
-def _speed_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
+def _speed_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str, str, str]]:
     """Sort trains by descending speed, with natural train number as tie-breaker."""
     spd = float(rec.position.speed) if rec.position.speed is not None else 0.0
     return (-spd, _natural_sort_key(rec))
 
 
-def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str]]:
+def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str, str, str]]:
     """Sort trains by descending delay, with natural train number as tie-breaker."""
     dly = float(rec.position.delay) if rec.position.delay is not None else 0.0
     return (-dly, _natural_sort_key(rec))
@@ -1049,6 +1055,13 @@ class TrainStateStore:
             overspeed_ids, frozen_ids, dropped_ids, stale_cnt = _tally_snapshot_train_metrics(trains_copy)
             active_tsr_cnt = sum(1 for t in self._active_tsrs if t.active)
 
+            dup_counts: Dict[str, int] = {}
+            for rec in trains_copy.values():
+                tn = (rec.position.train_number or "").strip()
+                if tn:
+                    dup_counts[tn] = dup_counts.get(tn, 0) + 1
+            duplicate_train_numbers = frozenset(tn for tn, count in dup_counts.items() if count > 1)
+
             sel_speed_res = selected_record.speed_result if selected_record else None
             sel_sensor_health = selected_record.sensor_health if selected_record else None
             sel_conflict = selected_record.active_conflict if selected_record else None
@@ -1102,6 +1115,7 @@ class TrainStateStore:
                 warning_conflict_count=warning_conflicts,
                 advisory_conflict_count=advisory_conflicts,
                 selected_conflict=sel_conflict,
+                duplicate_train_numbers=duplicate_train_numbers,
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -1452,7 +1466,8 @@ class TrainStateStore:
             # 2. Text query matching
             if q:
                 searchable = (
-                    f"{p.train_number or ''} {p.name or ''} {p.origin or ''} "
+                    f"{p.train_number or ''} {p.locomotive_number or ''} {p.id or ''} "
+                    f"{p.name or ''} {p.origin or ''} "
                     f"{p.destination or ''} {p.next_station or ''} "
                     f"{p.service_type or ''} {p.train_type or ''} {p.status or ''} "
                     f"{p.corridor or ''}"

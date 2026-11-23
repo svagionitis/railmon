@@ -744,6 +744,69 @@ def format_scale_bar(
 DEFAULT_STATION_PROXIMITY_KM: float = 80.0
 
 
+def extract_unit_suffix(locomotive_number: Optional[str], train_id: Optional[str]) -> str:
+    """Extract a 3-character disambiguation suffix from locomotive number or train ID.
+
+    Prioritizes the last 3 digits of the locomotive road number (e.g. '460103' -> '103').
+    Falls back to the trailing 3 characters of the transponder ID (e.g. '6afc08' -> 'c08').
+    """
+    if locomotive_number:
+        clean = "".join(ch for ch in str(locomotive_number).strip() if ch.isalnum())
+        if len(clean) >= 3:
+            return clean[-3:]
+        if clean:
+            return clean
+    if train_id:
+        clean_id = str(train_id).strip()
+        if len(clean_id) >= 3:
+            return clean_id[-3:]
+        if clean_id:
+            return clean_id
+    return "001"
+
+
+def format_disambiguated_train_label(
+    train_number: Optional[str],
+    locomotive_number: Optional[str],
+    train_id: Optional[str],
+    is_duplicate: bool,
+    ascii_mode: bool = False,
+    max_len: int = 8,
+) -> str:
+    """Format commercial train number, appending unit badge when duplicate numbers exist.
+
+    Args:
+        train_number: Commercial train service number (e.g. '2232', 'IC54', '0').
+        locomotive_number: Specific locomotive/EMU road number (e.g. '460103').
+        train_id: Unique telemetry transponder session ID.
+        is_duplicate: Whether multiple active trains share this commercial train number.
+        ascii_mode: True to use ASCII slash '/' delimiter, False for middle-dot '·'.
+        max_len: Maximum field length in character cells (default: 8).
+
+    Returns:
+        Formatted string representation fitting within max_len.
+    """
+    base_raw = str(train_number or train_id or "").strip()
+    if not is_duplicate:
+        return (base_raw or "Unknown")[:max_len]
+
+    # Special handling for switchers / unassigned train numbers
+    if base_raw in ("0", "Unknown", ""):
+        base = "SHN" if base_raw == "0" else "UNK"
+    else:
+        base = base_raw
+
+    delim = "/" if ascii_mode else "·"
+    suffix = extract_unit_suffix(locomotive_number, train_id)
+
+    needed_for_suffix = 1 + len(suffix)
+    avail_for_base = max(1, max_len - needed_for_suffix)
+    truncated_base = base[:avail_for_base]
+
+    label = f"{truncated_base}{delim}{suffix}"
+    return label[:max_len]
+
+
 @dataclass(frozen=True)
 class StationBoardEntry:
     """Computed proximity and estimated arrival row for a train relative to a StationNode."""
@@ -1579,7 +1642,16 @@ class TUIRenderer:
                 pass
 
             if is_selected:
-                tn = pos.train_number or pos.id
+                dup_set = getattr(snapshot, "duplicate_train_numbers", frozenset())
+                is_dup = bool(pos.train_number and pos.train_number in dup_set)
+                tn = format_disambiguated_train_label(
+                    train_number=pos.train_number,
+                    locomotive_number=pos.locomotive_number,
+                    train_id=pos.id,
+                    is_duplicate=is_dup,
+                    ascii_mode=self.ascii_mode,
+                    max_len=8,
+                )
                 spd_str = f"{int(round(pos.speed or 0))}km/h"
                 dly_val = int(round(pos.delay or 0))
                 dly_str = f"+{dly_val}m" if dly_val > 0 else (f"{dly_val}m" if dly_val < 0 else "0m")
@@ -1775,10 +1847,10 @@ class TUIRenderer:
     def _format_roster_header(self, sort_mode: RosterSortMode) -> str:
         """Construct table header string with sort direction indicator."""
         if sort_mode == RosterSortMode.SPEED:
-            return f" #   TRAIN  TYPE  SPD{self.glyphs.sort_desc}  DLY  ST"
+            return f" #  TRAIN     TY  SPD{self.glyphs.sort_desc}  DLY  ST"
         if sort_mode == RosterSortMode.DELAY:
-            return f" #   TRAIN  TYPE  SPD   DLY{self.glyphs.sort_desc} ST"
-        return f" #   TRAIN{self.glyphs.sort_asc} TYPE  SPD   DLY  ST"
+            return f" #  TRAIN     TY  SPD  DLY{self.glyphs.sort_desc} ST"
+        return f" #  TRAIN{self.glyphs.sort_asc}   TY  SPD  DLY  ST"
 
 
     def render_roster(
@@ -1844,7 +1916,18 @@ class TUIRenderer:
             cursor_mark = ">" if is_selected else " "
             watch_mark = ("*" if self.ascii_mode else "●") if is_watched else " "
             seq_num = f"{item_idx + 1:2d}"
-            train_num = f"{(pos.train_number or pos.id)[:5]:<5}"
+
+            dup_set = getattr(snapshot, "duplicate_train_numbers", frozenset())
+            is_dup = bool(pos.train_number and pos.train_number in dup_set)
+            train_label = format_disambiguated_train_label(
+                train_number=pos.train_number,
+                locomotive_number=pos.locomotive_number,
+                train_id=pos.id,
+                is_duplicate=is_dup,
+                ascii_mode=self.ascii_mode,
+                max_len=8,
+            )
+            train_num = f"{train_label:<8}"
             t_type = self._format_roster_type(pos.train_type)
 
             spd = int(round(pos.speed or 0))
@@ -1855,9 +1938,12 @@ class TUIRenderer:
 
             dly = int(round(pos.delay or 0))
             dly_str = f"+{dly}m" if dly > 0 else (f"{dly}m" if dly < 0 else " 0m")
+            if len(dly_str) > 4:
+                dly_str = dly_str[:4]
+            dly_str = f"{dly_str:>4}"
 
             st_code, pair = self._resolve_roster_status_and_pair(record, is_overspeed)
-            row_line = f"{cursor_mark}{watch_mark}{seq_num}  {train_num:<6}{t_type:<5}{spd_str:>4} {dly_str:>5}  {st_code}"
+            row_line = f"{cursor_mark}{watch_mark}{seq_num} {train_num} {t_type:<2} {spd_str:>4} {dly_str} {st_code}"
             row_attr = select_attr if is_selected else safe_color_pair(pair, curses.A_NORMAL)
             safe_addstr(win, 2 + r_idx, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
 
@@ -2250,6 +2336,13 @@ class TUIRenderer:
             ("Status:", status_text, status_attr),
             ("Chainage:", chainage_str, val_attr),
         ]
+
+        dup_set = getattr(snapshot, "duplicate_train_numbers", frozenset())
+        is_dup = bool(pos.train_number and pos.train_number in dup_set)
+        if is_dup:
+            loco_str = f"{pos.locomotive_number or 'N/A'}"
+            consist_desc = f"Coupled Unit ({loco_str})" if pos.locomotive_number else "Duplicate Session"
+            rows.insert(1, ("Consist:", consist_desc, val_attr))
 
         conflict = getattr(record, "active_conflict", None)
         if conflict is not None:
