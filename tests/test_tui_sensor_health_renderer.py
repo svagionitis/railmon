@@ -110,8 +110,8 @@ class TestSensorHealthRenderer(unittest.TestCase):
 
         # Manually configure timings for FRZ and DRP
         with store._lock:
-            # t3 is frozen: speed > 1, static for 50s
-            store._trains["t3"].last_moved_time = now - 50.0
+            # t3 is frozen: speed > 1, static for 65s
+            store._trains["t3"].last_moved_time = now - 65.0
             store._trains["t3"].last_updated = now - 1.0
 
             # t4 is dropped: last updated 190s ago (exceeds 180s threshold)
@@ -135,7 +135,7 @@ class TestSensorHealthRenderer(unittest.TestCase):
         store.update_positions([pos])
 
         with store._lock:
-            store._trains["t-frz"].last_moved_time = now - 50.0
+            store._trains["t-frz"].last_moved_time = now - 65.0
             store._trains["t-frz"].last_updated = now - 2.0
             store._selected_id = "t-frz"
 
@@ -163,7 +163,7 @@ class TestSensorHealthRenderer(unittest.TestCase):
         store.set_connection_status(ConnectionStatus.CONNECTED)
 
         with store._lock:
-            store._trains["t-frz"].last_moved_time = now - 50.0
+            store._trains["t-frz"].last_moved_time = now - 65.0
             store._trains["t-frz"].last_updated = now - 1.0
 
             store._trains["t-drp1"].last_updated = now - 190.0
@@ -188,7 +188,7 @@ class TestSensorHealthRenderer(unittest.TestCase):
         store.set_connection_status(ConnectionStatus.CONNECTED)
 
         with store._lock:
-            store._trains["t-frz"].last_moved_time = now - 50.0
+            store._trains["t-frz"].last_moved_time = now - 65.0
             store._trains["t-frz"].last_updated = now - 1.0
 
             store._trains["t-drp"].last_updated = now - 190.0

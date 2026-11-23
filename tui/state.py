@@ -13,6 +13,9 @@ from train_tracker import TrainPosition
 from tui.geo import (
     DEFAULT_CORRIDOR_SPEED_RULES,
     DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC,
+    DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC,
+    DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH,
+    DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC,
     ConflictAlert,
     ConflictSeverity,
     ConflictWatchdogConfig,
@@ -491,6 +494,13 @@ class TrainStateStore:
         except (OSError, ValueError, KeyError, TypeError):
             self._tunnels = []
 
+        # Sensor freeze configuration for P0-11 Resilient Freeze Watchdog
+        self._sensor_freeze_threshold_sec: float = DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC
+        self._sensor_freeze_min_speed_kmh: float = DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH
+        self._sensor_freeze_max_packet_age_sec: float = (
+            DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC
+        )
+
         # Corridor headway & opposing conflict watchdog (F-5.1)
         self._conflict_config: ConflictWatchdogConfig = ConflictWatchdogConfig()
         self._tracks_data: Optional[Dict[str, Any]] = None
@@ -536,6 +546,9 @@ class TrainStateStore:
                 tunnels=self._tunnels,
                 now=ts,
                 telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
+                sensor_freeze_threshold_sec=self._sensor_freeze_threshold_sec,
+                sensor_freeze_min_speed_kmh=self._sensor_freeze_min_speed_kmh,
+                sensor_freeze_max_packet_age_sec=self._sensor_freeze_max_packet_age_sec,
             )
             rec.last_moved_pt = new_moved_pt
             rec.last_moved_time = new_moved_time
@@ -553,6 +566,9 @@ class TrainStateStore:
                 tunnels=self._tunnels,
                 now=ts,
                 telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
+                sensor_freeze_threshold_sec=self._sensor_freeze_threshold_sec,
+                sensor_freeze_min_speed_kmh=self._sensor_freeze_min_speed_kmh,
+                sensor_freeze_max_packet_age_sec=self._sensor_freeze_max_packet_age_sec,
             )
             record = TrainRecord(
                 position=pos,
@@ -864,6 +880,39 @@ class TrainStateStore:
         with self._lock:
             return self._telemetry_drop_threshold_sec
 
+    def set_sensor_freeze_threshold(self, threshold_sec: float) -> None:
+        """Set static duration threshold for frozen sensor classification."""
+        with self._lock:
+            self._sensor_freeze_threshold_sec = max(5.0, float(threshold_sec))
+            self._version += 1
+
+    def get_sensor_freeze_threshold(self) -> float:
+        """Get static duration threshold for frozen sensor classification."""
+        with self._lock:
+            return self._sensor_freeze_threshold_sec
+
+    def set_sensor_freeze_min_speed(self, speed_kmh: float) -> None:
+        """Set minimum speed required for sensor freeze qualification."""
+        with self._lock:
+            self._sensor_freeze_min_speed_kmh = max(1.0, float(speed_kmh))
+            self._version += 1
+
+    def get_sensor_freeze_min_speed(self) -> float:
+        """Get minimum speed required for sensor freeze qualification."""
+        with self._lock:
+            return self._sensor_freeze_min_speed_kmh
+
+    def set_sensor_freeze_max_packet_age(self, age_sec: float) -> None:
+        """Set maximum packet age for sensor freeze qualification."""
+        with self._lock:
+            self._sensor_freeze_max_packet_age_sec = max(1.0, float(age_sec))
+            self._version += 1
+
+    def get_sensor_freeze_max_packet_age(self) -> float:
+        """Get maximum packet age for sensor freeze qualification."""
+        with self._lock:
+            return self._sensor_freeze_max_packet_age_sec
+
     def evaluate_all_sensor_health(self, now: Optional[float] = None) -> None:
         """Run temporal and kinematic health evaluation across all tracked trains."""
         with self._lock:
@@ -883,6 +932,9 @@ class TrainStateStore:
                     tunnels=self._tunnels,
                     now=ref_now,
                     telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
+                    sensor_freeze_threshold_sec=self._sensor_freeze_threshold_sec,
+                    sensor_freeze_min_speed_kmh=self._sensor_freeze_min_speed_kmh,
+                    sensor_freeze_max_packet_age_sec=self._sensor_freeze_max_packet_age_sec,
                 )
                 rec.last_moved_pt = new_moved_pt
                 rec.last_moved_time = new_moved_time
@@ -922,6 +974,9 @@ class TrainStateStore:
                     tunnels=self._tunnels,
                     now=ref_now,
                     telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
+                    sensor_freeze_threshold_sec=self._sensor_freeze_threshold_sec,
+                    sensor_freeze_min_speed_kmh=self._sensor_freeze_min_speed_kmh,
+                    sensor_freeze_max_packet_age_sec=self._sensor_freeze_max_packet_age_sec,
                 )
                 rec.last_moved_pt = new_moved_pt
                 rec.last_moved_time = new_moved_time

@@ -1758,7 +1758,7 @@ class SensorHealthState(Enum):
     SIGNAL_HALT = "SIGNAL_HALT"  # Stopped (spd < 1 km/h), open track (> 250m from station)
     TUNNEL_TRANSIT = "TUNNEL_TRANSIT"  # Safe deadband inside mountain tunnel bore
     STALE = "STALE"  # Telemetry delayed (30s < elapsed <= drop_threshold)
-    FROZEN = "FROZEN"  # Spd >= 1 km/h, coords static for >= 45s
+    FROZEN = "FROZEN"  # Spd >= 5 km/h, coords static for >= 60s with fresh packets (<= 15s)
     DROPPED = "DROPPED"  # Complete packet loss exceeding drop/grace threshold
 
 
@@ -1767,6 +1767,9 @@ DEFAULT_TUNNEL_DROP_MIN_SEC: float = 300.0
 DEFAULT_TUNNEL_MARGIN_FACTOR: float = 1.35
 DEFAULT_TERMINAL_DWELL_RADIUS_M: float = 600.0
 DEFAULT_STATION_DWELL_RADIUS_M: float = 350.0
+DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC: float = 60.0
+DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH: float = 5.0
+DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC: float = 15.0
 TERMINAL_STATION_IDS: Set[str] = {"ath", "skg", "ska", "lian", "lar", "dom", "kth"}
 
 
@@ -1938,7 +1941,9 @@ def evaluate_sensor_health(
     now: Optional[float] = None,
     telemetry_drop_threshold_sec: float = DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC,
     telemetry_stale_threshold_sec: float = 30.0,
-    sensor_freeze_threshold_sec: float = 45.0,
+    sensor_freeze_threshold_sec: float = DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC,
+    sensor_freeze_min_speed_kmh: float = DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH,
+    sensor_freeze_max_packet_age_sec: float = DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC,
     station_dwell_radius_m: float = DEFAULT_STATION_DWELL_RADIUS_M,
     terminal_dwell_radius_m: float = DEFAULT_TERMINAL_DWELL_RADIUS_M,
     displacement_epsilon_m: float = 10.0,
@@ -1957,7 +1962,9 @@ def evaluate_sensor_health(
         now: Reference timestamp (defaults to time.time()).
         telemetry_drop_threshold_sec: Silence threshold for open-line DROPPED classification.
         telemetry_stale_threshold_sec: Silence threshold for STALE warning (30s).
-        sensor_freeze_threshold_sec: Static duration threshold for FROZEN classification (45s).
+        sensor_freeze_threshold_sec: Static duration threshold for FROZEN classification (60s).
+        sensor_freeze_min_speed_kmh: Minimum speed required for FROZEN qualification (5.0 km/h).
+        sensor_freeze_max_packet_age_sec: Maximum packet age for FROZEN qualification (15.0s).
         station_dwell_radius_m: Distance threshold for DWELL classification (350m).
         terminal_dwell_radius_m: Expanded threshold for terminal platforms/sidings (600m).
         displacement_epsilon_m: GNSS multipath noise floor threshold (10m).
@@ -2063,21 +2070,57 @@ def evaluate_sensor_health(
         # Moving train: clear any active station dwell
         new_dwell_start = None
 
-        if disp_m <= displacement_epsilon_m and static_dur >= sensor_freeze_threshold_sec:
-            # Sensor Freeze: Positive speed reported, but coordinates static
-            assessment = SensorHealthAssessment(
-                state=SensorHealthState.FROZEN,
-                elapsed_sec=elapsed,
-                static_duration_sec=static_dur,
-                displacement_m=disp_m,
-                current_speed_kmh=spd,
-                nearest_station=None,
-                station_distance_m=None,
-                dwell_duration_sec=0.0,
-                is_alert=True,
-                short_code="FRZ",
-                description=f"FROZEN ({int(static_dur)}s static, {spd:.0f} km/h)",
-            )
+        if (
+            spd >= sensor_freeze_min_speed_kmh
+            and disp_m <= displacement_epsilon_m
+            and static_dur >= sensor_freeze_threshold_sec
+        ):
+            # Candidate for sensor freeze: speed >= min_speed, coordinates static
+            if elapsed <= sensor_freeze_max_packet_age_sec:
+                # Genuine Sensor Freeze: Positive speed reported with fresh packets, but coordinates static
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.FROZEN,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=None,
+                    station_distance_m=None,
+                    dwell_duration_sec=0.0,
+                    is_alert=True,
+                    short_code="FRZ",
+                    description=f"FROZEN ({int(static_dur)}s static, {spd:.0f} km/h)",
+                )
+            elif elapsed > telemetry_stale_threshold_sec:
+                # Delayed packet delivery while in motion (not a hardware sensor failure)
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.STALE,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=None,
+                    station_distance_m=None,
+                    dwell_duration_sec=0.0,
+                    is_alert=False,
+                    short_code="STL",
+                    description=f"STALE ({int(elapsed)}s delay)",
+                )
+            else:
+                # Minor packet delay or inter-packet jitter within stale window
+                assessment = SensorHealthAssessment(
+                    state=SensorHealthState.NORMAL_MOTION,
+                    elapsed_sec=elapsed,
+                    static_duration_sec=static_dur,
+                    displacement_m=disp_m,
+                    current_speed_kmh=spd,
+                    nearest_station=None,
+                    station_distance_m=None,
+                    dwell_duration_sec=0.0,
+                    is_alert=False,
+                    short_code="RUN",
+                    description=f"Normal Motion ({spd:.0f} km/h)",
+                )
         elif elapsed > telemetry_stale_threshold_sec:
             # Delayed packet delivery while in motion
             assessment = SensorHealthAssessment(

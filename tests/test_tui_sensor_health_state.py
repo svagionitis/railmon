@@ -107,7 +107,7 @@ class TestSensorHealthState(unittest.TestCase):
         now = time.time()
         # Train 1: Dropped (last updated 150s ago)
         pos1 = _make_pos(train_id="t-drop", train_number="52", speed=100.0)
-        # Train 2: Frozen (static coords for 50s with positive speed)
+        # Train 2: Frozen (static coords for 65s with positive speed)
         pos2 = _make_pos(train_id="t-frz", train_number="1599", speed=130.0, lat=38.7, lng=22.4)
         # Train 3: Normal moving
         pos3 = _make_pos(train_id="t-norm", train_number="1597", speed=140.0, lat=39.6, lng=22.4)
@@ -119,9 +119,9 @@ class TestSensorHealthState(unittest.TestCase):
             # t-drop: last updated 190s ago (exceeds 180s baseline)
             self.store._trains["t-drop"].last_updated = now - 190.0
 
-            # t-frz: last moved 50s ago, fresh packet 1s ago
+            # t-frz: last moved 65s ago, fresh packet 1s ago
             self.store._trains["t-frz"].last_updated = now - 1.0
-            self.store._trains["t-frz"].last_moved_time = now - 50.0
+            self.store._trains["t-frz"].last_moved_time = now - 65.0
 
         snapshot = self.store.get_snapshot(now=now)
         self.assertEqual(snapshot.dropped_count, 1)

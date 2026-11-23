@@ -1,7 +1,7 @@
 # Technical Investigation: Telemetry Drop, Sensor Freezing, Track Conflict Aggressiveness & Duplicate Train Numbers
 
 > **Target Modules:** [`../../tui/geo.py`](../../tui/geo.py), [`../../tui/state.py`](../../tui/state.py), [`../../tui/renderer.py`](../../tui/renderer.py), [`../../train_tracker.py`](../../train_tracker.py)  
-> **Related Fix Plans:** [`../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md), [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md)  
+> **Related Fix Plans:** [`../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md), [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md), [`../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md)  
 > **Relevant Rules & Skills:** [`../../.agents/skills/diagrams-and-documentation/SKILL.md`](../../.agents/skills/diagrams-and-documentation/SKILL.md), [`../../.agents/skills/markdown-relative-paths/SKILL.md`](../../.agents/skills/markdown-relative-paths/SKILL.md)  
 > **Reference Upstream Chunks:** [`../../reference/chunks/47794.19386b2538c55881.js`](../../reference/chunks/47794.19386b2538c55881.js), [`../../reference/chunks/79801.a0cbc95dac2cd2a3.js`](../../reference/chunks/79801.a0cbc95dac2cd2a3.js)
 
@@ -152,6 +152,8 @@ if elapsed >= telemetry_drop_threshold_sec: # Default: 120.0s
 
 ### 3.3 Issue 3: Sensor Freezing Watchdog Is Too Aggressive
 
+> **Implementation Fix Plan:** [`../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md)
+
 #### Root Cause
 In [`tui/geo.py`](../../tui/geo.py#L1910-L1928):
 ```python
@@ -261,6 +263,7 @@ flowchart LR
 
 ### 4.2 Improvement 2: Strict Sensor Freeze Qualification
 * **Action:** Require fresh packet arrival before classifying an anomaly as `SENSOR FREEZE`.
+* **Plan:** Full engineering specification in [`../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md).
 * **Mechanism:** In `evaluate_sensor_health()`:
   ```python
   # Only evaluate freeze if packets are fresh (transponder actively broadcasting)

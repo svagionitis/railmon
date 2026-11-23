@@ -160,16 +160,16 @@ class TestSensorHealthGeo(unittest.TestCase):
         self.assertFalse(assessment.is_critical)
 
     def test_evaluate_sensor_freeze_anomaly(self) -> None:
-        """Verify speed > 0 km/h with static coordinates for >= 45s triggers FROZEN alert."""
+        """Verify speed >= 5 km/h with static coordinates for >= 60s and fresh packets triggers FROZEN alert."""
         now = 1000.0
-        # Coordinate unchanged for 48s while speed is 142 km/h
+        # Coordinate unchanged for 65s while speed is 142 km/h, packets fresh (1s old)
         pt = GeoPoint(lat=38.7412, lng=22.4810)
         assessment, _, _, _ = evaluate_sensor_health(
             point=pt,
             current_speed=142.0,
-            last_updated=now - 1.0,  # Fresh packet
+            last_updated=now - 1.0,  # Fresh packet (<= 15s)
             last_moved_pt=pt,
-            last_moved_time=now - 48.0,  # Static for 48s (>= 45s)
+            last_moved_time=now - 65.0,  # Static for 65s (>= 60s)
             station_dwell_start=None,
             stations=self.stations,
             now=now,
@@ -234,20 +234,61 @@ class TestSensorHealthGeo(unittest.TestCase):
         disp = haversine_distance_km(anchor_pt, jitter_pt) * 1000.0
         self.assertLess(disp, 10.0)
 
-        # Still within freeze window if speed > 1
+        # Still within freeze window if speed >= 5 km/h, static >= 60s, packet <= 15s
         assessment, new_anchor, new_time, _ = evaluate_sensor_health(
             point=jitter_pt,
             current_speed=50.0,
             last_updated=now - 1.0,
             last_moved_pt=anchor_pt,
-            last_moved_time=now - 50.0,
+            last_moved_time=now - 65.0,
             station_dwell_start=None,
             stations=self.stations,
             now=now,
         )
         self.assertEqual(assessment.state, SensorHealthState.FROZEN)
         self.assertEqual(new_anchor, anchor_pt)
-        self.assertEqual(new_time, now - 50.0)
+        self.assertEqual(new_time, now - 65.0)
+
+    def test_delayed_packets_inhibit_sensor_freeze(self) -> None:
+        """Verify network delivery lag (> 15s elapsed) inhibits FROZEN and classifies as STALE."""
+        now = 1000.0
+        pt = GeoPoint(lat=38.7412, lng=22.4810)
+        # Train was moving at 120 km/h, but packet delivery delayed for 45s
+        assessment, _, _, _ = evaluate_sensor_health(
+            point=pt,
+            current_speed=120.0,
+            last_updated=now - 45.0,  # Packet delayed 45s (> 15s freshness, > 30s stale)
+            last_moved_pt=pt,
+            last_moved_time=now - 65.0,  # Static duration 65s
+            station_dwell_start=None,
+            stations=self.stations,
+            now=now,
+        )
+        self.assertEqual(assessment.state, SensorHealthState.STALE)
+        self.assertEqual(assessment.short_code, "STL")
+        self.assertFalse(assessment.is_alert)
+        self.assertFalse(assessment.is_critical)
+        self.assertIn("STALE", assessment.description)
+
+    def test_station_crawl_inhibits_sensor_freeze(self) -> None:
+        """Verify platform approach crawl (speed < 5 km/h) never triggers FROZEN alert."""
+        now = 1000.0
+        # Train crawling into station platform at 3.2 km/h, coordinates static for 70s
+        pt = GeoPoint(lat=37.9922, lng=23.7212)
+        assessment, _, _, _ = evaluate_sensor_health(
+            point=pt,
+            current_speed=3.2,  # Crawl speed < 5.0 km/h
+            last_updated=now - 1.0,  # Fresh packet
+            last_moved_pt=pt,
+            last_moved_time=now - 70.0,  # Static for 70s
+            station_dwell_start=None,
+            stations=self.stations,
+            now=now,
+        )
+        self.assertNotEqual(assessment.state, SensorHealthState.FROZEN)
+        self.assertEqual(assessment.state, SensorHealthState.NORMAL_MOTION)
+        self.assertEqual(assessment.short_code, "RUN")
+        self.assertFalse(assessment.is_alert)
 
 
 if __name__ == "__main__":
