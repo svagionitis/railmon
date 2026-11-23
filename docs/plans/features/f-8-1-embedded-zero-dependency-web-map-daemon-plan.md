@@ -618,6 +618,7 @@ options:
    - Browser launch automation (`webbrowser.open`).
 
 ### Phase 3: CLI Subcommand Integration in `train_tracker.py`
+*(Detailed implementation plan: [`./f-8-1-phase-3-cli-subcommand-integration-plan.md`](./f-8-1-phase-3-cli-subcommand-integration-plan.md))*
 1. Extend `build_parser()` in [`train_tracker.py`](../../../train_tracker.py) with `p_serve = subparsers.add_parser("serve", ...)` and all relevant options.
 2. Implement `run_serve_mode(args: argparse.Namespace) -> int` in [`train_tracker.py`](../../../train_tracker.py):
    - Initializes `TrainStateStore`.

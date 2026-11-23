@@ -1756,6 +1756,105 @@ Examples:
     p_arch.add_argument("--retention-days", type=_positive_int, help="Archive telemetry rows older than N days.")
     p_arch.add_argument("--archive-db", type=str, help="Target archive SQLite database file path (default: <db_stem>_archive.db).")
 
+    # 5. serve (F-8.1: Embedded Zero-Dependency Web Map Daemon)
+    p_serve = subparsers.add_parser(
+        "serve",
+        aliases=["server", "web"],
+        help="Launch embedded zero-dependency web map daemon for browser visualization.",
+        description=(
+            "Start a multi-threaded HTTP server daemon serving an interactive "
+            "Leaflet GIS map dashboard of the Greek railway network with real-time "
+            "Server-Sent Events (SSE) telemetry, conflict warnings, and station inspectors."
+        ),
+    )
+    p_serve.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Network bind interface IP address (default: 127.0.0.1; use 0.0.0.0 for LAN access).",
+    )
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="TCP port to bind web map HTTP server (default: 8080).",
+    )
+    p_serve.add_argument(
+        "--demo",
+        "--mock",
+        action="store_true",
+        default=False,
+        help="Run in offline demonstration mode with synthetic train telemetry simulation.",
+    )
+    p_serve.add_argument(
+        "--record",
+        action="store_true",
+        default=False,
+        help="Record incoming live telemetry concurrently to SQLite WAL database.",
+    )
+    p_serve.add_argument(
+        "--db",
+        type=str,
+        default="railway_history.db",
+        help="Path to SQLite database for recording or query inspection (default: railway_history.db).",
+    )
+    p_serve.add_argument(
+        "--replay",
+        type=str,
+        default=None,
+        help="Replay historical telemetry from a recorded SQLite WAL database.",
+    )
+    p_serve.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help="Playback speed multiplier for historical replay mode (default: 1.0; e.g. 2.0, 5.0, 10.0).",
+    )
+    p_serve.add_argument(
+        "--open-browser",
+        "-b",
+        action="store_true",
+        default=False,
+        help="Automatically launch default web browser pointing to the web map dashboard on startup.",
+    )
+    p_serve.add_argument(
+        "--cors",
+        action="store_true",
+        default=False,
+        help="Enable permissive Cross-Origin Resource Sharing (Access-Control-Allow-Origin: *).",
+    )
+    p_serve.add_argument(
+        "--tile-provider",
+        type=str,
+        choices=["carto-dark", "carto-light", "osm"],
+        default="carto-dark",
+        help="Cartographic base map tile layer provider (default: carto-dark).",
+    )
+    p_serve.add_argument(
+        "--reconnect-delay",
+        type=float,
+        default=3.0,
+        help="Base reconnection delay in seconds for live SSE upstream connection (default: 3.0s).",
+    )
+    p_serve.add_argument(
+        "--no-filter-deadband",
+        action="store_true",
+        default=False,
+        help="Disable stationary coordinate noise suppression deadband filter during recording.",
+    )
+    p_serve.add_argument(
+        "--retention-days",
+        type=_positive_int,
+        default=None,
+        help="Automatically prune recorded observations older than N days on startup.",
+    )
+    p_serve.add_argument(
+        "--archive-path",
+        type=str,
+        default=None,
+        help="Export pruned observations to gzipped JSONL archive before deletion.",
+    )
+
     return parser
 
 
@@ -3296,8 +3395,299 @@ def _dispatch_replay_mode(args: argparse.Namespace, is_tui: bool, replay_db: str
     return 0
 
 
+def _build_serve_worker(
+    source: TelemetrySource,
+    store: Any,
+    broadcaster: Any,
+    db_path: str,
+    reconnect_delay: float,
+    recorder: Optional[Any],
+    replay_speed: float = 1.0,
+) -> Any:
+    """Build telemetry worker configured with SSE broadcast callback hooks."""
+    from tui.mock_engine import MockTelemetryEngine
+    from tui.stream_worker import ReplayWorker, StreamWorker
+
+    def _broadcast_positions(positions: Sequence[TrainPosition]) -> None:
+        if not positions or broadcaster.client_count == 0:
+            return
+        items = []
+        for p in positions:
+            heading_raw = getattr(
+                p, "heading", getattr(p, "track_heading", getattr(p, "course", 0.0))
+            )
+            heading_val = float(heading_raw) if heading_raw is not None else 0.0
+            items.append(
+                {
+                    "id": str(getattr(p, "train_id", getattr(p, "id", ""))),
+                    "lat": float(p.lat),
+                    "lng": float(p.lng),
+                    "speed": float(p.speed or 0.0),
+                    "delay": float(p.delay or 0.0),
+                    "heading": heading_val,
+                    "timestamp": getattr(p, "timestamp", ""),
+                }
+            )
+        payload = json.dumps(items, ensure_ascii=False)
+        broadcaster.broadcast("trainPositionsUx", payload)
+
+    orig_update_positions = store.update_positions
+
+    def _wrapped_update_positions(
+        positions: List[TrainPosition], virtual_now: Optional[float] = None
+    ) -> None:
+        orig_update_positions(positions, virtual_now=virtual_now)
+        _broadcast_positions(positions)
+
+    store.update_positions = _wrapped_update_positions
+
+    orig_ingest_replay = store.ingest_replay_observations
+
+    def _wrapped_ingest_replay(
+        observations: Sequence[Tuple[TrainPosition, float]], virtual_now: float
+    ) -> None:
+        orig_ingest_replay(observations, virtual_now)
+        _broadcast_positions([pos for pos, _ in observations])
+
+    store.ingest_replay_observations = _wrapped_ingest_replay
+
+    orig_replace_replay = store.replace_replay_state
+
+    def _wrapped_replace_replay(
+        observations: Sequence[Tuple[TrainPosition, float]], virtual_now: float
+    ) -> None:
+        orig_replace_replay(observations, virtual_now)
+        _broadcast_positions([pos for pos, _ in observations])
+
+    store.replace_replay_state = _wrapped_replace_replay
+
+    if source == TelemetrySource.REPLAY:
+        return ReplayWorker(
+            store=store,
+            db_path=db_path,
+            speed_multiplier=replay_speed,
+        )
+    if source == TelemetrySource.DEMO:
+        return StreamWorker(
+            store=store,
+            mock_engine=MockTelemetryEngine(),
+            recorder=recorder,
+        )
+    return StreamWorker(
+        store=store,
+        client=RailwayGovClient(),
+        base_backoff_sec=reconnect_delay,
+        recorder=recorder,
+    )
+
+
+def _print_serve_banner(
+    server: Any,
+    source: TelemetrySource,
+    recording: bool,
+    db_path: str,
+) -> None:
+    """Print informative, formatted startup banner to stdout."""
+    url = getattr(
+        server,
+        "server_url",
+        f"http://{server.server_address[0]}:{server.server_port}/",
+    )
+    print("\n" + "=" * 78)
+    print(f"  RAILMON EMBEDDED WEB MAP SERVER v{__version__} (Hellenic Railways)")
+    print("=" * 78)
+    print(f"  [INFO] Telemetry Mode     : {source.value.upper()}")
+    print(f"  [INFO] Bound Interface    : {url}")
+    tile_prov = getattr(
+        server.config.tile_provider, "value", str(server.config.tile_provider)
+    )
+    print(f"  [INFO] Tile Provider      : {tile_prov}")
+    print(f"  [INFO] CORS Enabled       : {server.config.cors_enabled}")
+    if recording:
+        print(f"  [INFO] SQLite Recording   : ENABLED (database: '{db_path}')")
+    else:
+        print("  [INFO] SQLite Recording   : DISABLED")
+    print(
+        f"  [INFO] Browser Auto-Launch: {'ENABLED' if server.config.open_browser else 'DISABLED'}"
+    )
+    print("\n  Endpoints Available:")
+    print(f"    -> Dashboard UI : {url}")
+    print(f"    -> Train States : {url}api/trains")
+    print(f"    -> Live Stream  : {url}api/stream")
+    print(f"    -> System Health: {url}api/health")
+    print("\n  Press Ctrl+C to stop.")
+    print("=" * 78 + "\n", flush=True)
+
+
+def run_serve_mode(args: argparse.Namespace) -> int:
+    """Execute embedded zero-dependency web map server daemon.
+
+    Args:
+        args: Parsed command-line arguments namespace.
+
+    Returns:
+        int: Exit status code (0 for clean shutdown, 1 for fatal server error, 2 for invalid args).
+    """
+    import errno
+    from server.daemon import WebMapServer
+    from server.models import ServerConfig, TileProvider
+    from server.sse import SSEBroadcaster
+    from tui.state import TrainStateStore
+
+    # 1. Parameter Validation
+    host = str(args.host or "127.0.0.1").strip()
+    port = int(args.port)
+    if not (1 <= port <= 65535):
+        print(
+            f"[ERROR] Invalid port number: {port}. Port must be between 1 and 65535.",
+            file=sys.stderr,
+        )
+        return 2
+
+    replay_db = getattr(args, "replay", None)
+    if replay_db is not None:
+        replay_db_str = str(replay_db).strip()
+        if replay_db_str and not os.path.exists(replay_db_str):
+            print(
+                f"[ERROR] Historical replay database not found: '{replay_db_str}'",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        replay_db_str = ""
+
+    raw_speed = getattr(args, "speed", None)
+    replay_speed = float(raw_speed) if raw_speed is not None else 1.0
+    if replay_speed <= 0.0:
+        print(
+            f"[ERROR] Invalid replay speed: {replay_speed}. Replay speed must be > 0.0.",
+            file=sys.stderr,
+        )
+        return 2
+
+    tile_provider_enum = TileProvider.from_string(
+        getattr(args, "tile_provider", "carto-dark")
+    )
+
+    # 2. Security Audit Notice for Public Network Binding
+    if host in ("0.0.0.0", "::"):
+        print(
+            "\n[SECURITY NOTICE] Server is binding to all network interfaces (0.0.0.0).\n"
+            "The railmon web map dashboard and REST API will be accessible across your local network.\n",
+            file=sys.stderr,
+        )
+
+    # 3. Resolve Telemetry Source & Persistence Flags
+    if replay_db_str:
+        source = TelemetrySource.REPLAY
+        is_rec = False
+    elif getattr(args, "demo", False):
+        source = TelemetrySource.DEMO
+        is_rec = bool(getattr(args, "record", False))
+    else:
+        source = TelemetrySource.LIVE
+        is_rec = bool(getattr(args, "record", False))
+
+    db_path = getattr(args, "db", "railway_history.db")
+    enable_deadband = not getattr(args, "no_filter_deadband", False)
+    deadband = (
+        DeadbandFilterMode.ENABLED if enable_deadband else DeadbandFilterMode.DISABLED
+    )
+    recording_mode = RecordingMode.ENABLED if is_rec else RecordingMode.DISABLED
+
+    # 4. Initialize Domain State Store & Event Broadcaster
+    store = TrainStateStore()
+    broadcaster = SSEBroadcaster()
+
+    # 5. Start Optional Telemetry Recorder Thread
+    db, recorder = _start_optional_recorder(
+        recording=recording_mode,
+        db_path=db_path,
+        source=source,
+        deadband=deadband,
+        retention_days=getattr(args, "retention_days", None),
+        archive_path=getattr(args, "archive_path", None),
+    )
+    if is_rec:
+        store.set_recording_status(True, db_path)
+
+    # 6. Configure & Attach Telemetry Ingestion Worker
+    worker = _build_serve_worker(
+        source=source,
+        store=store,
+        broadcaster=broadcaster,
+        db_path=replay_db_str or db_path,
+        reconnect_delay=getattr(args, "reconnect_delay", 3.0),
+        recorder=recorder,
+        replay_speed=replay_speed,
+    )
+    worker.start()
+
+    # 7. Construct Server Configuration & Instantiate Daemon
+    config = ServerConfig(
+        host=host,
+        port=port,
+        cors_enabled=bool(getattr(args, "cors", False)),
+        tile_provider=tile_provider_enum,
+        demo_mode=(source == TelemetrySource.DEMO),
+        record_enabled=is_rec,
+        db_path=db_path if is_rec else None,
+        replay_db=replay_db_str if source == TelemetrySource.REPLAY else None,
+        replay_speed=replay_speed,
+        open_browser=bool(getattr(args, "open_browser", False)),
+    )
+
+    try:
+        server = WebMapServer(
+            server_address=(host, port),
+            store=store,
+            broadcaster=broadcaster,
+            config=config,
+        )
+    except OSError as exc:
+        worker.stop()
+        if recorder:
+            recorder.stop()
+        if db:
+            db.close()
+        if exc.errno == errno.EADDRINUSE:
+            print(
+                f"\n[ERROR] Port {port} is already in use on interface '{host}'.\n"
+                f"Please specify a different port using '--port <number>'.\n",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"\n[ERROR] Failed to start web map server: {exc}\n", file=sys.stderr)
+        return 1
+
+    # 8. Print Operator Banner
+    _print_serve_banner(server, source, is_rec, db_path)
+
+    # 9. Main Server Execution Loop with Signal Handling
+    with install_signal_handlers() as stop_event:
+        server.start(background=True)
+        try:
+            while not stop_event.is_set():
+                stop_event.wait(timeout=0.5)
+        except KeyboardInterrupt:
+            stop_event.set()
+        finally:
+            server.stop()
+            worker.stop()
+            if recorder:
+                recorder.stop()
+            if db:
+                db.close()
+
+    print("\n[INFO] Web map daemon shut down cleanly.")
+    return 0
+
+
 def _dispatch_cli_mode(args: argparse.Namespace, is_tui: bool) -> int:
     """Route parsed CLI arguments to the appropriate execution mode."""
+    if args.mode in ("serve", "server", "web"):
+        return run_serve_mode(args)
+
     if args.mode in ("conflicts", "conflict", "watchdog_conflicts"):
         return run_conflicts_mode(args)
 
@@ -3419,8 +3809,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     log_level = "DEBUG" if getattr(args, "debug", False) else getattr(args, "log_level", "INFO")
     has_replay = bool(getattr(args, "replay", None) and str(getattr(args, "replay", "")).strip())
+    is_serve = getattr(args, "mode", None) in ("serve", "server", "web")
     is_tui = bool(
-        (getattr(args, "tui", False) or has_replay)
+        not is_serve
+        and (getattr(args, "tui", False) or has_replay)
         and not (getattr(args, "headless", False) or getattr(args, "daemon", False))
     )
     setup_logging(
