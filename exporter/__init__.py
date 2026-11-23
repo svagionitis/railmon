@@ -4,6 +4,15 @@ from typing import List
 
 import train_tracker
 
+from exporter.collector import (
+    BaseCollector,
+    MetricRegistry,
+    ProcessMetricsCollector,
+    StorageMetricsCollector,
+    StreamMetricsCollector,
+    TrainTelemetryCollector,
+    WatchdogMetricsCollector,
+)
 from exporter.formatter import (
     MetricsFormatter,
     escape_help_string,
@@ -33,4 +42,11 @@ __all__: List[str] = [
     "escape_label_value",
     "format_float",
     "negotiate_metrics_format",
+    "BaseCollector",
+    "MetricRegistry",
+    "TrainTelemetryCollector",
+    "WatchdogMetricsCollector",
+    "StreamMetricsCollector",
+    "StorageMetricsCollector",
+    "ProcessMetricsCollector",
 ]

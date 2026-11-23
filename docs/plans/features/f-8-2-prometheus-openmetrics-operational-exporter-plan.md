@@ -737,6 +737,9 @@ flowchart LR
   - Validate quote escaping, backslash escaping, newline escaping, `NaN`/`+Inf` handling, and OpenMetrics `# EOF` termination.
 
 ### Phase 2: Domain Telemetry Collectors & Registry
+
+> **Detailed Phase 2 Implementation Plan:** [`./f-8-2-phase-2-domain-telemetry-collectors-and-registry-plan.md`](./f-8-2-phase-2-domain-telemetry-collectors-and-registry-plan.md)
+
 - **Deliverables:**
   - Implement `exporter/collector.py` with `MetricRegistry`.
   - Implement `TrainTelemetryCollector` (train counts, delays, speeds, punctuality).
