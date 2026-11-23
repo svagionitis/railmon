@@ -1765,7 +1765,7 @@ class TUIRenderer:
                 return st_code, PAIR_TRAIN_ALERT
             if health.state == SensorHealthState.STATION_DWELL:
                 return st_code, PAIR_TRAIN_PROAST
-            if health.state == SensorHealthState.STALE:
+            if health.state in (SensorHealthState.TUNNEL_TRANSIT, SensorHealthState.STALE):
                 return st_code, PAIR_TRAIN_WARN
 
         if is_overspeed:
@@ -2075,6 +2075,9 @@ class TUIRenderer:
             elif health.state == SensorHealthState.DROPPED:
                 telemetry_str = f"{telemetry_str} [DROPPED]"
                 telemetry_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
+            elif health.state == SensorHealthState.TUNNEL_TRANSIT:
+                telemetry_str = f"{telemetry_str} [TUNNEL]"
+                telemetry_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
             elif health.state == SensorHealthState.STALE:
                 telemetry_str = f"{telemetry_str} [STALE]"
                 telemetry_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
@@ -2087,7 +2090,7 @@ class TUIRenderer:
                 sensor_health_attr = safe_color_pair(PAIR_TRAIN_ALERT, curses.A_BOLD) | curses.A_BOLD
             elif health.state == SensorHealthState.STATION_DWELL:
                 sensor_health_attr = safe_color_pair(PAIR_TRAIN_PROAST, curses.A_BOLD) | curses.A_BOLD
-            elif health.state == SensorHealthState.STALE:
+            elif health.state in (SensorHealthState.TUNNEL_TRANSIT, SensorHealthState.STALE):
                 sensor_health_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
 
         return telemetry_str, telemetry_attr, sensor_health_str, sensor_health_attr
@@ -2110,6 +2113,11 @@ class TUIRenderer:
                 safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD,
             )
         if health is not None:
+            if health.state == SensorHealthState.TUNNEL_TRANSIT:
+                return (
+                    f"TUNNEL TRANSIT [{health.nearest_station or 'Tunnel'}]",
+                    safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD,
+                )
             if health.state == SensorHealthState.FROZEN:
                 return (
                     f"SENSOR FREEZE [{int(health.static_duration_sec)}s static]",

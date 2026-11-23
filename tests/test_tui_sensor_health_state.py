@@ -116,14 +116,14 @@ class TestSensorHealthState(unittest.TestCase):
 
         # Manually alter timing to simulate anomaly states
         with self.store._lock:
-            # t-drop: last updated 150s ago
-            self.store._trains["t-drop"].last_updated = now - 150.0
+            # t-drop: last updated 190s ago (exceeds 180s baseline)
+            self.store._trains["t-drop"].last_updated = now - 190.0
 
             # t-frz: last moved 50s ago, fresh packet 1s ago
             self.store._trains["t-frz"].last_updated = now - 1.0
             self.store._trains["t-frz"].last_moved_time = now - 50.0
 
-        snapshot = self.store.get_snapshot()
+        snapshot = self.store.get_snapshot(now=now)
         self.assertEqual(snapshot.dropped_count, 1)
         self.assertEqual(snapshot.frozen_count, 1)
         self.assertIn("t-drop", snapshot.dropped_train_ids)
@@ -141,8 +141,8 @@ class TestSensorHealthState(unittest.TestCase):
         assert rec is not None and rec.sensor_health is not None
         self.assertEqual(rec.sensor_health.state, SensorHealthState.STALE)
 
-        # 130 seconds later: should transition to DROPPED
-        self.store.evaluate_all_sensor_health(now=t0 + 130.0)
+        # 190 seconds later: should transition to DROPPED
+        self.store.evaluate_all_sensor_health(now=t0 + 190.0)
         rec = self.store.get_train("t-quiet")
         assert rec is not None and rec.sensor_health is not None
         self.assertEqual(rec.sensor_health.state, SensorHealthState.DROPPED)

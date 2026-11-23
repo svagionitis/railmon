@@ -1754,11 +1754,20 @@ class SensorHealthState(Enum):
     """Classification of locomotive telematics and kinematic motion health."""
 
     NORMAL_MOTION = "NORMAL_MOTION"  # Moving (spd >= 1 km/h), coords advancing, packet <= 30s
-    STATION_DWELL = "STATION_DWELL"  # Stopped (spd < 1 km/h), within 250m of station centroid
+    STATION_DWELL = "STATION_DWELL"  # Stopped/idling, within station platform/siding bounds
     SIGNAL_HALT = "SIGNAL_HALT"  # Stopped (spd < 1 km/h), open track (> 250m from station)
-    STALE = "STALE"  # Telemetry delayed (30s < elapsed <= 120s)
+    TUNNEL_TRANSIT = "TUNNEL_TRANSIT"  # Safe deadband inside mountain tunnel bore
+    STALE = "STALE"  # Telemetry delayed (30s < elapsed <= drop_threshold)
     FROZEN = "FROZEN"  # Spd >= 1 km/h, coords static for >= 45s
-    DROPPED = "DROPPED"  # Complete packet loss for >= 120s
+    DROPPED = "DROPPED"  # Complete packet loss exceeding drop/grace threshold
+
+
+DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC: float = 180.0
+DEFAULT_TUNNEL_DROP_MIN_SEC: float = 300.0
+DEFAULT_TUNNEL_MARGIN_FACTOR: float = 1.35
+DEFAULT_TERMINAL_DWELL_RADIUS_M: float = 600.0
+DEFAULT_STATION_DWELL_RADIUS_M: float = 350.0
+TERMINAL_STATION_IDS: Set[str] = {"ath", "skg", "ska", "lian", "lar", "dom", "kth"}
 
 
 @dataclass(frozen=True)
@@ -1831,6 +1840,92 @@ def find_nearest_station_aabb(
     return best_stn, best_dist_m
 
 
+def _evaluate_tunnel_health(
+    point: GeoPoint,
+    spd: float,
+    elapsed: float,
+    last_moved_time: float,
+    ref_now: float,
+    tunnels: Optional[Sequence[Any]],
+    telemetry_stale_threshold_sec: float,
+) -> Optional[SensorHealthAssessment]:
+    """Evaluate whether a train is in an active mountain tunnel deadband."""
+    tunnel_info = detect_train_tunnel(point, tunnels) if tunnels else None
+    if tunnel_info is None:
+        return None
+
+    tunnel, dist_along_m, _ = tunnel_info
+    tun_len = getattr(tunnel, "length_m", None) or 5000.0
+    entry_spd = max(spd, 40.0)  # Conservative floor for freight/crawling transit
+    nominal_transit_sec = tun_len / (entry_spd * (1000.0 / 3600.0))
+    grace_sec = max(
+        DEFAULT_TUNNEL_DROP_MIN_SEC,
+        nominal_transit_sec * DEFAULT_TUNNEL_MARGIN_FACTOR,
+    )
+    tun_name = getattr(tunnel, "name", "Tunnel")
+
+    if elapsed >= grace_sec:
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        age_label = f"{mins}m {secs}s" if mins > 0 else f"{int(elapsed)}s"
+        return SensorHealthAssessment(
+            state=SensorHealthState.DROPPED,
+            elapsed_sec=elapsed,
+            static_duration_sec=max(0.0, ref_now - last_moved_time),
+            displacement_m=0.0,
+            current_speed_kmh=spd,
+            nearest_station=tun_name,
+            station_distance_m=dist_along_m,
+            dwell_duration_sec=0.0,
+            is_alert=True,
+            short_code="DRP",
+            description=f"DROPPED [OVERDUE IN TUNNEL] ({tun_name}, {age_label})",
+        )
+    if elapsed > telemetry_stale_threshold_sec:
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        age_label = f"{mins}m {secs}s" if mins > 0 else f"{int(elapsed)}s"
+        return SensorHealthAssessment(
+            state=SensorHealthState.TUNNEL_TRANSIT,
+            elapsed_sec=elapsed,
+            static_duration_sec=max(0.0, ref_now - last_moved_time),
+            displacement_m=0.0,
+            current_speed_kmh=spd,
+            nearest_station=tun_name,
+            station_distance_m=dist_along_m,
+            dwell_duration_sec=0.0,
+            is_alert=False,
+            short_code="TUN",
+            description=f"TUNNEL TRANSIT ({tun_name}, {age_label} silent)",
+        )
+    return None
+
+
+def _resolve_station_candidate(
+    point: GeoPoint,
+    stations: Sequence[Any],
+    station_dwell_radius_m: float,
+    terminal_dwell_radius_m: float,
+) -> Tuple[Optional[Any], Optional[float]]:
+    """Resolve nearest candidate station node taking terminal radius into account."""
+    if not stations:
+        return None, None
+    stn_candidate, cand_dist = find_nearest_station_aabb(
+        point, stations, max_radius_m=terminal_dwell_radius_m
+    )
+    if stn_candidate is None or cand_dist is None:
+        return None, None
+    cand_id = str(getattr(stn_candidate, "id", "")).lower()
+    effective_radius = (
+        terminal_dwell_radius_m
+        if cand_id in TERMINAL_STATION_IDS
+        else station_dwell_radius_m
+    )
+    if cand_dist <= effective_radius:
+        return stn_candidate, cand_dist
+    return None, None
+
+
 def evaluate_sensor_health(
     point: GeoPoint,
     current_speed: Optional[float],
@@ -1839,11 +1934,13 @@ def evaluate_sensor_health(
     last_moved_time: float,
     station_dwell_start: Optional[float],
     stations: Sequence[Any],
+    tunnels: Optional[Sequence[Any]] = None,
     now: Optional[float] = None,
-    telemetry_drop_threshold_sec: float = 120.0,
+    telemetry_drop_threshold_sec: float = DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC,
     telemetry_stale_threshold_sec: float = 30.0,
     sensor_freeze_threshold_sec: float = 45.0,
-    station_dwell_radius_m: float = 250.0,
+    station_dwell_radius_m: float = DEFAULT_STATION_DWELL_RADIUS_M,
+    terminal_dwell_radius_m: float = DEFAULT_TERMINAL_DWELL_RADIUS_M,
     displacement_epsilon_m: float = 10.0,
 ) -> Tuple[SensorHealthAssessment, Optional[GeoPoint], float, Optional[float]]:
     """Evaluate kinematic continuity, telemetry freshness, and station dwell.
@@ -1856,57 +1953,80 @@ def evaluate_sensor_health(
         last_moved_time: Epoch timestamp when the train was verified to have displaced.
         station_dwell_start: Epoch timestamp when station dwell began (if dwelling).
         stations: Available railway station nodes.
+        tunnels: Available railway tunnel infrastructure features.
         now: Reference timestamp (defaults to time.time()).
-        telemetry_drop_threshold_sec: Silence threshold for DROPPED classification (120s).
+        telemetry_drop_threshold_sec: Silence threshold for open-line DROPPED classification.
         telemetry_stale_threshold_sec: Silence threshold for STALE warning (30s).
         sensor_freeze_threshold_sec: Static duration threshold for FROZEN classification (45s).
-        station_dwell_radius_m: Distance threshold to station centroid for DWELL classification (250m).
+        station_dwell_radius_m: Distance threshold for DWELL classification (350m).
+        terminal_dwell_radius_m: Expanded threshold for terminal platforms/sidings (600m).
         displacement_epsilon_m: GNSS multipath noise floor threshold (10m).
 
     Returns:
-        Tuple of (Assessment, updated_last_moved_pt, updated_last_moved_time, updated_station_dwell_start).
+        Tuple of (Assessment, updated_last_moved_pt, updated_last_moved_time,
+        updated_station_dwell_start).
     """
     ref_now = time.time() if now is None else now
     spd = max(0.0, float(current_speed)) if current_speed is not None else 0.0
     elapsed = max(0.0, ref_now - last_updated)
 
-    # 1. Complete Telemetry Drop Check
+    # 1. Geodesic Mountain Tunnel Transit Check
+    tun_assess = _evaluate_tunnel_health(
+        point=point,
+        spd=spd,
+        elapsed=elapsed,
+        last_moved_time=last_moved_time,
+        ref_now=ref_now,
+        tunnels=tunnels,
+        telemetry_stale_threshold_sec=telemetry_stale_threshold_sec,
+    )
+    if tun_assess is not None:
+        return tun_assess, last_moved_pt, last_moved_time, station_dwell_start
+
+    # 2. Station Siding & Terminal Platform Dwell Preemption Check
+    nearest_stn, stn_dist = _resolve_station_candidate(
+        point=point,
+        stations=stations,
+        station_dwell_radius_m=station_dwell_radius_m,
+        terminal_dwell_radius_m=terminal_dwell_radius_m,
+    )
+
+    is_dwelling = nearest_stn is not None and (
+        spd <= 5.0 or station_dwell_start is not None
+    )
+    if is_dwelling and elapsed >= telemetry_drop_threshold_sec:
+        stn_name = getattr(
+            nearest_stn,
+            "name_en",
+            getattr(nearest_stn, "name_el", getattr(nearest_stn, "id", "Station")),
+        )
+        new_dwell_start = (
+            station_dwell_start if station_dwell_start is not None else ref_now
+        )
+        dwell_sec = max(0.0, ref_now - new_dwell_start)
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        age_label = f"{mins}m {secs}s" if mins > 0 else f"{int(elapsed)}s"
+        assessment = SensorHealthAssessment(
+            state=SensorHealthState.STATION_DWELL,
+            elapsed_sec=elapsed,
+            static_duration_sec=max(0.0, ref_now - last_moved_time),
+            displacement_m=0.0,
+            current_speed_kmh=spd,
+            nearest_station=stn_name,
+            station_distance_m=stn_dist,
+            dwell_duration_sec=dwell_sec,
+            is_alert=False,
+            short_code="DWL",
+            description=f"STATION DWELL [IDLE] ({stn_name}, {age_label} silent)",
+        )
+        return assessment, last_moved_pt, last_moved_time, new_dwell_start
+
+    # 3. Open Line Complete Telemetry Drop Check
     if elapsed >= telemetry_drop_threshold_sec:
         mins = int(elapsed // 60)
         secs = int(elapsed % 60)
         age_label = f"{mins}m {secs}s" if mins > 0 else f"{int(elapsed)}s"
-
-        nearest_stn, stn_dist = (None, None)
-        if spd < 1.0 and stations:
-            nearest_stn, stn_dist = find_nearest_station_aabb(
-                point, stations, max_radius_m=station_dwell_radius_m
-            )
-
-        if nearest_stn is not None and stn_dist is not None:
-            stn_name = getattr(
-                nearest_stn,
-                "name_en",
-                getattr(nearest_stn, "name_el", getattr(nearest_stn, "id", "Station")),
-            )
-            new_dwell_start = (
-                station_dwell_start if station_dwell_start is not None else ref_now
-            )
-            dwell_sec = max(0.0, ref_now - new_dwell_start)
-            assessment = SensorHealthAssessment(
-                state=SensorHealthState.STATION_DWELL,
-                elapsed_sec=elapsed,
-                static_duration_sec=max(0.0, ref_now - last_moved_time),
-                displacement_m=0.0,
-                current_speed_kmh=spd,
-                nearest_station=stn_name,
-                station_distance_m=stn_dist,
-                dwell_duration_sec=dwell_sec,
-                is_alert=False,
-                short_code="DWL",
-                description=f"STATION DWELL [IDLE] ({stn_name}, {age_label} silent)",
-            )
-            return assessment, last_moved_pt, last_moved_time, new_dwell_start
-
         assessment = SensorHealthAssessment(
             state=SensorHealthState.DROPPED,
             elapsed_sec=elapsed,
@@ -1922,7 +2042,7 @@ def evaluate_sensor_health(
         )
         return assessment, last_moved_pt, last_moved_time, station_dwell_start
 
-    # 2. Kinematic Displacement & Anchor Update
+    # 4. Kinematic Displacement & Anchor Update
     if last_moved_pt is None:
         new_anchor_pt = point
         new_anchor_time = ref_now
@@ -1938,7 +2058,7 @@ def evaluate_sensor_health(
 
     static_dur = max(0.0, ref_now - new_anchor_time)
 
-    # 3. Dynamic Health Classification (Moving vs Stationary)
+    # 5. Dynamic Health Classification (Moving vs Stationary)
     if spd >= 1.0:
         # Moving train: clear any active station dwell
         new_dwell_start = None
@@ -1990,10 +2110,6 @@ def evaluate_sensor_health(
             )
     else:
         # Stationary train (speed < 1.0 km/h)
-        nearest_stn, stn_dist = find_nearest_station_aabb(
-            point, stations, max_radius_m=station_dwell_radius_m
-        )
-
         if nearest_stn is not None and stn_dist is not None:
             # Authorized station dwell
             new_dwell_start = (

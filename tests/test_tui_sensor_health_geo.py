@@ -206,15 +206,15 @@ class TestSensorHealthGeo(unittest.TestCase):
         self.assertEqual(new_time, now)
 
     def test_evaluate_telemetry_drop_anomaly(self) -> None:
-        """Verify telemetry silence >= 120s triggers DROPPED critical alert."""
+        """Verify telemetry silence >= 180s triggers DROPPED critical alert."""
         now = 1000.0
         pt = GeoPoint(lat=39.1245, lng=22.3120)
         assessment, _, _, _ = evaluate_sensor_health(
             point=pt,
             current_speed=118.0,
-            last_updated=now - 125.0,  # 125s silence (>= 120s)
+            last_updated=now - 190.0,  # 190s silence (>= 180s baseline)
             last_moved_pt=pt,
-            last_moved_time=now - 125.0,
+            last_moved_time=now - 190.0,
             station_dwell_start=None,
             stations=self.stations,
             now=now,

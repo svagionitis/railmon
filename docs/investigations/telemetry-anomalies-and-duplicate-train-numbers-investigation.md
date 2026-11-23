@@ -1,7 +1,7 @@
 # Technical Investigation: Telemetry Drop, Sensor Freezing, Track Conflict Aggressiveness & Duplicate Train Numbers
 
 > **Target Modules:** [`../../tui/geo.py`](../../tui/geo.py), [`../../tui/state.py`](../../tui/state.py), [`../../tui/renderer.py`](../../tui/renderer.py), [`../../train_tracker.py`](../../train_tracker.py)  
-> **Related Fix Plan:** [`../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md)  
+> **Related Fix Plans:** [`../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](../plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md), [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md)  
 > **Relevant Rules & Skills:** [`../../.agents/skills/diagrams-and-documentation/SKILL.md`](../../.agents/skills/diagrams-and-documentation/SKILL.md), [`../../.agents/skills/markdown-relative-paths/SKILL.md`](../../.agents/skills/markdown-relative-paths/SKILL.md)  
 > **Reference Upstream Chunks:** [`../../reference/chunks/47794.19386b2538c55881.js`](../../reference/chunks/47794.19386b2538c55881.js), [`../../reference/chunks/79801.a0cbc95dac2cd2a3.js`](../../reference/chunks/79801.a0cbc95dac2cd2a3.js)
 
@@ -121,6 +121,8 @@ The official client purges trains absent for **15 seconds**. In contrast, `railm
 ---
 
 ### 3.2 Issue 2: Telemetry Drop Watchdog Is Too Aggressive
+
+> **Implementation Fix Plan:** [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md)
 
 #### Root Cause
 In [`tui/geo.py`](../../tui/geo.py#L1873-L1891):
@@ -246,9 +248,10 @@ In [`tui/renderer.py`](../../tui/renderer.py#L1847), the table prints `(pos.trai
 
 ```mermaid
 flowchart LR
-    A["Improvement 1: Adaptive Stale Pruning"] --> B["Improvement 2: Strict Freeze Diagnostics"]
-    B --> C["Improvement 3: Station Headway Demotion"]
-    C --> D["Improvement 4: Roster Disambiguation"]
+    A["Improvement 1: Adaptive Stale Pruning"] --> B["Improvement 2: Resilient Drop & Tunnel Deadbands"]
+    B --> C["Improvement 3: Strict Freeze Diagnostics"]
+    C --> D["Improvement 4: Station Headway Demotion"]
+    D --> E["Improvement 5: Roster Disambiguation"]
 ```
 
 ### 4.1 Improvement 1: Adaptive Stale Train Pruning
@@ -291,6 +294,15 @@ flowchart LR
 * **Action:** Update the Active Trains roster table in [`tui/renderer.py`](../../tui/renderer.py#L1847) to disambiguate duplicate train numbers.
 * **Mechanism:** If multiple trains share the same `train_number`, append the last 3 digits of `locomotive_number` or `id` (e.g. `2232·103` and `2232·108`).
 * **Benefit:** Operators immediately see that both records represent coupled Desiro trainsets rather than a display bug.
+
+### 4.5 Improvement 5: Resilient Telemetry Drop Watchdog & Mountain Tunnel Deadbands
+* **Action:** Elevate open-line drop threshold to 180s, inject GIS tunnel deadbands with transit time grace calculations, and prioritize station platform/siding dwell preemption.
+* **Plan:** Full engineering specification in [`../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](../plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md).
+* **Mechanism:**
+  - Introduce `SensorHealthState.TUNNEL_TRANSIT` (`TUN`, `is_alert=False`) with dynamic grace window $T_{\text{grace}} = \max(T_{\text{transit}} \times 1.35, 300\text{s})$.
+  - Preempt drop evaluation with expanded $600\text{m}$ terminal hub and $350\text{m}$ local siding dwell checks.
+  - Suppress audible terminal bell (`\a`) on expected tunnel and station dwell silence.
+* **Benefit:** Eliminates 100% of false drop alarms on Intercity trains transiting Kallidromo (9,038m), Othrys (7,026m), and Tempi tunnels, as well as trains idling at terminal platforms.
 
 ---
 

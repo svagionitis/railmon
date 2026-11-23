@@ -114,8 +114,8 @@ class TestSensorHealthRenderer(unittest.TestCase):
             store._trains["t3"].last_moved_time = now - 50.0
             store._trains["t3"].last_updated = now - 1.0
 
-            # t4 is dropped: last updated 150s ago
-            store._trains["t4"].last_updated = now - 150.0
+            # t4 is dropped: last updated 190s ago (exceeds 180s threshold)
+            store._trains["t4"].last_updated = now - 190.0
 
         snapshot = store.get_snapshot()
         win = MockCursesWindow(20, 50)
@@ -166,8 +166,8 @@ class TestSensorHealthRenderer(unittest.TestCase):
             store._trains["t-frz"].last_moved_time = now - 50.0
             store._trains["t-frz"].last_updated = now - 1.0
 
-            store._trains["t-drp1"].last_updated = now - 150.0
-            store._trains["t-drp2"].last_updated = now - 150.0
+            store._trains["t-drp1"].last_updated = now - 190.0
+            store._trains["t-drp2"].last_updated = now - 190.0
 
         snapshot = store.get_snapshot()
         win = MockCursesWindow(1, 100)
@@ -191,7 +191,7 @@ class TestSensorHealthRenderer(unittest.TestCase):
             store._trains["t-frz"].last_moved_time = now - 50.0
             store._trains["t-frz"].last_updated = now - 1.0
 
-            store._trains["t-drp"].last_updated = now - 150.0
+            store._trains["t-drp"].last_updated = now - 190.0
 
         snapshot = store.get_snapshot()
         win = MockCursesWindow(1, 100)

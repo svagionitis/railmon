@@ -104,6 +104,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p0-7-train-itinerary-schema-and-time-display-fix-plan.md`](./plans/fixes/p0/p0-7-train-itinerary-schema-and-time-display-fix-plan.md) | Timetable schema alignment, station name resolution & Athens timezone |
 | [`p0-8-tui-timetable-modal-scrolling-fix-plan.md`](./plans/fixes/p0/p0-8-tui-timetable-modal-scrolling-fix-plan.md) | Timetable modal window scrolling boundaries & page-down overflow |
 | [`p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md`](./plans/fixes/p0/p0-9-stale-train-pruning-and-screen-warning-clearance-fix-plan.md) | Stale train eviction (90s cutoff) & screen warning / conflict clearance |
+| [`p0-10-telemetry-drop-watchdog-resilience-fix-plan.md`](./plans/fixes/p0/p0-10-telemetry-drop-watchdog-resilience-fix-plan.md) | Telemetry drop watchdog resilience, tunnel deadbands & station layover preemption |
 
 #### P1 — High-Priority Plans (`plans/fixes/p1/`)
 

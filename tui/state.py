@@ -12,12 +12,14 @@ from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, T
 from train_tracker import TrainPosition
 from tui.geo import (
     DEFAULT_CORRIDOR_SPEED_RULES,
+    DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC,
     ConflictAlert,
     ConflictSeverity,
-    ConflictType,
     ConflictWatchdogConfig,
     CorridorSpeedRule,
     GeoPoint,
+    InfrastructureFeature,
+    InfrastructureType,
     NORTHERN_GREECE_PRESET,
     OverspeedSeverity,
     PATHE_PRESET,
@@ -474,6 +476,21 @@ class TrainStateStore:
         except (OSError, ValueError, KeyError, TypeError):
             self._stations = []
 
+        # Tunnel infrastructure and drop threshold for P0-10 Resilient Drop Watchdog
+        self._telemetry_drop_threshold_sec: float = DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC
+        self._tunnels: List[InfrastructureFeature] = []
+        try:
+            from tui.mock_engine import load_infrastructure
+
+            infra = load_infrastructure()
+            self._tunnels = [
+                f
+                for f in infra.values()
+                if getattr(f, "feature_type", None) == InfrastructureType.TUNNEL
+            ]
+        except (OSError, ValueError, KeyError, TypeError):
+            self._tunnels = []
+
         # Corridor headway & opposing conflict watchdog (F-5.1)
         self._conflict_config: ConflictWatchdogConfig = ConflictWatchdogConfig()
         self._tracks_data: Optional[Dict[str, Any]] = None
@@ -516,7 +533,9 @@ class TrainStateStore:
                 last_moved_time=rec.last_moved_time,
                 station_dwell_start=rec.station_dwell_start,
                 stations=self._stations,
+                tunnels=self._tunnels,
                 now=ts,
+                telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
             )
             rec.last_moved_pt = new_moved_pt
             rec.last_moved_time = new_moved_time
@@ -531,7 +550,9 @@ class TrainStateStore:
                 last_moved_time=ts,
                 station_dwell_start=None,
                 stations=self._stations,
+                tunnels=self._tunnels,
                 now=ts,
+                telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
             )
             record = TrainRecord(
                 position=pos,
@@ -821,6 +842,28 @@ class TrainStateStore:
             self._stations = list(stations)
             self._version += 1
 
+    def set_tunnels(self, tunnels: Sequence[InfrastructureFeature]) -> None:
+        """Set candidate railway tunnel GIS features for sensor health deadband calculation."""
+        with self._lock:
+            self._tunnels = list(tunnels)
+            self._version += 1
+
+    def get_tunnels(self) -> Sequence[InfrastructureFeature]:
+        """Get candidate railway tunnel GIS features."""
+        with self._lock:
+            return list(self._tunnels)
+
+    def set_telemetry_drop_threshold(self, threshold_sec: float) -> None:
+        """Set silence duration threshold for complete telemetry drop classification."""
+        with self._lock:
+            self._telemetry_drop_threshold_sec = max(10.0, float(threshold_sec))
+            self._version += 1
+
+    def get_telemetry_drop_threshold(self) -> float:
+        """Get silence duration threshold for complete telemetry drop classification."""
+        with self._lock:
+            return self._telemetry_drop_threshold_sec
+
     def evaluate_all_sensor_health(self, now: Optional[float] = None) -> None:
         """Run temporal and kinematic health evaluation across all tracked trains."""
         with self._lock:
@@ -837,7 +880,9 @@ class TrainStateStore:
                     last_moved_time=rec.last_moved_time,
                     station_dwell_start=rec.station_dwell_start,
                     stations=self._stations,
+                    tunnels=self._tunnels,
                     now=ref_now,
+                    telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
                 )
                 rec.last_moved_pt = new_moved_pt
                 rec.last_moved_time = new_moved_time
@@ -852,17 +897,18 @@ class TrainStateStore:
     # UI State & Cursor Navigation (Called by UI Thread)
     # ------------------------------------------------------------------
 
-    def get_snapshot(self) -> StateSnapshot:
+    def get_snapshot(self, now: Optional[float] = None) -> StateSnapshot:
         """
         Produce a frozen, consistent point-in-time snapshot for UI rendering.
         Operates with minimal lock hold duration.
         """
         with self._lock:
-            ref_now = (
-                self._replay_virtual_time
-                if self._is_replay and self._replay_virtual_time is not None
-                else time.time()
-            )
+            if now is not None:
+                ref_now = float(now)
+            elif self._is_replay and self._replay_virtual_time is not None:
+                ref_now = self._replay_virtual_time
+            else:
+                ref_now = time.time()
             for rec in self._trains.values():
                 pt = GeoPoint(lat=rec.position.lat, lng=rec.position.lng)
                 health, new_moved_pt, new_moved_time, new_dwell_start = evaluate_sensor_health(
@@ -873,7 +919,9 @@ class TrainStateStore:
                     last_moved_time=rec.last_moved_time,
                     station_dwell_start=rec.station_dwell_start,
                     stations=self._stations,
+                    tunnels=self._tunnels,
                     now=ref_now,
+                    telemetry_drop_threshold_sec=self._telemetry_drop_threshold_sec,
                 )
                 rec.last_moved_pt = new_moved_pt
                 rec.last_moved_time = new_moved_time
