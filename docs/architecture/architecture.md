@@ -608,7 +608,43 @@ The `exporter/` package provides operational metrics export conforming to **Prom
 
 ---
 
-## 11. Implementation References
+## 11. GTFS-Realtime (GTFS-RT v2.0) Protocol Buffer Feed Exporter
+
+The [`gtfs_rt/`](../../gtfs_rt/__init__.py) package translates Hellenic Railways live SSE snapshots, offline demo runs, and SQLite historical recordings into standard **GTFS-Realtime v2.0** binary Protocol Buffers (`application/x-protobuf`) and canonical ProtoJSON (`application/json`) using 100% Python standard library primitives.
+
+### 11.1 GTFS-RT Subsystem Architecture
+
+```mermaid
+flowchart LR
+    STORE["TrainStateStore / SQLite WAL"] --> MAP["GtfsRtMapper (gtfs_rt/mapper.py)"]
+    MAP --> DTO["GTFS-RT v2.0 DTOs (gtfs_rt/models.py)"]
+    DTO --> WIRE["Proto2 Wire Codec (gtfs_rt/wire.py)"]
+    WIRE --> FILE["Atomic File Exporter (gtfs_rt/exporter.py)"]
+    WIRE --> HTTP["GtfsRtServer :8085 (gtfs_rt/server.py)"]
+    WIRE --> WEB["WebMapServer :8080 (/gtfs-rt/*)"]
+```
+
+```text
++-----------------------------------------------------------------------------------+
+|                    GTFS-REALTIME v2.0 EXPORTER SUBSYSTEM                          |
++-----------------------------------------------------------------------------------+
+  [ TrainStateStore / SQLite WAL ] ---> [ GtfsRtMapper (km/h->m/s, min->sec, EET) ]
+                                                    |
+                                                    v
+                                        [ GTFS-RT v2.0 DTOs & Proto2 Wire Codec ]
+                                                    |
+               +------------------------------------+-------------------------------+
+               |                                    |                               |
+               v                                    v                               v
+  +------------------------+         +---------------------------+     +-----------------------+
+  | Atomic File / --watch  |         | GtfsRtServer (:8085)      |     | WebMapServer (:8080)  |
+  | feed.pb / --out-dir    |         | /gtfs-rt/*.pb & *.json    |     | /gtfs-rt/*.pb & .json |
+  +------------------------+         +---------------------------+     +-----------------------+
+```
+
+---
+
+## 12. Implementation References
 
 * **Python Source Code:** [`train_tracker.py`](../../train_tracker.py)
 * **TUI Package Entry Point:** [`tui/__init__.py`](../../tui/__init__.py)

@@ -34,7 +34,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
 | **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/db.py`](../../storage/db.py) |
 | **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | **Implemented** | [`exporter/server.py`](../../exporter/server.py), [`exporter/collector.py`](../../exporter/collector.py), [`exporter/formatter.py`](../../exporter/formatter.py), [`exporter/models.py`](../../exporter/models.py), [`train_tracker.py`](../../train_tracker.py) |
-| **Tier 8 (DevOps)** | **F-8.3** | GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter | `railmon export --gtfs-rt` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py) |
+| **Tier 8 (DevOps)** | **F-8.3** | GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter | `railmon export --gtfs-rt` | **Implemented** | [`gtfs_rt/wire.py`](../../gtfs_rt/wire.py), [`gtfs_rt/models.py`](../../gtfs_rt/models.py), [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py), [`gtfs_rt/exporter.py`](../../gtfs_rt/exporter.py), [`gtfs_rt/server.py`](../../gtfs_rt/server.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 9 (Analytics)** | **F-9.1** | Corridor Bottleneck & Station Dwell Delay Heatmaps | `railmon history bottlenecks` | Planned | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
 | **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* | Planned | [`storage/repository.py`](../../storage/repository.py), [`tui/renderer.py`](../../tui/renderer.py) |
 
@@ -970,10 +970,33 @@ groups:
 
 ---
 
-### F-8.3: GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter — *Planned*
+### F-8.3: GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-8-3-gtfs-realtime-protocol-buffer-feed-exporter-plan.md`](../plans/features/f-8-3-gtfs-realtime-protocol-buffer-feed-exporter-plan.md)
 
 #### Overview
-Translates live `railway.gov.gr` train positions and delay packets into the standard **General Transit Feed Specification Realtime (GTFS-RT)** format (`FeedMessage` with `VehiclePositions` and `TripUpdates`). Allows third-party transit apps (Transit App, OpenTripPlanner, Google Maps) to consume real-time Greek rail telemetry directly.
+Translates live `railway.gov.gr` SSE train positions, offline `--demo` simulations, and historical SQLite WAL telemetry snapshots into the standard **General Transit Feed Specification Realtime (GTFS-RT v2.0)** Protocol Buffers binary wire format (`FeedMessage` with `VehiclePositions`, `TripUpdates`, and bilingual `el`/`en` `Service Alerts`) plus canonical ProtoJSON. Built with **100% Python standard library purity** (zero external `protobuf` or `gtfs-realtime-bindings` runtime dependencies).
+
+#### Key Capabilities
+- **Native Proto2 Wire Codec ([`gtfs_rt/wire.py`](../../gtfs_rt/wire.py)):** Zero-dependency iterative varint (including 10-byte two's-complement negative `int32` early-train delays), IEEE-754 `<f`/`<d`, and length-delimited encoder/decoder with `math.isfinite()` bounds checks.
+- **Hellenic Railways Domain Translation ([`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py)):** Automatic unit conversions (`km/h -> m/s`, `min -> sec`), `Europe/Athens` local service dates, coupled EMU consist deduplication (`vp:<id>` vs `tu:<trip_id>`), station proximity `VehicleStopStatus` inference, opt-in bounded TTL schedule enrichment (`--enrich-schedules`), and bilingual (`el`/`en`) delay & watchdog conflict alerts.
+- **Multi-Mode Export & Serving:** One-shot atomic `.pb`/`.json` snapshots (`--out`, `--out-dir`), historical SQLite point-in-time reconstruction (`--from-db [--at]`), continuous atomic file sync (`--watch`), zero-dependency `.pb` decoding (`--inspect`), standalone HTTP server (`--serve` on port `8085` with `ETag`/`304`, `gzip`, CORS), and cross-exposed `/gtfs-rt/*` endpoints inside `railmon serve` (port `8080`).
+
+#### CLI Syntax & Usage
+```bash
+# Export one-shot binary GTFS-RT snapshot from synthetic demo or live feed
+railmon export --gtfs-rt --demo --out hellenic_rail.pb
+
+# Decode any .pb feed to ProtoJSON without external protoc tools
+railmon export --gtfs-rt --inspect hellenic_rail.pb
+
+# Export historical point-in-time GTFS-RT feed from SQLite WAL recording
+railmon export --gtfs-rt --from-db railway_history.db --at 2026-11-23T18:00:00Z --out hist.pb
+
+# Launch standalone GTFS-RT v2.0 HTTP feed server (default port 8085)
+railmon export --gtfs-rt --serve --demo --port 8085
+railmon gtfs-rt --serve --port 8085
+```
 
 ---
 
@@ -1055,6 +1078,7 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 | `railmon watch <train_num>` | **Tier 6** | Background watcher firing notifications on delay or proximity |
 | `railmon serve [--port 8080]` | **Tier 8** | Start zero-dependency local web map and SSE server |
 | `railmon metrics [--port 9100]` | **Tier 8** | Expose operational Prometheus / OpenMetrics endpoint |
+| `railmon export --gtfs-rt [--serve]` | **Tier 8** | Export or serve GTFS-Realtime v2.0 Protocol Buffer feeds |
 | `railmon history bottlenecks` | **Tier 9** | Output corridor dwell and delay bottleneck analysis |
 
 ---

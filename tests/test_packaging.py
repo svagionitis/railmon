@@ -120,7 +120,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "uuid",
             "webbrowser",
         }
-        allowed_internal = {"server", "storage", "train_tracker", "tui", "exporter"}
+        allowed_internal = {"server", "storage", "train_tracker", "tui", "exporter", "gtfs_rt"}
         allowed = allowed_stdlib | allowed_internal
 
         for py_file in server_dir.glob("*.py"):
@@ -190,6 +190,76 @@ class TestPackagingAndVersioning(unittest.TestCase):
         allowed = allowed_stdlib | allowed_internal
 
         for py_file in exporter_dir.glob("*.py"):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_mod = alias.name.split(".")[0]
+                        self.assertIn(
+                            root_mod,
+                            allowed,
+                            f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
+                        )
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        root_mod = node.module.split(".")[0]
+                        self.assertIn(
+                            root_mod,
+                            allowed,
+                            f"Prohibited third-party PyPI import '{root_mod}' in {py_file.name}",
+                        )
+
+    def test_gtfs_rt_package_configured_and_importable(self):
+        """TC-PKG-11: gtfs_rt package is registered in pyproject.toml and importable."""
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        content = pyproject_path.read_text(encoding="utf-8")
+        self.assertIn('"gtfs_rt"', content)
+
+        import gtfs_rt
+
+        self.assertEqual(gtfs_rt.__version__, train_tracker.__version__)
+        self.assertEqual(gtfs_rt.__author__, train_tracker.__author__)
+        self.assertTrue(hasattr(gtfs_rt, "FeedMessage"))
+        self.assertTrue(hasattr(gtfs_rt, "GtfsRtMapper"))
+        self.assertTrue(hasattr(gtfs_rt, "GtfsRtServer"))
+        self.assertTrue(hasattr(gtfs_rt, "GtfsRtConfig"))
+
+    def test_gtfs_rt_runtime_zero_pypi_dependencies(self):
+        """TC-PKG-12: gtfs_rt package imports exclusively from Python stdlib and internal packages."""
+        import ast
+
+        gtfs_dir = REPO_ROOT / "gtfs_rt"
+        allowed_stdlib = {
+            "collections",
+            "dataclasses",
+            "datetime",
+            "enum",
+            "errno",
+            "gzip",
+            "http",
+            "json",
+            "logging",
+            "math",
+            "os",
+            "pathlib",
+            "re",
+            "signal",
+            "socket",
+            "socketserver",
+            "struct",
+            "sys",
+            "threading",
+            "time",
+            "types",
+            "typing",
+            "unicodedata",
+            "urllib",
+            "zoneinfo",
+        }
+        allowed_internal = {"gtfs_rt", "exporter", "server", "storage", "train_tracker", "tui"}
+        allowed = allowed_stdlib | allowed_internal
+
+        for py_file in gtfs_dir.glob("*.py"):
             tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

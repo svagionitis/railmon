@@ -1922,7 +1922,190 @@ Examples:
         help="Scrape timeout deadline in seconds (default: 10.0s).",
     )
 
+    # 7. export / gtfs-rt (F-8.3: GTFS-Realtime v2.0 Protocol Buffer Feed Exporter)
+    _add_export_subparser(subparsers)
+
     return parser
+
+
+def _add_export_subparser(subparsers: Any) -> None:
+    """Register the `export` / `gtfs-rt` CLI subcommand parser (F-8.3)."""
+    p_export = subparsers.add_parser(
+        "export",
+        aliases=["gtfs-rt", "gtfsrt"],
+        help="Export live or historical telemetry to GTFS-Realtime (GTFS-RT v2.0) Protocol Buffers.",
+        description=(
+            "Translate Hellenic Railways live SSE telemetry, synthetic demo runs, or SQLite "
+            "recordings into standard GTFS-Realtime v2.0 Protocol Buffers (.pb) or ProtoJSON "
+            "feeds (VehiclePositions, TripUpdates, Service Alerts) with zero third-party deps."
+        ),
+    )
+    p_export.add_argument(
+        "--gtfs-rt",
+        action="store_true",
+        default=False,
+        help="Enable GTFS-Realtime v2.0 Protocol Buffer feed export.",
+    )
+    p_export.add_argument(
+        "--feed",
+        choices=["combined", "vehicles", "trips", "alerts"],
+        default="combined",
+        help="GTFS-RT entity scope to emit (default: combined).",
+    )
+    p_export.add_argument(
+        "--format",
+        dest="output_format",
+        choices=["pb", "json"],
+        default="pb",
+        help="Output format: binary protobuf ('pb') or ProtoJSON ('json', default: pb).",
+    )
+    p_export.add_argument(
+        "--out",
+        "-o",
+        type=str,
+        default=None,
+        help="Destination file path (use '-' to emit raw binary or JSON to stdout).",
+    )
+    p_export.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Directory for writing split feeds (feed, vehicle_positions, trip_updates, alerts).",
+    )
+    p_export.add_argument(
+        "--watch",
+        action="store_true",
+        default=False,
+        help="Continuously refresh --out or --out-dir files every --interval seconds.",
+    )
+    p_export.add_argument(
+        "--interval",
+        type=float,
+        default=10.0,
+        help="Refresh cadence in seconds for --watch mode (default: 10.0s).",
+    )
+    p_export.add_argument(
+        "--serve",
+        action="store_true",
+        default=False,
+        help="Launch embedded multi-threaded HTTP server exposing /gtfs-rt/*.pb endpoints.",
+    )
+    p_export.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Network bind interface IP for --serve (default: 127.0.0.1).",
+    )
+    p_export.add_argument(
+        "--port",
+        type=int,
+        default=8085,
+        help="TCP port for --serve GTFS-RT HTTP daemon (default: 8085).",
+    )
+    p_export.add_argument(
+        "--from-db",
+        type=str,
+        default=None,
+        help="Reconstruct GTFS-RT snapshot from a recorded SQLite WAL database.",
+    )
+    p_export.add_argument(
+        "--at",
+        type=str,
+        default=None,
+        help="Optional ISO-8601 UTC timestamp for --from-db point-in-time snapshot.",
+    )
+    p_export.add_argument(
+        "--window-sec",
+        type=int,
+        default=120,
+        help="Lookback window in seconds for --from-db snapshots (default: 120s).",
+    )
+    p_export.add_argument(
+        "--inspect",
+        type=str,
+        default=None,
+        help="Decode an existing binary GTFS-RT .pb file and print ProtoJSON summary.",
+    )
+    p_export.add_argument(
+        "--demo",
+        "--mock",
+        action="store_true",
+        default=False,
+        help="Run using offline synthetic Greek rail telemetry simulation.",
+    )
+    p_export.add_argument(
+        "--corridor",
+        "-c",
+        type=str,
+        default=None,
+        help="Filter exported entities to a corridor (e.g. PATHE, PROASTIAKOS).",
+    )
+    p_export.add_argument(
+        "--enrich-schedules",
+        action="store_true",
+        default=False,
+        help="Query railway.gov.gr timetable REST API (TTL-cached) for full stop predictions.",
+    )
+    p_export.add_argument(
+        "--include-freight",
+        action="store_true",
+        default=False,
+        help="Include freight/maintenance trains in exported GTFS-RT feed.",
+    )
+    p_export.add_argument(
+        "--include-unassigned",
+        action="store_true",
+        default=False,
+        help="Include unassigned depot/shunting locomotives in exported GTFS-RT feed.",
+    )
+    p_export.add_argument(
+        "--no-alerts",
+        action="store_true",
+        default=False,
+        help="Disable GTFS-RT Service Alert entity synthesis.",
+    )
+    p_export.add_argument(
+        "--delay-alert-min",
+        type=int,
+        default=15,
+        help="Delay threshold in minutes triggering SIGNIFICANT_DELAYS alerts (default: 15).",
+    )
+    p_export.add_argument(
+        "--stop-id-field",
+        choices=["id", "code"],
+        default="id",
+        help="Station attribute emitted as GTFS stop_id ('id' or 'code', default: id).",
+    )
+    p_export.add_argument(
+        "--agency-id",
+        type=str,
+        default="OSE",
+        help="GTFS agency_id value for service alert selectors (default: OSE).",
+    )
+    p_export.add_argument(
+        "--feed-version",
+        type=str,
+        default=None,
+        help="Optional FeedHeader.feed_version string aligned with static GTFS.",
+    )
+    p_export.add_argument(
+        "--cors",
+        action="store_true",
+        default=False,
+        help="Enable permissive CORS headers on --serve endpoints.",
+    )
+    p_export.add_argument(
+        "--no-gzip",
+        action="store_true",
+        default=False,
+        help="Disable transparent Gzip compression in --serve mode.",
+    )
+    p_export.add_argument(
+        "--reconnect-delay",
+        type=float,
+        default=3.0,
+        help="Base reconnection delay in seconds for live SSE upstream stream (default: 3.0s).",
+    )
 
 
 def is_tty_supported() -> bool:
@@ -3581,6 +3764,8 @@ def _print_serve_banner(
     print(f"    -> Dashboard UI : {url}")
     print(f"    -> Train States : {url}api/trains")
     print(f"    -> Live Stream  : {url}api/stream")
+    print(f"    -> Metrics      : {url}metrics")
+    print(f"    -> GTFS-RT Feed : {url}gtfs-rt/feed.pb")
     print(f"    -> System Health: {url}api/health")
     print("\n  Press Ctrl+C to stop.")
     print("=" * 78 + "\n", flush=True)
@@ -3911,6 +4096,361 @@ def run_metrics_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_gtfs_config(args: argparse.Namespace) -> Any:
+    """Construct validated GtfsRtConfig from parsed CLI arguments."""
+    from gtfs_rt.models import GtfsRtConfig, StopIdField
+
+    stop_field = StopIdField(str(getattr(args, "stop_id_field", "id")).lower())
+    return GtfsRtConfig(
+        agency_id=str(getattr(args, "agency_id", "OSE") or "OSE").strip(),
+        feed_version=getattr(args, "feed_version", None),
+        include_unassigned=bool(getattr(args, "include_unassigned", False)),
+        include_freight=bool(getattr(args, "include_freight", False)),
+        include_alerts=not bool(getattr(args, "no_alerts", False)),
+        delay_alert_min=int(getattr(args, "delay_alert_min", 15)),
+        stop_id_field=stop_field,
+        enrich_schedules=bool(getattr(args, "enrich_schedules", False)),
+        corridor_filter=getattr(args, "corridor", None),
+        host=str(getattr(args, "host", "127.0.0.1") or "127.0.0.1").strip(),
+        port=int(getattr(args, "port", 8085)),
+        refresh_interval_sec=float(getattr(args, "interval", 10.0)),
+        gzip_compression=not bool(getattr(args, "no_gzip", False)),
+        cors_enabled=bool(getattr(args, "cors", False)),
+        demo_mode=bool(getattr(args, "demo", False) or getattr(args, "mock", False)),
+    )
+
+
+def _make_sched_fetcher(enrich: bool, demo: bool) -> Any:
+    """Create optional schedule fetcher callback for GTFS-RT TripUpdate enrichment."""
+    if not enrich:
+        return None
+    if demo:
+        from tui.mock_engine import generate_mock_train_schedule
+
+        def _fetch_mock(_sid: Optional[str], train_num: str) -> Optional[Dict[str, Any]]:
+            return generate_mock_train_schedule(train_num)
+
+        return _fetch_mock
+
+    client = RailwayGovClient()
+
+    def _fetch_live(sid: Optional[str], train_num: str) -> Optional[Dict[str, Any]]:
+        if sid:
+            res = client.get_schedule_by_id(sid)
+            if res:
+                return res
+        res_num = client.get_schedule_by_train_number(train_num)
+        return res_num if res_num else None
+
+    return _fetch_live
+
+
+def _emit_feed_output(
+    msg: Any,
+    mapper: Any,
+    args: argparse.Namespace,
+    snapshot: Optional[Any] = None,
+    positions: Optional[Sequence[TrainPosition]] = None,
+    schedules: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> int:
+    """Write GTFS-RT feed to --out-dir, --out, or stdout with TTY binary protection."""
+    from gtfs_rt.exporter import export_feed_dir, export_feed_file, serialize_feed
+    from gtfs_rt.models import OutputFormat
+
+    fmt_raw = str(getattr(args, "output_format", "pb")).lower()
+    out_path = getattr(args, "out", None)
+    out_dir = getattr(args, "out_dir", None)
+    if fmt_raw == "pb" and out_path and out_path.lower().endswith(".json"):
+        fmt = OutputFormat.JSON
+    else:
+        fmt = OutputFormat(fmt_raw)
+
+    if out_dir:
+        written = export_feed_dir(
+            mapper=mapper,
+            out_dir=out_dir,
+            fmt=fmt,
+            snapshot=snapshot,
+            positions=positions,
+            schedules=schedules,
+            now=float(msg.header.timestamp) if msg.header.timestamp else None,
+        )
+        for path in written:
+            print(f"[OK] Exported GTFS-RT feed: {path}", file=sys.stderr)
+        return 0
+
+    if out_path and out_path != "-":
+        saved = export_feed_file(msg, out_path, fmt=fmt)
+        print(
+            f"[OK] Exported {len(msg.entity)} GTFS-RT entities ({fmt.value}) -> {saved}",
+            file=sys.stderr,
+        )
+        return 0
+
+    payload = serialize_feed(msg, fmt)
+    if fmt == OutputFormat.PROTOBUF and out_path != "-" and is_tty_supported():
+        print(
+            "[ERROR] Refusing to write raw binary protobuf to an interactive terminal.\n"
+            "Specify '--out feed.pb', '--out -' (to force binary stdout), or '--format json'.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if fmt == OutputFormat.JSON:
+        sys.stdout.write(payload.decode("utf-8") + "\n")
+        sys.stdout.flush()
+    else:
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+    return 0
+
+
+def _print_gtfs_banner(server: Any, source: TelemetrySource) -> None:
+    """Print startup banner for standalone GTFS-Realtime HTTP server daemon."""
+    url = server.server_url
+    print("\n" + "=" * 78)
+    print(f"  RAILMON GTFS-REALTIME v2.0 FEED SERVER v{__version__} (Hellenic Railways)")
+    print("=" * 78)
+    print(f"  [INFO] Telemetry Mode  : {source.value.upper()}")
+    print(f"  [INFO] Bound Interface : {url}")
+    print(f"  [INFO] Agency ID       : {server.config.agency_id}")
+    print("  [INFO] Endpoints       :")
+    print(f"    -> Combined Feed     : {url}gtfs-rt/feed.pb")
+    print(f"    -> VehiclePositions  : {url}gtfs-rt/vehicle-positions.pb")
+    print(f"    -> TripUpdates       : {url}gtfs-rt/trip-updates.pb")
+    print(f"    -> Service Alerts    : {url}gtfs-rt/alerts.pb")
+    print(f"    -> ProtoJSON Debug   : {url}gtfs-rt/feed.json")
+    print(f"    -> Health Probe      : {url}health")
+    print("\n  Press Ctrl+C to stop.")
+    print("=" * 78 + "\n", flush=True)
+
+
+def _export_inspect_mode(inspect_path: str) -> int:
+    """Decode an existing .pb file and write ProtoJSON summary to stdout."""
+    from gtfs_rt.exporter import inspect_pb_file
+    from gtfs_rt.wire import WireDecodeError
+
+    try:
+        report = inspect_pb_file(inspect_path)
+    except (FileNotFoundError, ValueError, WireDecodeError, OSError) as exc:
+        print(f"[ERROR] Failed to inspect GTFS-RT file '{inspect_path}': {exc}", file=sys.stderr)
+        return 1
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+def _export_db_mode(args: argparse.Namespace, mapper: Any, feed_kind: Any) -> int:
+    """Export a historical GTFS-RT feed snapshot from SQLite WAL storage."""
+    from gtfs_rt.exporter import export_from_db
+
+    db_path = str(getattr(args, "from_db", "") or "").strip()
+    at_time = getattr(args, "at", None)
+    window_sec = int(getattr(args, "window_sec", 120))
+    try:
+        msg = export_from_db(
+            db_path=db_path,
+            mapper=mapper,
+            feed_kind=feed_kind,
+            at_time=at_time,
+            window_sec=window_sec,
+        )
+        return _emit_feed_output(msg, mapper, args)
+    except (FileNotFoundError, ValueError, PermissionError, OSError) as exc:
+        print(f"[ERROR] Historical GTFS-RT export failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _export_serve_mode(args: argparse.Namespace, config: Any, mapper: Any) -> int:
+    """Run standalone multi-threaded GTFS-RT HTTP feed server daemon."""
+    import errno
+    from gtfs_rt.server import GtfsRtServer
+    from tui.mock_engine import MockTelemetryEngine
+    from tui.state import TrainStateStore
+    from tui.stream_worker import StreamWorker
+
+    if config.host in ("0.0.0.0", "::"):
+        print(
+            "\n[SECURITY NOTICE] GTFS-RT HTTP server is binding to all interfaces (0.0.0.0).\n",
+            file=sys.stderr,
+        )
+
+    source = TelemetrySource.DEMO if config.demo_mode else TelemetrySource.LIVE
+    store = TrainStateStore()
+    if config.demo_mode:
+        worker = StreamWorker(store=store, mock_engine=MockTelemetryEngine())
+    else:
+        worker = StreamWorker(
+            store=store,
+            client=RailwayGovClient(),
+            base_backoff_sec=float(getattr(args, "reconnect_delay", 3.0)),
+        )
+    worker.start()
+
+    try:
+        server = GtfsRtServer(
+            server_address=(config.host, config.port),
+            store=store,
+            mapper=mapper,
+            config=config,
+        )
+    except OSError as exc:
+        worker.stop()
+        if exc.errno == errno.EADDRINUSE:
+            print(
+                f"\n[ERROR] Port {config.port} is already in use on '{config.host}'. "
+                f"Specify another port via '--port <number>'.\n",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"\n[ERROR] Failed to start GTFS-RT server: {exc}\n", file=sys.stderr)
+        return 1
+
+    _print_gtfs_banner(server, source)
+    with install_signal_handlers() as stop_event:
+        server.start(background=True)
+        try:
+            while not stop_event.is_set():
+                stop_event.wait(timeout=0.5)
+        except KeyboardInterrupt:
+            stop_event.set()
+        finally:
+            server.stop()
+            worker.stop()
+
+    print("\n[INFO] GTFS-RT HTTP server shut down cleanly.")
+    return 0
+
+
+def _export_watch_mode(
+    args: argparse.Namespace,
+    config: Any,
+    mapper: Any,
+    feed_kind: Any,
+) -> int:
+    """Continuously write atomic GTFS-RT files on a fixed interval."""
+    from tui.mock_engine import MockTelemetryEngine
+    from tui.state import TrainStateStore
+    from tui.stream_worker import StreamWorker
+
+    if not getattr(args, "out", None) and not getattr(args, "out_dir", None):
+        print("[ERROR] --watch mode requires either --out <file> or --out-dir <dir>.", file=sys.stderr)
+        return 2
+
+    store = TrainStateStore()
+    if config.demo_mode:
+        worker = StreamWorker(store=store, mock_engine=MockTelemetryEngine())
+    else:
+        worker = StreamWorker(
+            store=store,
+            client=RailwayGovClient(),
+            base_backoff_sec=float(getattr(args, "reconnect_delay", 3.0)),
+        )
+    worker.start()
+
+    with install_signal_handlers() as stop_event:
+        try:
+            stop_event.wait(timeout=min(1.0, config.refresh_interval_sec))
+            while not stop_event.is_set():
+                snapshot = store.get_snapshot()
+                msg = mapper.build_feed(snapshot, feed_kind=feed_kind)
+                rc = _emit_feed_output(msg, mapper, args, snapshot=snapshot)
+                if rc != 0:
+                    return rc
+                stop_event.wait(timeout=config.refresh_interval_sec)
+        except KeyboardInterrupt:
+            stop_event.set()
+        except (ValueError, PermissionError, OSError) as exc:
+            print(f"[ERROR] GTFS-RT watch export failed: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            worker.stop()
+    return 0
+
+
+def _export_snapshot_mode(
+    args: argparse.Namespace,
+    config: Any,
+    mapper: Any,
+    feed_kind: Any,
+) -> int:
+    """Capture a single live or demo telemetry batch and export GTFS-RT feed."""
+    if config.demo_mode:
+        from tui.mock_engine import MockTelemetryEngine
+
+        positions = MockTelemetryEngine().step(1.0)
+        msg = mapper.build_from_positions(positions, feed_kind=feed_kind)
+        try:
+            return _emit_feed_output(msg, mapper, args, positions=positions)
+        except (ValueError, PermissionError, OSError) as exc:
+            print(f"[ERROR] GTFS-RT snapshot export failed: {exc}", file=sys.stderr)
+            return 1
+
+    stop_event = threading.Event()
+    client = RailwayGovClient()
+    positions_live: List[TrainPosition] = []
+    try:
+        for batch in client.stream_train_positions(
+            reconnect_delay=0.0,
+            stop_event=stop_event,
+            timeout=15.0,
+        ):
+            positions_live = batch
+            break
+    except (RailwayAPIError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"[ERROR] Failed to capture live SSE telemetry batch: {exc}", file=sys.stderr)
+        return 1
+
+    msg = mapper.build_from_positions(positions_live, feed_kind=feed_kind)
+    try:
+        return _emit_feed_output(msg, mapper, args, positions=positions_live)
+    except (ValueError, PermissionError, OSError) as exc:
+        print(f"[ERROR] GTFS-RT snapshot export failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_export_mode(args: argparse.Namespace) -> int:
+    """Execute GTFS-Realtime v2.0 Protocol Buffer feed exporter (F-8.3)."""
+    from gtfs_rt.mapper import GtfsRtMapper, ScheduleCache
+    from gtfs_rt.models import FeedKind
+
+    mode_name = str(getattr(args, "mode", "export") or "export").lower()
+    gtfs_flag = bool(getattr(args, "gtfs_rt", False)) or mode_name in ("gtfs-rt", "gtfsrt")
+    if not gtfs_flag:
+        print(
+            "[ERROR] Please specify an export format flag, e.g.:\n"
+            "  railmon export --gtfs-rt --demo --out feed.pb\n"
+            "  railmon export --gtfs-rt --serve --port 8085",
+            file=sys.stderr,
+        )
+        return 2
+
+    inspect_path = getattr(args, "inspect", None)
+    if inspect_path:
+        return _export_inspect_mode(str(inspect_path))
+
+    try:
+        config = _build_gtfs_config(args)
+    except ValueError as exc:
+        print(f"[ERROR] Invalid GTFS-RT configuration: {exc}", file=sys.stderr)
+        return 2
+
+    feed_kind = FeedKind(str(getattr(args, "feed", "combined")).lower())
+    fetcher = _make_sched_fetcher(config.enrich_schedules, config.demo_mode)
+    mapper = GtfsRtMapper(
+        config=config,
+        schedule_cache=ScheduleCache(fetcher=fetcher),
+    )
+
+    if getattr(args, "from_db", None):
+        return _export_db_mode(args, mapper, feed_kind)
+    if getattr(args, "serve", False):
+        return _export_serve_mode(args, config, mapper)
+    if getattr(args, "watch", False):
+        return _export_watch_mode(args, config, mapper, feed_kind)
+    return _export_snapshot_mode(args, config, mapper, feed_kind)
+
+
 def _dispatch_subcommand_mode(args: argparse.Namespace) -> Optional[int]:
     """Dispatch dedicated CLI subcommands if matched, or return None."""
     mode = getattr(args, "mode", None)
@@ -3919,6 +4459,9 @@ def _dispatch_subcommand_mode(args: argparse.Namespace) -> Optional[int]:
 
     if mode in ("metrics", "exporter", "prometheus"):
         return run_metrics_mode(args)
+
+    if mode in ("export", "gtfs-rt", "gtfsrt"):
+        return run_export_mode(args)
 
     if mode in ("conflicts", "conflict", "watchdog_conflicts"):
         return run_conflicts_mode(args)

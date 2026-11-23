@@ -77,6 +77,12 @@ class WebMapServer(ThreadingHTTPServer):
         )
         self.metric_registry.register(self.process_collector)
 
+        # Initialize embedded GTFS-Realtime v2.0 Feed Exporter (F-8.3)
+        from gtfs_rt.mapper import FeedCache, GtfsRtMapper
+
+        self.gtfs_mapper = GtfsRtMapper()
+        self.gtfs_cache = FeedCache(self.gtfs_mapper)
+
         try:
             super().__init__(server_address, WebMapRequestHandler)
         except OSError as exc:

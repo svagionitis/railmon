@@ -9,8 +9,11 @@ import socket
 import time
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, Dict, List
+import urllib.parse
 
 from exporter.formatter import MetricsFormatter, negotiate_metrics_format
+from gtfs_rt.models import GTFS_RT_VERSION, OutputFormat
+from gtfs_rt.server import etag_matches, resolve_gtfs_route
 from server.assets import get_geojson_asset, get_spa_html
 
 if TYPE_CHECKING:
@@ -101,6 +104,8 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
             self._handle_health(is_head=is_head)
         elif raw_path in ("/metrics", "/api/metrics"):
             self._handle_metrics(is_head=is_head)
+        elif raw_path.startswith("/gtfs-rt/"):
+            self._handle_gtfs_rt(is_head=is_head)
         elif raw_path.startswith("/api/history/train/"):
             train_id = raw_path.split("/")[-1]
             self._handle_train_history(train_id, is_head=is_head)
@@ -295,6 +300,65 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         if proc is not None:
             proc.record_scrape(duration, endpoint="/metrics", status=200)
 
+        if not is_head:
+            self.wfile.write(body)
+
+    def _handle_gtfs_rt(self, is_head: bool = False) -> None:
+        """Serve GTFS-Realtime v2.0 protobuf or ProtoJSON feeds on /gtfs-rt/*."""
+        gtfs_cache = getattr(self.server, "gtfs_cache", None)
+        if gtfs_cache is None:
+            self._send_json_error(503, "GTFS-RT exporter not initialized on web daemon")
+            return
+
+        parts = urllib.parse.urlsplit(self.path)
+        route = resolve_gtfs_route(
+            parts.path,
+            query_str=parts.query,
+            accept_hdr=self.headers.get("Accept", ""),
+        )
+        if route is None:
+            self._send_json_error(404, f"Endpoint '{parts.path}' not found")
+            return
+
+        feed_kind, fmt = route
+        snapshot = self.server.store.get_snapshot()
+        cached = gtfs_cache.get_or_build(snapshot, feed_kind)
+
+        if fmt == OutputFormat.JSON:
+            body = cached.json_bytes
+            etag = cached.etag_json
+            content_type = "application/json; charset=utf-8"
+        else:
+            body = cached.pb_bytes
+            etag = cached.etag_pb
+            content_type = "application/x-protobuf"
+
+        if etag_matches(self.headers.get("If-None-Match"), etag):
+            self.send_response(304)
+            self._add_cors_headers()
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=5")
+            self.send_header("X-GTFS-RT-Version", GTFS_RT_VERSION)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        is_compressed = False
+        if len(body) > 256 and "gzip" in self.headers.get("Accept-Encoding", ""):
+            body = gzip.compress(body, compresslevel=6)
+            is_compressed = True
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "public, max-age=5")
+        self.send_header("X-GTFS-RT-Version", GTFS_RT_VERSION)
+        self.send_header("X-Entity-Count", str(cached.entity_count))
+        if is_compressed:
+            self.send_header("Content-Encoding", "gzip")
+        self._add_cors_headers()
+        self.end_headers()
         if not is_head:
             self.wfile.write(body)
 

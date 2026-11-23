@@ -710,6 +710,110 @@ class HistoricalRepository:
         end_iso = _epoch_to_iso_utc(float(target_epoch))
         return self.get_replay_observations(start_iso, end_iso, include_start=True)
 
+    def _fetch_gtfs_schedules(
+        self,
+        schedule_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Load scheduled_trips and schedule_stops metadata for GTFS-RT TripUpdates."""
+        if not schedule_ids:
+            return {}
+        placeholders = ",".join("?" for _ in schedule_ids)
+        schedules: Dict[str, Dict[str, Any]] = {}
+
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"SELECT schedule_id, train_number, origin, destination, corridor, "
+                    f"scheduled_departure, scheduled_arrival "
+                    f"FROM scheduled_trips WHERE schedule_id IN ({placeholders});",
+                    schedule_ids,
+                )
+                for r in cur.fetchall():
+                    sid = str(r["schedule_id"])
+                    schedules[sid] = {
+                        "scheduleId": sid,
+                        "trainNumber": str(r["train_number"]),
+                        "origin": r["origin"],
+                        "destination": r["destination"],
+                        "corridor": r["corridor"],
+                        "scheduledDeparture": self._iso_or_raw(r["scheduled_departure"]),
+                        "scheduledArrival": self._iso_or_raw(r["scheduled_arrival"]),
+                        "stops": [],
+                    }
+
+                cur.execute(
+                    f"SELECT schedule_id, stop_sequence, station_id, station_name, "
+                    f"scheduled_arrival, scheduled_departure, actual_arrival, "
+                    f"actual_departure, platform, delay_sec "
+                    f"FROM schedule_stops WHERE schedule_id IN ({placeholders}) "
+                    f"ORDER BY schedule_id ASC, stop_sequence ASC;",
+                    schedule_ids,
+                )
+                for s in cur.fetchall():
+                    sid = str(s["schedule_id"])
+                    if sid not in schedules:
+                        schedules[sid] = {"scheduleId": sid, "stops": []}
+                    schedules[sid]["stops"].append(
+                        {
+                            "stop_sequence": int(s["stop_sequence"]),
+                            "station_id": s["station_id"],
+                            "station_name": str(s["station_name"]),
+                            "scheduled_arrival": self._iso_or_raw(s["scheduled_arrival"]),
+                            "scheduled_departure": self._iso_or_raw(s["scheduled_departure"]),
+                            "actual_arrival": self._iso_or_raw(s["actual_arrival"]),
+                            "actual_departure": self._iso_or_raw(s["actual_departure"]),
+                            "platform": s["platform"],
+                            "delay_sec": int(s["delay_sec"] or 0),
+                        }
+                    )
+            finally:
+                cur.close()
+        return schedules
+
+    def get_gtfs_snapshot(
+        self,
+        at_time: Optional[str] = None,
+        window_sec: int = 120,
+    ) -> Tuple[List[TrainPosition], Dict[str, Dict[str, Any]], float]:
+        """Reconstruct a point-in-time fleet snapshot and timetables for GTFS-RT export.
+
+        Args:
+            at_time: Optional ISO-8601 UTC target timestamp (defaults to latest recorded row).
+            window_sec: Lookback window in seconds to capture active trains (default: 120).
+
+        Returns:
+            Tuple of (latest_positions, schedules_by_id, snapshot_epoch).
+        """
+        if window_sec <= 0:
+            raise ValueError(f"window_sec must be > 0, got {window_sec}")
+
+        if at_time is not None and at_time.strip():
+            target_epoch = parse_iso_to_epoch(at_time.strip())
+            if target_epoch <= 0.0:
+                raise ValueError(f"Invalid ISO-8601 timestamp for --at: '{at_time}'")
+        else:
+            bounds = self.get_replay_bounds()
+            if bounds is None:
+                return [], {}, 0.0
+            target_epoch = bounds.max_epoch
+
+        observations = self.get_replay_snapshot_at(
+            target_epoch=target_epoch,
+            lookback_sec=float(window_sec),
+        )
+        if not observations:
+            return [], {}, target_epoch
+
+        latest_by_train: Dict[str, TrainPosition] = {}
+        for obs in observations:
+            latest_by_train[obs.position.train_number] = obs.position
+
+        positions = list(latest_by_train.values())
+        sched_ids = sorted({p.schedule_id for p in positions if p.schedule_id})
+        schedules = self._fetch_gtfs_schedules(sched_ids)
+        return positions, schedules, target_epoch
+
     # -------------------------------------------------------------------------
     # 2. Trip & Service Discovery
     # -------------------------------------------------------------------------

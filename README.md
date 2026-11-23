@@ -30,6 +30,9 @@
   - Multi-threaded HTTP daemon exporting Hellenic Railways operations, delays, speeds, and safety conflict gauges on default port `9100`.
   - Automatic HTTP content negotiation: yields **OpenMetrics 1.0.0** (`# EOF\n` termination, `_total` counter suffixes) or standard **Prometheus 0.0.4** text format based on client `Accept` headers.
   - 100% Python standard library purity with zero external PyPI dependencies (`pip install prometheus_client` not required).
+- **GTFS-Realtime v2.0 Protocol Buffer Feed Exporter (`railmon export --gtfs-rt`)**:
+  - Translates live SSE telemetry, `--demo` simulations, and SQLite WAL history into standard GTFS-RT v2.0 `.pb` (`VehiclePositions`, `TripUpdates`, bilingual `el`/`en` `Service Alerts`) and ProtoJSON feeds with zero third-party `protobuf` dependencies.
+  - Supports atomic file snapshots (`--out` / `--out-dir`), continuous `--watch` file sync, zero-dependency `--inspect`, standalone HTTP serving (`--serve` on port `8085` with `ETag`/`304` and `gzip`), and `/gtfs-rt/*` cross-exposure on `railmon serve`.
 - **Offline Simulation Mode (`--demo`)**: Full physics-based kinematic mock engine simulating trains traversing real track geometry without requiring internet access.
 - **Lightweight & Dependency-Free**: Pure standard library implementation on Linux/macOS (Python 3.10+ `curses`, `urllib`, `dataclasses`, `json`). On Windows, `windows-curses` provides native console support.
 
@@ -218,6 +221,24 @@ curl -H "Accept: application/openmetrics-text; version=1.0.0" http://localhost:9
 curl http://localhost:9100/health
 ```
 
+### GTFS-Realtime (GTFS-RT v2.0) Protocol Buffer Exporter
+
+```bash
+# Export one-shot binary GTFS-RT v2.0 snapshot (.pb)
+./railmon export --gtfs-rt --demo --out hellenic_rail.pb
+
+# Decode and inspect any .pb file as ProtoJSON (zero dependencies)
+./railmon export --gtfs-rt --inspect hellenic_rail.pb
+
+# Export historical point-in-time snapshot from SQLite WAL database
+./railmon export --gtfs-rt --from-db railway_history.db --at 2026-11-23T18:00:00Z --out hist.pb
+
+# Start standalone GTFS-RT HTTP server on port 8085 (for OpenTripPlanner / Transit apps)
+./railmon export --gtfs-rt --serve --demo --port 8085
+curl -i http://127.0.0.1:8085/gtfs-rt/vehicle-positions.pb -o vp.pb
+curl http://127.0.0.1:8085/gtfs-rt/feed.json
+```
+
 ---
 
 ## Controls Reference (TUI)
@@ -265,6 +286,12 @@ curl http://localhost:9100/health
   - [`exporter/formatter.py`](./exporter/formatter.py): Prometheus 0.0.4 and OpenMetrics 1.0.0 serialization engines.
   - [`exporter/collector.py`](./exporter/collector.py): Pluggable domain telemetry, watchdog, stream, and storage collectors.
   - [`exporter/server.py`](./exporter/server.py): Multi-threaded HTTP server daemon with content negotiation and health probe.
+- [`gtfs_rt/`](./gtfs_rt): Zero-dependency GTFS-Realtime v2.0 Protocol Buffer feed exporter subsystem:
+  - [`gtfs_rt/wire.py`](./gtfs_rt/wire.py): Native iterative Proto2 binary wire encoder/decoder.
+  - [`gtfs_rt/models.py`](./gtfs_rt/models.py): Frozen GTFS-RT v2.0 DTOs, binary `.to_proto()`/`.from_proto()`, and ProtoJSON serializers.
+  - [`gtfs_rt/mapper.py`](./gtfs_rt/mapper.py): Hellenic Railways domain mapper, `Europe/Athens` date handling, consist deduplication, and caches.
+  - [`gtfs_rt/exporter.py`](./gtfs_rt/exporter.py): Atomic file writer, SQLite historical bridge, and `.pb` inspector.
+  - [`gtfs_rt/server.py`](./gtfs_rt/server.py): Multi-threaded HTTP feed server with `ETag`/`304`, `gzip`, and CORS.
 - [`scripts/`](./scripts): Development and profiling utilities:
   - [`scripts/benchmark_storage.py`](./scripts/benchmark_storage.py): Ingestion throughput, read latency, and deadband benchmarking harness.
 - [`docs/historical-storage-sqlite.md`](./docs/architecture/historical-storage-sqlite.md): Complete schema reference, CLI guide, and SQL analytical recipe cookbook.
