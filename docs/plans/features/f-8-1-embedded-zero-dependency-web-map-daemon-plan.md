@@ -629,6 +629,7 @@ options:
 3. Wire `args.mode == "serve"` in `_dispatch_cli_mode()`.
 
 ### Phase 4: Embedded Single-Page Application (SPA) Client
+*(Detailed implementation plan: [`./f-8-1-phase-4-embedded-spa-client-plan.md`](./f-8-1-phase-4-embedded-spa-client-plan.md))*
 1. Construct the responsive HTML5/CSS3 template in [`server/assets.py`](../../../server/assets.py).
 2. Implement Leaflet map initialization, tile layer swapping, and auto-centering on Greece ($38.5^\circ\text{N}, 23.5^\circ\text{E}$).
 3. Implement track geometry rendering with corridor color coding.
