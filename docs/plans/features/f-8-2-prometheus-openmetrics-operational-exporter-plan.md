@@ -751,6 +751,9 @@ flowchart LR
   - Unit tests in `tests/test_exporter_collector.py` with mocked `TrainStateStore` and synthetic `TrainPosition` fixtures.
 
 ### Phase 3: HTTP Server Daemon & Content Negotiation
+
+> **Detailed Phase 3 Implementation Plan:** [`./f-8-2-phase-3-http-server-daemon-and-content-negotiation-plan.md`](./f-8-2-phase-3-http-server-daemon-and-content-negotiation-plan.md)
+
 - **Deliverables:**
   - Implement `exporter/server.py` with `MetricsServer` and `MetricsRequestHandler`.
   - Implement HTTP GET routes `/metrics`, `/health`, `/` (HTML index).

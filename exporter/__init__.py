@@ -26,6 +26,10 @@ from exporter.models import (
     MetricType,
     Sample,
 )
+from exporter.server import (
+    MetricsRequestHandler,
+    MetricsServer,
+)
 
 __version__: str = train_tracker.__version__
 __author__: str = train_tracker.__author__
@@ -49,4 +53,6 @@ __all__: List[str] = [
     "StreamMetricsCollector",
     "StorageMetricsCollector",
     "ProcessMetricsCollector",
+    "MetricsServer",
+    "MetricsRequestHandler",
 ]
