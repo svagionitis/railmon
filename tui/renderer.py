@@ -626,14 +626,16 @@ def format_next_station_eta(
     train_point: Optional[GeoPoint] = None,
     station_node: Optional[StationNode] = None,
     speed_kmh: Optional[float] = None,
+    segment_stats: Optional[Any] = None,
 ) -> str:
-    """Format the next station readout with geodesic distance and kinematic ETA.
+    """Format the next station readout with geodesic distance and hybrid kinematic/empirical ETA.
 
     Args:
         next_station: Display name of the upcoming station from telemetry.
         train_point: Current WGS84 GeoPoint of the train.
         station_node: Resolved StationNode for next_station, if matched.
         speed_kmh: Instantaneous train speed in km/h.
+        segment_stats: Optional SegmentTransitStats for empirical percentile calibration.
 
     Returns:
         Formatted Next Station string for the Inspector pane.
@@ -653,22 +655,58 @@ def format_next_station_eta(
     d_km = haversine_distance_km(train_point, station_node.point)
     spd = float(speed_kmh) if (speed_kmh is not None and math.isfinite(speed_kmh)) else 0.0
 
+    def _format_min(mins: int) -> str:
+        if mins <= 0:
+            return "<1m"
+        if mins >= 120:
+            h = mins // 60
+            m = mins % 60
+            return f"~{h}h{m:02d}m" if m > 0 else f"~{h}h"
+        return f"~{mins}m"
+
+    # 1. Halted at platform
+    if spd < 5.0 and d_km < 0.25:
+        return f"{clean_name} ({d_km:.1f} km, AT)"
+
+    # 2. Empirical percentile calibration if segment stats available
+    if segment_stats is not None:
+        p50_sec = getattr(segment_stats, "p50_duration_seconds", None)
+        p90_sec = getattr(segment_stats, "p90_duration_seconds", None)
+
+        if p50_sec is not None and p50_sec > 0:
+            # Estimate progress based on segment length if available, otherwise assume 50%
+            seg_len = getattr(segment_stats, "distance_km", None)
+            if seg_len and seg_len > 0:
+                progress = max(0.0, min(0.95, 1.0 - (d_km / seg_len)))
+            else:
+                progress = 0.50
+
+            rem_p50_min = int(round(max(1.0, (1.0 - progress) * (p50_sec / 60.0))))
+            rem_p90_min = int(round(max(1.0, (1.0 - progress) * ((p90_sec or p50_sec) / 60.0))))
+
+            if spd >= 5.0:
+                # Blend empirical p50 with kinematic calculation
+                kin_min = (d_km / spd) * 60.0
+                blended_min = int(round(0.70 * rem_p50_min + 0.30 * kin_min))
+                eta_str = _format_min(blended_min)
+                return f"{clean_name} ({d_km:.1f} km, {eta_str})"
+            else:
+                # Halted en route / signal stop: report conservative p90 duration
+                eta_str = _format_min(rem_p90_min)
+                return f"{clean_name} ({d_km:.1f} km, {eta_str} [p90])"
+
+    # 3. Kinematic fallback model
     if spd >= 5.0:
         raw_eta_min = (d_km / spd) * 60.0
         eta_min = int(round(raw_eta_min))
         if d_km < 0.1 or eta_min <= 0:
             eta_str = "<1m"
-        elif eta_min >= 120:
-            hours = eta_min // 60
-            mins = eta_min % 60
-            eta_str = f"~{hours}h{mins:02d}m" if mins > 0 else f"~{hours}h"
         else:
-            eta_str = f"~{eta_min}m"
+            eta_str = _format_min(eta_min)
         return f"{clean_name} ({d_km:.1f} km, {eta_str})"
 
-    if d_km < 0.25:
-        return f"{clean_name} ({d_km:.1f} km, AT)"
     return f"{clean_name} ({d_km:.1f} km)"
+
 
 
 def format_wgs84_coords(

@@ -36,7 +36,7 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | **Implemented** | [`exporter/server.py`](../../exporter/server.py), [`exporter/collector.py`](../../exporter/collector.py), [`exporter/formatter.py`](../../exporter/formatter.py), [`exporter/models.py`](../../exporter/models.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 8 (DevOps)** | **F-8.3** | GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter | `railmon export --gtfs-rt` | **Implemented** | [`gtfs_rt/wire.py`](../../gtfs_rt/wire.py), [`gtfs_rt/models.py`](../../gtfs_rt/models.py), [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py), [`gtfs_rt/exporter.py`](../../gtfs_rt/exporter.py), [`gtfs_rt/server.py`](../../gtfs_rt/server.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 9 (Analytics)** | **F-9.1** | Corridor Bottleneck & Station Dwell Delay Heatmaps | `railmon history bottlenecks` | **Implemented** | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
-| **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* | Planned | [`storage/repository.py`](../../storage/repository.py), [`tui/renderer.py`](../../tui/renderer.py) |
+| **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* | **Implemented** | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), [`train_tracker.py`](../../train_tracker.py) |
 
 ---
 
@@ -1028,10 +1028,12 @@ Platy Junction            1m 50s      +0.8m          +11m        █ (LOW)
 
 ---
 
-### F-9.2: Empirical Segment Transit Time & ETA Engine — *Planned*
+### F-9.2: Empirical Segment Transit Time & ETA Engine — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-9-2-empirical-segment-transit-time-and-eta-engine-plan.md`](../plans/features/f-9-2-empirical-segment-transit-time-and-eta-engine-plan.md)
 
 #### Overview
-Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical segment transit durations compiled from historical runs. If a train is halted at Lianokladi with a red signal, the engine does not report `ETA: 0 min` or infinite time, but instead applies the historical 90th-percentile transit time across the Lianokladi–Domokos mountain section.
+Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical segment transit durations compiled from historical runs. If a train is halted at Lianokladi with a red signal, the engine does not report `ETA: 0 min` or infinite time, but instead applies the historical 90th-percentile transit time across the Lianokladi–Domokos mountain section (`Domokos (14.2 km, ~18m [p90])`). Includes CLI empirical segment matrix analyzer (`railmon history segments`).
 
 ---
 
@@ -1082,6 +1084,7 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 | `railmon metrics [--port 9100]` | **Tier 8** | Expose operational Prometheus / OpenMetrics endpoint |
 | `railmon export --gtfs-rt [--serve]` | **Tier 8** | Export or serve GTFS-Realtime v2.0 Protocol Buffer feeds |
 | `railmon history bottlenecks` | **Tier 9** | Output corridor dwell and delay bottleneck analysis |
+| `railmon history segments` | **Tier 9** | Profile empirical station-to-station transit runtimes and percentiles |
 
 ---
 
@@ -1129,6 +1132,6 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 2. Implement Prometheus text-format exporter for `railmon metrics`.
 3. Build GTFS-RT feed generator.
 
-### Phase 9: Tier 9 Historical Analytics & Predictive Engine — *Planned*
-1. Add bottleneck and dwell analytical SQL queries in [`storage/repository.py`](../../storage/repository.py).
-2. Wire empirical transit duration matrix for enhanced ETA predictions.
+### Phase 9: Tier 9 Historical Analytics & Predictive Engine (F-9.1 & F-9.2 Implemented)
+1. Added bottleneck and dwell analytical SQL queries in [`storage/repository.py`](../../storage/repository.py) and CLI `railmon history bottlenecks`.
+2. Implemented empirical segment transit duration profiling and hybrid kinematic/empirical ETA prediction (`F-9.2`) in [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), and CLI `railmon history segments`.

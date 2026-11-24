@@ -16,6 +16,8 @@ from storage.models import (
     CorridorPunctualitySummary,
     DatabaseStats,
     RecordingSessionDB,
+    SegmentTransitReport,
+    SegmentTransitStats,
     StationDwellRecord,
     TelemetryHistoryRow,
     TripSummary,
@@ -1309,4 +1311,95 @@ def format_conflict_json(conflicts: Sequence[Any]) -> str:
             }
         )
     return json.dumps({"active_conflicts": items, "count": len(items)}, indent=2)
+
+
+def format_segment_transit_table(
+    report: SegmentTransitReport,
+    use_ascii: bool = False,
+    use_color: bool = True,
+) -> str:
+    """Format an empirical segment transit report into a tabular ASCII/UTF-8 terminal table.
+
+    Args:
+        report: SegmentTransitReport containing analyzed inter-station segments.
+        use_ascii: Force strict 7-bit ASCII transliteration.
+        use_color: Enable ANSI escape color highlights.
+
+    Returns:
+        Formatted multi-line text string suitable for terminal stdout.
+    """
+    def _c(text: str, code: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if use_color else text
+
+    def _fmt_dur(seconds: float) -> str:
+        s = int(round(seconds))
+        m = s // 60
+        sec = s % 60
+        if m >= 60:
+            h = m // 60
+            rem_m = m % 60
+            return f"{h}h {rem_m:02d}m"
+        return f"{m}m {sec:02d}s"
+
+    border_char = "="
+    sep_char = "-"
+    width = 100
+
+    lines: List[str] = []
+    lines.append(border_char * width)
+
+    corr_title = report.corridor or "ALL CORRIDORS"
+    trips_analyzed = report.total_trips_analyzed
+    header_title = f"EMPIRICAL SEGMENT TRANSIT ANALYSIS: {corr_title.upper()} ({trips_analyzed} Trips Analyzed)"
+    lines.append(header_title[:width])
+    lines.append(border_char * width)
+
+    # Column header:
+    # FROM STATION (20) | TO STATION (20) | TRIPS (6) | MIN DUR (10) | MEDIAN p50 (12) | P90 DUR (12) | AVG SPD (10)
+    col_hdr = f"{'FROM STATION':<20} {'TO STATION':<20} {'TRIPS':>6} {'MIN DUR':>10} {'MEDIAN (p50)':>13} {'P90 DUR':>12} {'AVG SPEED':>11}"
+    lines.append(col_hdr)
+    lines.append(sep_char * width)
+
+    if not report.segments:
+        lines.append("No empirical segment transit data recorded matching criteria.")
+        lines.append(border_char * width)
+        return "\n".join(lines)
+
+    longest_seg: Optional[SegmentTransitStats] = None
+    max_p50 = -1.0
+
+    for seg in report.segments:
+        if seg.p50_duration_seconds > max_p50:
+            max_p50 = seg.p50_duration_seconds
+            longest_seg = seg
+
+        from_name = transliterate_greek_to_latin(seg.from_station) if use_ascii else seg.from_station
+        to_name = transliterate_greek_to_latin(seg.to_station) if use_ascii else seg.to_station
+
+        if len(from_name) > 19:
+            from_name = from_name[:18] + "~"
+        if len(to_name) > 19:
+            to_name = to_name[:18] + "~"
+
+        min_s = _fmt_dur(seg.min_duration_seconds)
+        p50_s = _fmt_dur(seg.p50_duration_seconds)
+        p90_s = _fmt_dur(seg.p90_duration_seconds)
+        spd_s = f"{seg.avg_speed_kmh:.1f} km/h"
+
+        row_str = f"{from_name:<20} {to_name:<20} {seg.sample_count:>6} {min_s:>10} {p50_s:>13} {p90_s:>12} {spd_s:>11}"
+        lines.append(row_str)
+
+    lines.append(border_char * width)
+    if longest_seg:
+        longest_from = transliterate_greek_to_latin(longest_seg.from_station) if use_ascii else longest_seg.from_station
+        longest_to = transliterate_greek_to_latin(longest_seg.to_station) if use_ascii else longest_seg.to_station
+        summary_str = (
+            f"Corridor Summary: {len(report.segments)} Track Segments Profiled | "
+            f"Longest Median Transit: {longest_from} -> {longest_to} ({_fmt_dur(longest_seg.p50_duration_seconds)})"
+        )
+        lines.append(summary_str[:width])
+        lines.append(border_char * width)
+
+    return "\n".join(lines)
+
 

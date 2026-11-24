@@ -533,4 +533,83 @@ class BottleneckReport:
         }
 
 
+@dataclass(frozen=True)
+class SegmentTransitStats:
+    """Statistical transit profile for a directed track segment between two stations."""
+
+    from_station: str
+    to_station: str
+    corridor: Optional[str]
+    sample_count: int
+    min_duration_seconds: float
+    p50_duration_seconds: float  # Median empirical transit duration
+    p90_duration_seconds: float  # 90th-percentile conservative duration
+    max_duration_seconds: float
+    avg_speed_kmh: float
+    avg_delay_delta_minutes: float  # Mean delay accumulated along segment
+    distance_km: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize segment stats to dictionary for JSON/CLI output."""
+        return {
+            "from_station": self.from_station,
+            "to_station": self.to_station,
+            "corridor": self.corridor or "UNKNOWN",
+            "sample_count": self.sample_count,
+            "min_duration_seconds": round(self.min_duration_seconds, 1),
+            "p50_duration_seconds": round(self.p50_duration_seconds, 1),
+            "p90_duration_seconds": round(self.p90_duration_seconds, 1),
+            "max_duration_seconds": round(self.max_duration_seconds, 1),
+            "avg_speed_kmh": round(self.avg_speed_kmh, 1),
+            "avg_delay_delta_minutes": round(self.avg_delay_delta_minutes, 1),
+            "distance_km": round(self.distance_km, 1) if self.distance_km is not None else None,
+        }
+
+
+@dataclass(frozen=True)
+class SegmentTransitReport:
+    """Aggregate empirical transit matrix report across a corridor."""
+
+    corridor: Optional[str]
+    time_window_start: Optional[str]
+    time_window_end: Optional[str]
+    total_trips_analyzed: int
+    total_segments_analyzed: int
+    segments: Tuple[SegmentTransitStats, ...]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize transit report to dictionary."""
+        return {
+            "corridor": self.corridor or "ALL",
+            "time_window_start": self.time_window_start,
+            "time_window_end": self.time_window_end,
+            "total_trips_analyzed": self.total_trips_analyzed,
+            "total_segments_analyzed": self.total_segments_analyzed,
+            "segments": [s.to_dict() for s in self.segments],
+        }
+
+
+class ETAPredictionSource(Enum):
+    """Origin and methodology of ETA calculation."""
+
+    KINEMATIC = "KINEMATIC"  # Pure velocity / distance
+    EMPIRICAL_P50 = "EMP_P50"  # Calibrated against historical median transit
+    EMPIRICAL_P90 = "EMP_P90"  # Conservative 90th percentile (halted / congested)
+    SCHEDULED = "SCHEDULED"  # Preserved from published timetable
+
+
+@dataclass(frozen=True)
+class ETAPrediction:
+    """Computed ETA result with confidence and methodology details."""
+
+    station_name: str
+    eta_minutes: int
+    distance_km: float
+    source: ETAPredictionSource
+    confidence_pct: float
+    formatted_eta: str
+    is_halted: bool = False
+
+
+
 
