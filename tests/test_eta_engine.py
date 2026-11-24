@@ -34,6 +34,9 @@ class TestETAEngine(unittest.TestCase):
                 conn.execute(stmt)
         self.repo = HistoricalRepository(self.db)
 
+    def tearDown(self):
+        self.db.close()
+
     def test_segment_transit_stats_model_and_serialization(self):
         """Test SegmentTransitStats dataclass fields and to_dict() serialization."""
         stats = SegmentTransitStats(
@@ -226,6 +229,95 @@ class TestETAEngine(unittest.TestCase):
         self.assertNotIn("Λιανοκλάδι", ascii_tbl)
         self.assertIn("Lianokladi", ascii_tbl)
         self.assertTrue(all(ord(c) < 128 for c in ascii_tbl))
+
+    def _seed_file_db_for_cli(self, db_path: str) -> None:
+        """Seed a temporary file-backed SQLite database with Greek station segment transitions."""
+        file_db = Database(db_path)
+        try:
+            with file_db.connection() as conn:
+                for i in range(1, 4):
+                    conn.execute(
+                        """
+                        INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at)
+                        VALUES (?, 'Intercity', '2026-11-20T00:00:00Z', '2026-11-20T23:59:59Z')
+                        """,
+                        (f"159{i}",),
+                    )
+                    sched_id = f"CLI_TRIP_{i}"
+                    conn.execute(
+                        """
+                        INSERT INTO scheduled_trips (schedule_id, train_number, corridor, service_date)
+                        VALUES (?, ?, 'PATHE', '2026-11-20')
+                        """,
+                        (sched_id, f"159{i}"),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO telemetry_history (
+                            train_number, schedule_id, corridor, next_station,
+                            recorded_at, lat, lng, speed, course, delay_min
+                        ) VALUES
+                        (?, ?, 'PATHE', 'Λάρισα', '2026-11-20T10:00:00Z', 39.638, 22.419, 0.0, 0.0, 0),
+                        (?, ?, 'PATHE', 'Κατερίνη', '2026-11-20T10:35:00Z', 40.271, 22.505, 120.0, 0.0, 2);
+                        """,
+                        (f"159{i}", sched_id, f"159{i}", sched_id),
+                    )
+                conn.commit()
+        finally:
+            file_db.close()
+
+    def test_cli_segments_execution_and_json_output(self):
+        """Verify 'railmon history segments' CLI dispatch in UTF-8, ASCII, and JSON modes."""
+        from contextlib import redirect_stdout
+        import io
+        import os
+        import tempfile
+        from train_tracker import build_parser, run_history_mode
+
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "segments_cli.db")
+            self._seed_file_db_for_cli(db_path)
+
+            # 1. Default UTF-8 table output
+            args_utf8 = parser.parse_args(
+                ["history", "--db", db_path, "segments", "--min-trips", "2"]
+            )
+            buf_utf8 = io.StringIO()
+            with redirect_stdout(buf_utf8):
+                rc_utf8 = run_history_mode(args_utf8)
+            self.assertEqual(rc_utf8, 0)
+            out_utf8 = buf_utf8.getvalue()
+            self.assertIn("EMPIRICAL SEGMENT TRANSIT ANALYSIS", out_utf8)
+            self.assertIn("Λάρισα", out_utf8)
+            self.assertIn("Κατερίνη", out_utf8)
+
+            # 2. 7-bit ASCII fallback output
+            args_ascii = parser.parse_args(
+                ["history", "--db", db_path, "segments", "--min-trips", "2", "--ascii"]
+            )
+            buf_ascii = io.StringIO()
+            with redirect_stdout(buf_ascii):
+                rc_ascii = run_history_mode(args_ascii)
+            self.assertEqual(rc_ascii, 0)
+            out_ascii = buf_ascii.getvalue()
+            self.assertIn("EMPIRICAL SEGMENT TRANSIT ANALYSIS", out_ascii)
+            self.assertTrue(all(ord(c) < 128 for c in out_ascii))
+
+            # 3. Machine-readable UTF-8 JSON output (ensure_ascii=False)
+            args_json = parser.parse_args(
+                ["history", "--db", db_path, "segments", "--min-trips", "2", "--json"]
+            )
+            buf_json = io.StringIO()
+            with redirect_stdout(buf_json):
+                rc_json = run_history_mode(args_json)
+            self.assertEqual(rc_json, 0)
+            raw_json = buf_json.getvalue()
+            self.assertIn("Λάρισα", raw_json)
+            parsed = json.loads(raw_json)
+            self.assertEqual(len(parsed["segments"]), 1)
+            self.assertEqual(parsed["segments"][0]["from_station"], "Λάρισα")
+            self.assertEqual(parsed["segments"][0]["to_station"], "Κατερίνη")
 
 
 if __name__ == "__main__":

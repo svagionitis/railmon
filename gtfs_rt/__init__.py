@@ -11,6 +11,7 @@ from gtfs_rt.exporter import (
     export_feed_file,
     export_from_db,
     inspect_pb_file,
+    load_db_snapshot,
     serialize_feed,
     write_atomic_bytes,
 )
@@ -155,6 +156,7 @@ __all__: List[str] = [
     "write_atomic_bytes",
     "export_feed_file",
     "export_feed_dir",
+    "load_db_snapshot",
     "export_from_db",
     "inspect_pb_file",
     "resolve_gtfs_route",

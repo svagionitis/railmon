@@ -32,6 +32,7 @@ class TestBottlenecks(unittest.TestCase):
         self.parser = build_parser()
 
     def tearDown(self) -> None:
+        self.db.close()
         self.temp_dir.cleanup()
 
     def _seed_telemetry_data(self) -> None:
@@ -205,12 +206,25 @@ class TestBottlenecks(unittest.TestCase):
             self.assertLess(ord(ch), 128)
 
     def test_cli_bottlenecks_execution(self) -> None:
-        """Verify 'railmon history bottlenecks' CLI command dispatch."""
+        """Verify 'railmon history bottlenecks' CLI command dispatch (UTF-8 and ASCII)."""
+        import io
+        from contextlib import redirect_stdout
+
         self._seed_telemetry_data()
 
-        args = self.parser.parse_args(["history", "--db", self.db_path, "bottlenecks", "--ascii"])
-        ret = run_history_mode(args)
-        self.assertEqual(ret, 0)
+        for extra_flags in ([], ["--ascii"]):
+            args = self.parser.parse_args(
+                ["history", "--db", self.db_path, "bottlenecks", *extra_flags]
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                ret = run_history_mode(args)
+            self.assertEqual(ret, 0)
+            out = buf.getvalue()
+            self.assertIn("CORRIDOR BOTTLENECK ANALYSIS", out)
+            self.assertIn("Larissa", out)
+            if "--ascii" in extra_flags:
+                self.assertTrue(all(ord(ch) < 128 for ch in out))
 
     def test_cli_bottlenecks_json_output(self) -> None:
         """Verify 'railmon history bottlenecks --json' outputs valid JSON."""

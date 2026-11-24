@@ -146,6 +146,99 @@ class TestCliExportGtfsRt(unittest.TestCase):
             self.assertIn("vp:IC52", ids)
             self.assertIn("tu:sched-ic52-hist", ids)
 
+    def test_from_db_out_dir_exports_populated_pb_and_json_bundles(self):
+        """TC-CLI-GTFS-08: --from-db --out-dir writes populated split .pb and .json feeds with schedules."""
+        from tests.test_gtfs_exporter import _seed_sample_db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "hist.db")
+            _seed_sample_db(db_path)
+
+            pb_dir = os.path.join(tmp, "pb_out")
+            os.makedirs(pb_dir, exist_ok=True)
+            stderr_pb = io.StringIO()
+            with contextlib.redirect_stderr(stderr_pb):
+                rc_pb = train_tracker.main(
+                    [
+                        "export",
+                        "--gtfs-rt",
+                        "--from-db",
+                        db_path,
+                        "--at",
+                        "2026-11-23T17:00:00Z",
+                        "--out-dir",
+                        pb_dir,
+                    ]
+                )
+            self.assertEqual(rc_pb, 0)
+
+            with open(os.path.join(pb_dir, "feed.pb"), "rb") as fh:
+                feed_msg = FeedMessage.from_proto(fh.read())
+            with open(os.path.join(pb_dir, "vehicle_positions.pb"), "rb") as fh:
+                vp_msg = FeedMessage.from_proto(fh.read())
+            with open(os.path.join(pb_dir, "trip_updates.pb"), "rb") as fh:
+                tu_msg = FeedMessage.from_proto(fh.read())
+            with open(os.path.join(pb_dir, "alerts.pb"), "rb") as fh:
+                al_msg = FeedMessage.from_proto(fh.read())
+
+            feed_ids = {e.id for e in feed_msg.entity}
+            self.assertIn("vp:IC52", feed_ids)
+            self.assertIn("tu:sched-ic52-hist", feed_ids)
+
+            vp_ids = {e.id for e in vp_msg.entity}
+            self.assertEqual(vp_ids, {"vp:IC52"})
+
+            tu_by_id = {e.id: e for e in tu_msg.entity}
+            self.assertIn("tu:sched-ic52-hist", tu_by_id)
+            tu_entity = tu_by_id["tu:sched-ic52-hist"].trip_update
+            self.assertIsNotNone(tu_entity)
+            assert tu_entity is not None
+            self.assertEqual(len(tu_entity.stop_time_update), 1)
+            self.assertEqual(tu_entity.stop_time_update[0].stop_id, "LAR")
+
+            # All 4 split feeds share the identical historical snapshot timestamp
+            self.assertEqual(
+                {
+                    feed_msg.header.timestamp,
+                    vp_msg.header.timestamp,
+                    tu_msg.header.timestamp,
+                    al_msg.header.timestamp,
+                },
+                {feed_msg.header.timestamp},
+            )
+
+            # Verify --format json --out-dir produces populated ProtoJSON files
+            json_dir = os.path.join(tmp, "json_out")
+            os.makedirs(json_dir, exist_ok=True)
+            stderr_json = io.StringIO()
+            with contextlib.redirect_stderr(stderr_json):
+                rc_json = train_tracker.main(
+                    [
+                        "export",
+                        "--gtfs-rt",
+                        "--from-db",
+                        db_path,
+                        "--at",
+                        "2026-11-23T17:00:00Z",
+                        "--format",
+                        "json",
+                        "--out-dir",
+                        json_dir,
+                    ]
+                )
+            self.assertEqual(rc_json, 0)
+
+            for fname, expected_id in (
+                ("feed.json", "vp:IC52"),
+                ("vehicle_positions.json", "vp:IC52"),
+                ("trip_updates.json", "tu:sched-ic52-hist"),
+            ):
+                with open(os.path.join(json_dir, fname), "r", encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                ids = {e["id"] for e in doc["entity"]}
+                self.assertIn(expected_id, ids)
+            self.assertTrue(os.path.isfile(os.path.join(json_dir, "alerts.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

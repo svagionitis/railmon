@@ -573,5 +573,99 @@ class TestCLIFormatters(unittest.TestCase):
         self.assertIn("No audit recording sessions found", empty_out)
 
 
+class TestHistoryTripsExecution(unittest.TestCase):
+    """End-to-end CLI execution tests for 'railmon history trips' against SQLite."""
+
+    def setUp(self):
+        from storage.db import Database
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "history_trips.db")
+        db = Database(self.db_path)
+        try:
+            with db.connection() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO trains (
+                        train_number, train_type, service_type, first_observed_at, last_observed_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("IC50", "Intercity", "intercity", "2026-11-20T07:00:00Z", "2026-11-20T11:30:00Z"),
+                        ("1597", "Regional", "regional", "2026-11-21T08:00:00Z", "2026-11-21T09:15:00Z"),
+                    ],
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO scheduled_trips (
+                        schedule_id, train_number, origin, destination, corridor, service_date
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("SCHED_50", "IC50", "Athens", "Thessaloniki", "PATHE", "2026-11-20"),
+                        ("SCHED_1597", "1597", "Athens", "Chalkida", "ATH-HAL", "2026-11-21"),
+                    ],
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO telemetry_history (
+                        train_number, schedule_id, recorded_at, lat, lng, speed, course, delay_min, corridor
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("IC50", "SCHED_50", "2026-11-20T08:00:00Z", 39.638, 22.422, 140.0, 0.0, 4, "PATHE"),
+                        ("IC50", "SCHED_50", "2026-11-20T08:15:00Z", 39.850, 22.500, 152.0, 0.0, 6, "PATHE"),
+                        ("1597", "SCHED_1597", "2026-11-21T08:10:00Z", 38.300, 23.600, 95.0, 0.0, 1, "ATH-HAL"),
+                    ],
+                )
+                conn.commit()
+        finally:
+            db.close()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_history_trips_unfiltered_and_filtered(self):
+        """TC-CLI-HIST-TRIPS-01: run_history_mode executes 'history trips' with date/corridor/limit filters."""
+        from contextlib import redirect_stdout
+        from train_tracker import run_history_mode
+
+        parser = build_parser()
+
+        # 1. Unfiltered
+        args_all = parser.parse_args(["history", "--db", self.db_path, "trips"])
+        buf_all = io.StringIO()
+        with redirect_stdout(buf_all):
+            rc_all = run_history_mode(args_all)
+        self.assertEqual(rc_all, 0)
+        out_all = buf_all.getvalue()
+        self.assertIn("IC50", out_all)
+        self.assertIn("1597", out_all)
+
+        # 2. Filtered by --date, --corridor, --limit
+        args_filt = parser.parse_args(
+            [
+                "history",
+                "--db",
+                self.db_path,
+                "trips",
+                "--date",
+                "2026-11-20",
+                "--corridor",
+                "PATHE",
+                "--limit",
+                "5",
+            ]
+        )
+        buf_filt = io.StringIO()
+        with redirect_stdout(buf_filt):
+            rc_filt = run_history_mode(args_filt)
+        self.assertEqual(rc_filt, 0)
+        out_filt = buf_filt.getvalue()
+        self.assertIn("IC50", out_filt)
+        self.assertIn("2026-11-20", out_filt)
+        self.assertNotIn("1597", out_filt)
+
+
 if __name__ == "__main__":
     unittest.main()

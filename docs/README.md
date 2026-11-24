@@ -34,6 +34,7 @@ Core architectural blueprints, reverse-engineering analyses of `railway.gov.gr`,
 | [`historical-storage-sqlite.md`](./architecture/historical-storage-sqlite.md) | Embedded SQLite persistence manual, WAL concurrent operation, deadband filtering & CLI guide |
 | [`misra-autosar-python-safety-guidelines.md`](./architecture/misra-autosar-python-safety-guidelines.md) | High-assurance safety guidelines (MISRA C++, AUTOSAR C++14, NASA JPL) applied to Python |
 | [`production-readiness-review.md`](./architecture/production-readiness-review.md) | Comprehensive production readiness audit, resilience findings & prioritized fix backlog |
+| [`codebase-architecture-review.md`](./architecture/codebase-architecture-review.md) | Full senior engineering & architecture review (post-F-6–F-10), dependency graphs, P0–P3 findings & remediation roadmap |
 | [`tui-feature-enhancements.md`](./architecture/tui-feature-enhancements.md) | Master specification and requirements for interactive Curses TUI feature enhancements |
 
 ---
@@ -109,6 +110,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p0-11-sensor-freeze-watchdog-resilience-fix-plan.md`](./plans/fixes/p0/p0-11-sensor-freeze-watchdog-resilience-fix-plan.md) | Sensor freeze watchdog resilience, packet freshness qualification & station crawl filtering |
 | [`p0-12-track-conflict-detection-resilience-fix-plan.md`](./plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md) | Track conflict watchdog resilience, dynamic corridor snapping & station siding headway suppression |
 | [`p0-13-duplicate-train-numbers-disambiguation-fix-plan.md`](./plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md) | Duplicate train numbers disambiguation, multi-unit consist detection & stable roster ordering |
+| [`p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md`](./plans/fixes/p0/p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md) | Four shipping CLI bugs (`history bottlenecks`/`segments`/`trips` crashes & silent GTFS-RT `--from-db --out-dir` data loss) |
 
 #### P1 — High-Priority Plans (`plans/fixes/p1/`)
 

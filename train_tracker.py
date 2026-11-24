@@ -3171,6 +3171,7 @@ def run_record_mode(
 def _handle_history_segments_action(repo: Any, args: argparse.Namespace) -> None:
     """Helper to dispatch 'railmon history segments' command."""
     from datetime import datetime, timedelta, timezone
+    from storage.cli_formatters import format_segment_transit_table
 
     start_date = getattr(args, "start_date", None)
     days = getattr(args, "days", None)
@@ -3193,7 +3194,7 @@ def _handle_history_segments_action(repo: Any, args: argparse.Namespace) -> None
     )
 
     if getattr(args, "json", False):
-        print(json.dumps(report.to_dict(), indent=2))
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
     else:
         use_ascii = getattr(args, "ascii", False)
         print(format_segment_transit_table(report, use_ascii=use_ascii))
@@ -3202,6 +3203,7 @@ def _handle_history_segments_action(repo: Any, args: argparse.Namespace) -> None
 def _handle_history_bottlenecks_action(repo: Any, args: argparse.Namespace) -> None:
     """Helper to dispatch 'railmon history bottlenecks' command."""
     from datetime import datetime, timedelta, timezone
+    from storage.cli_formatters import format_bottlenecks_table
 
     start_date = getattr(args, "start_date", None)
     days = getattr(args, "days", None)
@@ -3222,7 +3224,7 @@ def _handle_history_bottlenecks_action(repo: Any, args: argparse.Namespace) -> N
     )
 
     if getattr(args, "json", False):
-        print(json.dumps(report.to_dict(), indent=2))
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
     else:
         use_ascii = getattr(args, "ascii", False)
         print(format_bottlenecks_table(report, use_ascii=use_ascii))
@@ -3238,8 +3240,6 @@ def run_history_mode(args: argparse.Namespace) -> int:
         Exit code (0 on success).
     """
     from storage.cli_formatters import (
-        format_bottlenecks_table,
-        format_segment_transit_table,
         format_dwell_table,
         format_punctuality_table,
         format_sessions_table,
@@ -3265,7 +3265,8 @@ def run_history_mode(args: argparse.Namespace) -> int:
     action = getattr(args, "history_action", None)
     if not action:
         print(
-            "Please specify a history action: trips, train, punctuality, dwell, stats, sessions, export.\n"
+            "Please specify a history action: trips, train, punctuality, dwell, "
+            "bottlenecks, segments, stats, sessions, export, archive.\n"
             "Use 'railmon history --help' for details."
         )
         return 0
@@ -3275,7 +3276,9 @@ def run_history_mode(args: argparse.Namespace) -> int:
 
     try:
         if action == "trips":
-            trips = repo.get_active_trips(date=args.date, corridor=args.corridor, limit=args.limit)
+            trips = repo.get_active_trips(
+                service_date=args.date, corridor=args.corridor, limit=args.limit
+            )
             print(format_trips_table(trips, date=args.date, corridor=args.corridor, db_path=db_path))
 
         elif action == "train":
@@ -4812,20 +4815,30 @@ def _export_inspect_mode(inspect_path: str) -> int:
 
 def _export_db_mode(args: argparse.Namespace, mapper: Any, feed_kind: Any) -> int:
     """Export a historical GTFS-RT feed snapshot from SQLite WAL storage."""
-    from gtfs_rt.exporter import export_from_db
+    from gtfs_rt.exporter import load_db_snapshot
 
     db_path = str(getattr(args, "from_db", "") or "").strip()
     at_time = getattr(args, "at", None)
     window_sec = int(getattr(args, "window_sec", 120))
     try:
-        msg = export_from_db(
+        positions, schedules, ref_ts = load_db_snapshot(
             db_path=db_path,
-            mapper=mapper,
-            feed_kind=feed_kind,
             at_time=at_time,
             window_sec=window_sec,
         )
-        return _emit_feed_output(msg, mapper, args)
+        msg = mapper.build_from_positions(
+            positions=positions,
+            feed_kind=feed_kind,
+            now=ref_ts,
+            schedules=schedules,
+        )
+        return _emit_feed_output(
+            msg,
+            mapper,
+            args,
+            positions=positions,
+            schedules=schedules,
+        )
     except (FileNotFoundError, ValueError, PermissionError, OSError) as exc:
         print(f"[ERROR] Historical GTFS-RT export failed: {exc}", file=sys.stderr)
         return 1

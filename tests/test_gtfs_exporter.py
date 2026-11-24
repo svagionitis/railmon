@@ -5,11 +5,13 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import gtfs_rt
 from gtfs_rt.exporter import (
     export_feed_dir,
     export_feed_file,
     export_from_db,
     inspect_pb_file,
+    load_db_snapshot,
     write_atomic_bytes,
 )
 from gtfs_rt.mapper import GtfsRtMapper
@@ -198,6 +200,49 @@ class TestGtfsExporter(unittest.TestCase):
             _seed_sample_db(db_path)
             with self.assertRaises(ValueError):
                 export_from_db(db_path, mapper, at_time="not-a-timestamp")
+
+    def test_load_db_snapshot_and_package_export(self):
+        """TC-GTFS-EXP-06: load_db_snapshot loads positions/schedules/epoch and is exported by gtfs_rt."""
+        self.assertIs(gtfs_rt.load_db_snapshot, load_db_snapshot)
+        with self.assertRaises(FileNotFoundError):
+            load_db_snapshot("does_not_exist_98765.db")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "history.db")
+            _seed_sample_db(db_path)
+
+            positions, schedules, ref_ts = load_db_snapshot(
+                db_path=db_path,
+                at_time="2026-11-23T17:00:00Z",
+                window_sec=120,
+            )
+            self.assertEqual(len(positions), 1)
+            self.assertEqual(positions[0].train_number, "IC52")
+            self.assertIn("sched-ic52-hist", schedules)
+            self.assertIsNotNone(ref_ts)
+
+            with self.assertRaises(ValueError):
+                load_db_snapshot(db_path=db_path, at_time="not-a-timestamp")
+
+    def test_export_feed_dir_requires_input_and_pins_timestamp(self):
+        """TC-GTFS-EXP-07: export_feed_dir fails loud on missing inputs, allows empty list, and pins timestamp."""
+        mapper = GtfsRtMapper()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                export_feed_dir(mapper=mapper, out_dir=tmp, fmt=OutputFormat.PROTOBUF)
+
+            empty_files = export_feed_dir(
+                mapper=mapper,
+                out_dir=tmp,
+                fmt=OutputFormat.PROTOBUF,
+                positions=[],
+            )
+            self.assertEqual(len(empty_files), 4)
+            timestamps = {
+                FeedMessage.from_proto(Path(f).read_bytes()).header.timestamp
+                for f in empty_files
+            }
+            self.assertEqual(len(timestamps), 1)
 
 
 if __name__ == "__main__":

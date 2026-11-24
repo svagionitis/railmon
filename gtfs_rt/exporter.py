@@ -4,7 +4,8 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional, Sequence
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from gtfs_rt.mapper import GtfsRtMapper
 from gtfs_rt.models import FeedKind, FeedMessage, OutputFormat
@@ -88,17 +89,23 @@ def export_feed_dir(
 ) -> List[str]:
     """Export all 4 GTFS-RT feed variants atomically into a validated directory."""
     clean_dir = _validate_out_dir(out_dir)
+    if snapshot is None and positions is None:
+        raise ValueError(
+            "export_feed_dir requires either 'snapshot' or 'positions' to be provided"
+        )
+
+    resolved_now = now if now is not None else time.time()
     ext = fmt.value
     written: List[str] = []
 
     for kind, stem in FEED_STEMS.items():
         if snapshot is not None:
-            msg = mapper.build_feed(snapshot, feed_kind=kind, now=now)
+            msg = mapper.build_feed(snapshot, feed_kind=kind, now=resolved_now)
         else:
             msg = mapper.build_from_positions(
                 positions=positions or (),
                 feed_kind=kind,
-                now=now,
+                now=resolved_now,
                 schedules=schedules,
             )
         target = os.path.join(clean_dir, f"{stem}.{ext}")
@@ -106,14 +113,12 @@ def export_feed_dir(
     return written
 
 
-def export_from_db(
+def load_db_snapshot(
     db_path: str,
-    mapper: GtfsRtMapper,
-    feed_kind: FeedKind = FeedKind.COMBINED,
     at_time: Optional[str] = None,
     window_sec: int = 120,
-) -> FeedMessage:
-    """Build a GTFS-RT FeedMessage from a recorded SQLite WAL database snapshot."""
+) -> Tuple[List[TrainPosition], Dict[str, Dict[str, Any]], Optional[float]]:
+    """Load point-in-time positions, schedules, and reference epoch from SQLite WAL storage."""
     if not db_path or not os.path.isfile(db_path):
         raise FileNotFoundError(f"SQLite database file not found: '{db_path}'")
 
@@ -128,6 +133,22 @@ def export_from_db(
         db.close()
 
     ref_ts = snap_epoch if snap_epoch > 0.0 else None
+    return positions, schedules, ref_ts
+
+
+def export_from_db(
+    db_path: str,
+    mapper: GtfsRtMapper,
+    feed_kind: FeedKind = FeedKind.COMBINED,
+    at_time: Optional[str] = None,
+    window_sec: int = 120,
+) -> FeedMessage:
+    """Build a GTFS-RT FeedMessage from a recorded SQLite WAL database snapshot."""
+    positions, schedules, ref_ts = load_db_snapshot(
+        db_path=db_path,
+        at_time=at_time,
+        window_sec=window_sec,
+    )
     return mapper.build_from_positions(
         positions=positions,
         feed_kind=feed_kind,
