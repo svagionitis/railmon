@@ -1734,6 +1734,27 @@ Examples:
     p_dwell.add_argument("--speed-threshold", type=float, default=2.0, help="Speed threshold in km/h (default: 2.0).")
     p_dwell.add_argument("--min-dwell", type=int, default=30, help="Minimum dwell seconds to detect stop (default: 30).")
 
+    # history bottlenecks (F-9.1)
+    p_bottlenecks = hist_subs.add_parser(
+        "bottlenecks",
+        parents=[db_parent],
+        help="Analyze corridor bottlenecks, station dwell delays, and infrastructure heatmaps.",
+    )
+    p_bottlenecks.add_argument("--corridor", type=str, help="Filter by corridor name (e.g. PATHE, Proastiakos).")
+    p_bottlenecks.add_argument("--days", type=int, help="Analyze the last N days of recorded telemetry.")
+    p_bottlenecks.add_argument("--start-date", type=str, help="Start date filter (YYYY-MM-DD).")
+    p_bottlenecks.add_argument("--end-date", type=str, help="End date filter (YYYY-MM-DD).")
+    p_bottlenecks.add_argument(
+        "--type",
+        choices=["all", "intercity", "suburban", "regional"],
+        default="all",
+        help="Filter by train service type.",
+    )
+    p_bottlenecks.add_argument("--min-trips", type=int, default=3, help="Minimum evaluated trips per node (default: 3).")
+    p_bottlenecks.add_argument("--limit", type=int, default=15, help="Maximum bottleneck nodes to display (default: 15).")
+    p_bottlenecks.add_argument("--ascii", action="store_true", help="Force 7-bit ASCII characters without Unicode blocks.")
+    p_bottlenecks.add_argument("--json", action="store_true", help="Output machine-readable JSON format.")
+
     # history stats
     hist_subs.add_parser("stats", parents=[db_parent], help="Database storage diagnostics, total rows, and span.")
 
@@ -2676,6 +2697,7 @@ def run_history_mode(args: argparse.Namespace) -> int:
         Exit code (0 on success).
     """
     from storage.cli_formatters import (
+        format_bottlenecks_table,
         format_dwell_table,
         format_punctuality_table,
         format_sessions_table,
@@ -2743,6 +2765,31 @@ def run_history_mode(args: argparse.Namespace) -> int:
                 min_dwell_sec=args.min_dwell,
             )
             print(format_dwell_table(dwells, train_number=args.train_number))
+
+        elif action == "bottlenecks":
+            start_date = getattr(args, "start_date", None)
+            days = getattr(args, "days", None)
+            if days and not start_date:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                start_date = cutoff.strftime("%Y-%m-%d")
+
+            train_type_arg = getattr(args, "type", "all")
+            type_filter = train_type_arg if train_type_arg != "all" else None
+
+            report = repo.get_corridor_bottlenecks(
+                corridor=getattr(args, "corridor", None),
+                start_date=start_date,
+                end_date=getattr(args, "end_date", None),
+                train_type=type_filter,
+                min_trips=getattr(args, "min_trips", 3),
+                limit=getattr(args, "limit", 15),
+            )
+
+            if getattr(args, "json", False):
+                print(json.dumps(report.to_dict(), indent=2))
+            else:
+                use_ascii = getattr(args, "ascii", False)
+                print(format_bottlenecks_table(report, use_ascii=use_ascii))
 
         elif action == "stats":
             stats = repo.get_database_stats()

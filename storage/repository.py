@@ -14,6 +14,9 @@ from storage.db import Database
 
 logger = logging.getLogger("railmon." + __name__)
 from storage.models import (
+    BottleneckNode,
+    BottleneckReport,
+    BottleneckSeverity,
     CorridorPunctualitySummary,
     DatabaseStats,
     RecordingSessionDB,
@@ -1068,6 +1071,280 @@ class HistoricalRepository:
             try:
                 cur.execute(query, params)
                 return [StationDwellRecord.from_db_row(row) for row in cur.fetchall()]
+            finally:
+                cur.close()
+
+    def get_corridor_bottlenecks(
+        self,
+        corridor: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        train_type: Optional[str] = None,
+        min_trips: int = 3,
+        limit: int = 20,
+    ) -> BottleneckReport:
+        """
+        Aggregate and rank corridor bottlenecks across stations and track segments.
+
+        Evaluates station dwell times, delay deltas (delay accumulated while stopped or in transit),
+        and maximum delays, normalizing them into a 0.0-100.0 Bottleneck Index.
+
+        Args:
+            corridor: Optional corridor filter (e.g. 'PATHE', 'Proastiakos').
+            start_date: Optional start date/timestamp ISO string filter.
+            end_date: Optional end date/timestamp ISO string filter.
+            train_type: Optional train type filter ('intercity', 'suburban', etc.).
+            min_trips: Minimum evaluated trips per node to exclude statistical outliers.
+            limit: Maximum bottleneck entries to return.
+
+        Returns:
+            BottleneckReport containing metadata and ranked BottleneckNode entries.
+        """
+        start_ts = f"{start_date}T00:00:00Z" if start_date and len(start_date) == 10 else start_date
+        end_ts = f"{end_date}T23:59:59Z" if end_date and len(end_date) == 10 else end_date
+
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                # 1. Total trips and observations analyzed
+                count_query = """
+                SELECT
+                    COUNT(DISTINCT th.train_number || '_' || COALESCE(th.schedule_id, '')) AS total_trips,
+                    COUNT(th.id) AS total_obs
+                FROM telemetry_history th
+                LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
+                LEFT JOIN trains t ON th.train_number = t.train_number
+                WHERE (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
+                  AND (? IS NULL OR th.recorded_at >= ?)
+                  AND (? IS NULL OR th.recorded_at <= ?)
+                  AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                """
+                corridor_param = f"%{corridor}%" if corridor else None
+                type_param = f"%{train_type}%" if train_type else None
+                cur.execute(
+                    count_query,
+                    (
+                        corridor_param, corridor_param, corridor_param,
+                        start_ts, start_ts,
+                        end_ts, end_ts,
+                        type_param, type_param, type_param,
+                    ),
+                )
+                cnt_row = cur.fetchone()
+                total_trips = cnt_row[0] if cnt_row else 0
+                total_obs = cnt_row[1] if cnt_row else 0
+
+                if total_obs == 0:
+                    return BottleneckReport(
+                        corridor=corridor,
+                        time_window_start=start_ts,
+                        time_window_end=end_ts,
+                        total_trips_analyzed=0,
+                        total_observations_analyzed=0,
+                        nodes=(),
+                    )
+
+                # 2. Extract dwell events and delay deltas per station node
+                # Island clustering on stopped intervals (speed <= 2.0 km/h)
+                dwell_query = """
+                WITH annotated AS (
+                    SELECT
+                        th.id,
+                        th.train_number,
+                        th.schedule_id,
+                        th.next_station AS station_name,
+                        th.recorded_at,
+                        COALESCE(th.delay_min, 0) AS delay_min,
+                        CASE WHEN th.speed <= 2.0 AND th.next_station IS NOT NULL AND th.next_station != '' THEN 1 ELSE 0 END AS is_stopped,
+                        LAG(CASE WHEN th.speed <= 2.0 AND th.next_station IS NOT NULL AND th.next_station != '' THEN 1 ELSE 0 END, 1, 0)
+                            OVER (PARTITION BY th.train_number, th.schedule_id ORDER BY th.recorded_at ASC, th.id ASC) AS prev_stopped,
+                        LAG(th.next_station) OVER (PARTITION BY th.train_number, th.schedule_id ORDER BY th.recorded_at ASC, th.id ASC) AS prev_station,
+                        LAG(th.recorded_at) OVER (PARTITION BY th.train_number, th.schedule_id ORDER BY th.recorded_at ASC, th.id ASC) AS prev_recorded_at
+                    FROM telemetry_history th
+                    LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
+                    LEFT JOIN trains t ON th.train_number = t.train_number
+                    WHERE (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
+                      AND (? IS NULL OR th.recorded_at >= ?)
+                      AND (? IS NULL OR th.recorded_at <= ?)
+                      AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                ),
+                islands AS (
+                    SELECT
+                        id,
+                        train_number,
+                        schedule_id,
+                        station_name,
+                        recorded_at,
+                        delay_min,
+                        SUM(
+                            CASE
+                                WHEN prev_stopped = 0
+                                  OR prev_station IS NOT station_name
+                                  OR (JULIANDAY(recorded_at) - JULIANDAY(prev_recorded_at)) * 86400.0 > 1800.0
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) OVER (PARTITION BY train_number, schedule_id ORDER BY recorded_at ASC, id ASC) AS island_id
+                    FROM annotated
+                    WHERE is_stopped = 1
+                ),
+                island_delays AS (
+                    SELECT
+                        train_number,
+                        schedule_id,
+                        station_name,
+                        recorded_at,
+                        island_id,
+                        FIRST_VALUE(delay_min) OVER (
+                            PARTITION BY train_number, schedule_id, island_id ORDER BY recorded_at ASC, id ASC
+                        ) AS arrival_delay_min,
+                        FIRST_VALUE(delay_min) OVER (
+                            PARTITION BY train_number, schedule_id, island_id ORDER BY recorded_at DESC, id DESC
+                        ) AS departure_delay_min
+                    FROM islands
+                ),
+                dwell_events AS (
+                    SELECT
+                        train_number,
+                        schedule_id,
+                        station_name,
+                        CAST(ROUND((JULIANDAY(MAX(recorded_at)) - JULIANDAY(MIN(recorded_at))) * 86400.0) AS INTEGER) AS dwell_seconds,
+                        MIN(arrival_delay_min) AS arr_delay,
+                        MIN(departure_delay_min) AS dep_delay,
+                        MAX(0, MIN(departure_delay_min) - MIN(arrival_delay_min)) AS delay_added
+                    FROM island_delays
+                    GROUP BY train_number, schedule_id, station_name, island_id
+                    HAVING dwell_seconds >= 20
+                )
+                SELECT
+                    station_name,
+                    COUNT(*) AS trip_count,
+                    AVG(dwell_seconds) AS avg_dwell,
+                    AVG(dep_delay) AS avg_delay,
+                    AVG(delay_added) AS avg_delay_added,
+                    MAX(dep_delay) AS max_delay
+                FROM dwell_events
+                GROUP BY station_name
+                HAVING COUNT(*) >= ?
+                """
+                cur.execute(
+                    dwell_query,
+                    (
+                        corridor_param, corridor_param, corridor_param,
+                        start_ts, start_ts,
+                        end_ts, end_ts,
+                        type_param, type_param, type_param,
+                        min_trips,
+                    ),
+                )
+                station_rows = cur.fetchall()
+
+                # Also collect delay distribution for percentiles per station
+                station_delays: Dict[str, List[float]] = {}
+                delay_sample_query = """
+                SELECT
+                    th.next_station,
+                    COALESCE(th.delay_min, 0)
+                FROM telemetry_history th
+                LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
+                LEFT JOIN trains t ON th.train_number = t.train_number
+                WHERE th.next_station IS NOT NULL AND th.next_station != ''
+                  AND (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
+                  AND (? IS NULL OR th.recorded_at >= ?)
+                  AND (? IS NULL OR th.recorded_at <= ?)
+                  AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                """
+                cur.execute(
+                    delay_sample_query,
+                    (
+                        corridor_param, corridor_param, corridor_param,
+                        start_ts, start_ts,
+                        end_ts, end_ts,
+                        type_param, type_param, type_param,
+                    ),
+                )
+                for stn, dly in cur.fetchall():
+                    if stn not in station_delays:
+                        station_delays[stn] = []
+                    station_delays[stn].append(float(dly))
+
+                candidate_nodes: List[Dict[str, Any]] = []
+
+                for row in station_rows:
+                    stn_name = str(row[0])
+                    tr_cnt = int(row[1])
+                    avg_dwell = float(row[2])
+                    avg_dly = float(row[3])
+                    avg_dly_added = float(row[4])
+                    max_dly = float(row[5])
+
+                    # Compute median and p90 from collected samples
+                    samples = sorted(station_delays.get(stn_name, [avg_dly]))
+                    n_samp = len(samples)
+                    med_dly = samples[n_samp // 2] if n_samp > 0 else avg_dly
+                    p90_idx = min(n_samp - 1, int(n_samp * 0.90)) if n_samp > 0 else 0
+                    p90_dly = samples[p90_idx] if n_samp > 0 else max_dly
+
+                    # Bottleneck scoring formula:
+                    # w1 = 0.50 (delay delta), w2 = 0.30 (dwell), w3 = 0.20 (max delay)
+                    # Baseline references: delta=10m, dwell=300s, max=45m
+                    c_delta = min(1.0, max(0.0, avg_dly_added / 10.0))
+                    c_dwell = min(1.0, max(0.0, avg_dwell / 300.0))
+                    c_max = min(1.0, max(0.0, max_dly / 45.0))
+                    raw_score = (0.50 * c_delta + 0.30 * c_dwell + 0.20 * c_max) * 100.0
+                    bottleneck_score = round(min(100.0, max(0.0, raw_score)), 1)
+
+                    if bottleneck_score >= 85.0:
+                        sev = BottleneckSeverity.CRITICAL
+                    elif bottleneck_score >= 60.0:
+                        sev = BottleneckSeverity.HIGH
+                    elif bottleneck_score >= 25.0:
+                        sev = BottleneckSeverity.MED
+                    else:
+                        sev = BottleneckSeverity.LOW
+
+                    candidate_nodes.append({
+                        "name": stn_name,
+                        "type": "STATION",
+                        "trips": tr_cnt,
+                        "avg_dwell": avg_dwell,
+                        "med_delay": med_dly,
+                        "p90_delay": p90_dly,
+                        "max_delay": max_dly,
+                        "delay_delta": avg_dly_added,
+                        "score": bottleneck_score,
+                        "severity": sev,
+                    })
+
+                # Sort by score descending, tie-broken by max_delay descending
+                candidate_nodes.sort(key=lambda x: (x["score"], x["max_delay"]), reverse=True)
+
+                nodes_list: List[BottleneckNode] = []
+                for idx, c in enumerate(candidate_nodes[:limit], start=1):
+                    nodes_list.append(
+                        BottleneckNode(
+                            rank=idx,
+                            name=c["name"],
+                            node_type=c["type"],
+                            total_trips=c["trips"],
+                            avg_dwell_seconds=c["avg_dwell"],
+                            median_delay_minutes=c["med_delay"],
+                            p90_delay_minutes=c["p90_delay"],
+                            max_delay_minutes=c["max_delay"],
+                            delay_delta_minutes=c["delay_delta"],
+                            bottleneck_score=c["score"],
+                            severity=c["severity"],
+                        )
+                    )
+
+                return BottleneckReport(
+                    corridor=corridor,
+                    time_window_start=start_ts,
+                    time_window_end=end_ts,
+                    total_trips_analyzed=total_trips,
+                    total_observations_analyzed=total_obs,
+                    nodes=tuple(nodes_list),
+                )
             finally:
                 cur.close()
 

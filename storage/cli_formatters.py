@@ -10,6 +10,9 @@ import unicodedata
 import zoneinfo
 
 from storage.models import (
+    BottleneckNode,
+    BottleneckReport,
+    BottleneckSeverity,
     CorridorPunctualitySummary,
     DatabaseStats,
     RecordingSessionDB,
@@ -363,6 +366,138 @@ def format_dwell_table(
 
     lines.append("-" * 105)
     lines.append(f"Total station stops: {len(dwells)}")
+    return "\n".join(lines)
+
+
+def format_bottleneck_bar(
+    score: float,
+    severity: BottleneckSeverity,
+    width: int = 10,
+    use_ascii: bool = False,
+    use_color: bool = True,
+) -> str:
+    """
+    Generate a fixed-width heatmap bar representing bottleneck severity.
+
+    Args:
+        score: Bottleneck score in range 0.0 to 100.0.
+        severity: Severity enum classification.
+        width: Total block width of the bar.
+        use_ascii: If True, uses 7-bit ASCII characters ('#' and '-').
+        use_color: If True, applies ANSI color escapes.
+
+    Returns:
+        Formatted string representing the heatmap bar and severity badge.
+    """
+    fraction = max(0.0, min(1.0, score / 100.0))
+    filled_len = int(round(fraction * width))
+    empty_len = width - filled_len
+
+    if use_ascii:
+        bar = "#" * filled_len + "-" * empty_len
+    else:
+        bar = "█" * filled_len + "░" * empty_len
+
+    sev_str = f"[{severity.value}]"
+    if not use_color:
+        return f"{bar} {score:>4.1f} {sev_str}"
+
+    # ANSI color mapping
+    if severity == BottleneckSeverity.CRITICAL:
+        color_code = "\033[1;31m"  # Bold Red
+    elif severity == BottleneckSeverity.HIGH:
+        color_code = "\033[35m"    # Magenta
+    elif severity == BottleneckSeverity.MED:
+        color_code = "\033[33m"    # Yellow
+    else:
+        color_code = "\033[32m"    # Green
+    reset = "\033[0m"
+
+    return f"{color_code}{bar} {score:>4.1f} {sev_str}{reset}"
+
+
+def format_bottlenecks_table(
+    report: BottleneckReport,
+    use_ascii: bool = False,
+    use_color: bool = True,
+) -> str:
+    """
+    Render corridor bottleneck and station dwell delay heatmaps to a tabular terminal display.
+
+    Args:
+        report: Aggregated BottleneckReport from repository.
+        use_ascii: If True, strips Unicode characters and transliterates Greek names.
+        use_color: If True, applies ANSI color highlighting.
+
+    Returns:
+        Rendered terminal text table with headers, heatmaps, and summary footer.
+    """
+    corridor_title = report.corridor or "ALL CORRIDORS"
+    if use_ascii:
+        corridor_title = transliterate_greek_to_latin(corridor_title)
+
+    span_info = ""
+    if report.time_window_start and report.time_window_end:
+        t0 = report.time_window_start[:10]
+        t1 = report.time_window_end[:10]
+        span_info = f" ({t0} to {t1})"
+    elif report.time_window_start:
+        span_info = f" (Since {report.time_window_start[:10]})"
+
+    header_title = (
+        f"CORRIDOR BOTTLENECK ANALYSIS: {corridor_title.upper()}"
+        f"{span_info} | {report.total_trips_analyzed} Trips Analyzed"
+    )
+
+    if not report.nodes:
+        div = "=" * min(100, max(len(header_title), 60))
+        return f"{div}\n{header_title}\n{div}\nNo corridor bottlenecks or recurring delay nodes identified matching criteria."
+
+    div = "=" * 105
+    sub_div = "-" * 105
+
+    lines = [
+        div,
+        header_title,
+        div,
+        f" #  {'SEGMENT / STATION':<26} {'TYPE':<7} {'TRIPS':>6} {'AVG DWELL':>10} {'MED DELAY':>11} {'MAX DELAY':>11}   {'BOTTLENECK INDEX':<20}",
+        sub_div,
+    ]
+
+    for node in report.nodes:
+        name = node.name
+        if use_ascii:
+            name = transliterate_greek_to_latin(name)
+        disp_name = name[:25]
+
+        # Format dwell time
+        m, s = divmod(int(round(node.avg_dwell_seconds)), 60)
+        dwell_str = f"{m}m {s:02d}s" if m > 0 else f"{s}s"
+
+        med_del = f"+{node.median_delay_minutes:.1f}m" if node.median_delay_minutes > 0 else f"{node.median_delay_minutes:.1f}m"
+        max_del = f"+{node.max_delay_minutes:.0f}m" if node.max_delay_minutes > 0 else f"{node.max_delay_minutes:.0f}m"
+
+        bar_str = format_bottleneck_bar(
+            node.bottleneck_score,
+            node.severity,
+            width=10,
+            use_ascii=use_ascii,
+            use_color=use_color,
+        )
+
+        lines.append(
+            f"{node.rank:>2}  {disp_name:<26} {node.node_type:<7} {node.total_trips:>6} {dwell_str:>10} {med_del:>11} {max_del:>11}   {bar_str}"
+        )
+
+    lines.append(sub_div)
+    worst = report.nodes[0]
+    worst_name = transliterate_greek_to_latin(worst.name) if use_ascii else worst.name
+    summary_msg = (
+        f"Corridor Health: {len(report.nodes)} Bottlenecks Identified | "
+        f"Primary Contributor: {worst_name} (+{worst.median_delay_minutes:.1f}m median delay, {worst.severity.value})"
+    )
+    lines.append(summary_msg)
+    lines.append(div)
     return "\n".join(lines)
 
 

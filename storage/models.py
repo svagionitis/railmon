@@ -4,6 +4,7 @@ Domain models and dataclasses for SQLite persistence.
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
 from train_tracker import TrainPosition
@@ -465,5 +466,71 @@ class ReplayObservation:
     position: TrainPosition
     recorded_at: str
     recorded_epoch: float
+
+
+class BottleneckSeverity(Enum):
+    """Severity classification for network bottlenecks."""
+
+    LOW = "LOW"
+    MED = "MED"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True)
+class BottleneckNode:
+    """Analytical summary of delay accumulation at a station node or corridor segment."""
+
+    rank: int
+    name: str
+    node_type: str  # "STATION" or "SEGMENT"
+    total_trips: int
+    avg_dwell_seconds: float
+    median_delay_minutes: float
+    p90_delay_minutes: float
+    max_delay_minutes: float
+    delay_delta_minutes: float  # Delay gained specifically at this node
+    bottleneck_score: float  # Normalized 0.0 - 100.0 index
+    severity: BottleneckSeverity
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "rank": self.rank,
+            "name": self.name,
+            "type": self.node_type,
+            "total_trips": self.total_trips,
+            "avg_dwell_seconds": round(self.avg_dwell_seconds, 1),
+            "median_delay_minutes": round(self.median_delay_minutes, 1),
+            "p90_delay_minutes": round(self.p90_delay_minutes, 1),
+            "max_delay_minutes": round(self.max_delay_minutes, 1),
+            "delay_delta_minutes": round(self.delay_delta_minutes, 1),
+            "bottleneck_score": round(self.bottleneck_score, 1),
+            "severity": self.severity.value,
+        }
+
+
+@dataclass(frozen=True)
+class BottleneckReport:
+    """Aggregate corridor bottleneck report containing ranked nodes."""
+
+    corridor: Optional[str]
+    time_window_start: Optional[str]
+    time_window_end: Optional[str]
+    total_trips_analyzed: int
+    total_observations_analyzed: int
+    nodes: Tuple[BottleneckNode, ...]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert entire report to dictionary."""
+        return {
+            "corridor": self.corridor or "ALL",
+            "time_window_start": self.time_window_start,
+            "time_window_end": self.time_window_end,
+            "total_trips_analyzed": self.total_trips_analyzed,
+            "total_observations_analyzed": self.total_observations_analyzed,
+            "bottlenecks": [n.to_dict() for n in self.nodes],
+        }
+
 
 
