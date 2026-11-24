@@ -32,11 +32,31 @@ While the current `railmon` TUI provides a real-time Braille GIS terminal map, l
 | **Tier 7 (Visual/GIS)** | **F-7.2** | Infrastructure GIS Layers (Tunnels, Bridges & Signals) | `g` / `G` / CLI | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.3** | Custom Terminal Color Theme Profiles | `F10` / `K` | **Implemented** | [`tui/theme.py`](../../tui/theme.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`tui/app.py`](../../tui/app.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 7 (Visual/GIS)** | **F-7.4** | Dual Split-Screen Multi-Train Follow Viewport | `D` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
-| **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/db.py`](../../storage/db.py) |
+| **Tier 8 (DevOps)** | **F-8.1** | Embedded Zero-Dependency Web Map Daemon | `railmon serve` | **Implemented** | [`server/daemon.py`](../../server/daemon.py), [`server/handler.py`](../../server/handler.py), [`server/sse.py`](../../server/sse.py), [`server/assets.py`](../../server/assets.py), [`server/models.py`](../../server/models.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 8 (DevOps)** | **F-8.2** | Prometheus & OpenMetrics Operational Exporter | `railmon metrics` | **Implemented** | [`exporter/server.py`](../../exporter/server.py), [`exporter/collector.py`](../../exporter/collector.py), [`exporter/formatter.py`](../../exporter/formatter.py), [`exporter/models.py`](../../exporter/models.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 8 (DevOps)** | **F-8.3** | GTFS-Realtime (GTFS-RT) Protocol Buffer Feed Exporter | `railmon export --gtfs-rt` | **Implemented** | [`gtfs_rt/wire.py`](../../gtfs_rt/wire.py), [`gtfs_rt/models.py`](../../gtfs_rt/models.py), [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py), [`gtfs_rt/exporter.py`](../../gtfs_rt/exporter.py), [`gtfs_rt/server.py`](../../gtfs_rt/server.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
 | **Tier 9 (Analytics)** | **F-9.1** | Corridor Bottleneck & Station Dwell Delay Heatmaps | `railmon history bottlenecks` | **Implemented** | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py) |
-| **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* | **Implemented** | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 9 (Analytics)** | **F-9.2** | Empirical Segment Transit Time & ML/Regression ETA Engine | *(Auto)* / `railmon history segments` | **Implemented** | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 10 (API Parity)** | **F-10.1** | Multiplexed SSE Ingestion (`trainHistory`, `scheduleCards` Ghosts & `delayUpdates`) | `u` / `U` / *(Auto)* | **Implemented** | [`train_tracker.py`](../../train_tracker.py), [`tui/stream_worker.py`](../../tui/stream_worker.py), [`tui/state.py`](../../tui/state.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/app.py`](../../tui/app.py), [`tui/renderer.py`](../../tui/renderer.py), [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py), [`exporter/collector.py`](../../exporter/collector.py) |
+| **Tier 10 (API Parity)** | **F-10.2** | Extended Telemetry Signal & Track-Snap Fields (`inDeadZone`, `fxk`, `approximate`, `railwayId`) | *(Auto)* | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/state.py`](../../tui/state.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`exporter/collector.py`](../../exporter/collector.py) |
+| **Tier 10 (API Parity)** | **F-10.3** | Full MSD GIS Layers (`dead_zone` Polygons, Level Crossings, Switches & Track Attributes) | `g` / `G` / `railmon infrastructure` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/geo.py`](../../tui/geo.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/state.py`](../../tui/state.py), [`server/handler.py`](../../server/handler.py), [`server/assets.py`](../../server/assets.py) |
+| **Tier 10 (API Parity)** | **F-10.4** | Station Directory, Amenities & Media Proxy | `railmon station` / `o` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py), [`server/handler.py`](../../server/handler.py), [`server/assets.py`](../../server/assets.py) |
+| **Tier 10 (API Parity)** | **F-10.5** | Live Cab Stream Schema Alignment (`hls.*`) & Tunnel Reconnect Recovery | `w` / `W` / `railmon cab` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py), [`server/handler.py`](../../server/handler.py) |
+| **Tier 11 (TUI Dispatch)** | **F-11.1** | Interactive Time-Distance (Marey / Stringline) Diagram | `y` / `Y` / `railmon history stringline` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py), [`tui/geo.py`](../../tui/geo.py), [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 11 (TUI Dispatch)** | **F-11.2** | Corridor Elevation & Speed-vs-Chainage Profile | `z` / `Z` / `railmon history profile` | Planned | [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py), [`tui/geo.py`](../../tui/geo.py), [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 11 (TUI Dispatch)** | **F-11.3** | Persistent User Configuration (`config.toml`) | `--config` / *(Auto)* | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/app.py`](../../tui/app.py), [`tui/theme.py`](../../tui/theme.py), [`watchdog.py`](../../watchdog.py) |
+| **Tier 12 (Web Parity)** | **F-12.1** | Web DVR Historical Playback & Timeline Scrubber | `railmon serve --replay <db>` | Planned | [`server/daemon.py`](../../server/daemon.py), [`server/handler.py`](../../server/handler.py), [`server/sse.py`](../../server/sse.py), [`server/assets.py`](../../server/assets.py), [`tui/stream_worker.py`](../../tui/stream_worker.py), [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 12 (Web Parity)** | **F-12.2** | Inline Web Station Boards, Timetable Drawer, Station Photos & Cab Video Modal | Web UI (`/api/station/*`, `/api/schedule/*`, `/api/cab/*`) | Planned | [`server/handler.py`](../../server/handler.py), [`server/assets.py`](../../server/assets.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 12 (Web Parity)** | **F-12.3** | Web Corridor Bottleneck & Empirical Delay Heatmap Overlay | Web UI (`/api/analytics/*`) | Planned | [`server/handler.py`](../../server/handler.py), [`server/assets.py`](../../server/assets.py), [`storage/repository.py`](../../storage/repository.py) |
+| **Tier 13 (Commuter+)** | **F-13.1** | Delay-Aware Point-to-Point Journey & Connection Planner | `railmon route` / `r` | Planned | [`train_tracker.py`](../../train_tracker.py), [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), [`tui/app.py`](../../tui/app.py) |
+| **Tier 13 (Commuter+)** | **F-13.2** | Fleet, Corridor & Global Conflict Rule-Based Watchdog | `railmon watch --corridor` / `--all-conflicts` | Planned | [`watchdog.py`](../../watchdog.py), [`train_tracker.py`](../../train_tracker.py), [`tui/state.py`](../../tui/state.py) |
+| **Tier 14 (Ecosystem)** | **F-14.1** | Persistent Safety Incident & Anomaly Audit Log (SQLite Schema v2) | `railmon history incidents` | Planned | [`storage/schema.py`](../../storage/schema.py), [`storage/recorder.py`](../../storage/recorder.py), [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 14 (Ecosystem)** | **F-14.2** | Locomotive Fleet Utilization & Coupled Consist (*Διπλή Έλξη*) Analytics | `railmon history fleet` | Planned | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 14 (Ecosystem)** | **F-14.3** | Automated Self-Contained Operations Reports (Markdown / Standalone HTML+SVG) | `railmon history report` | Planned | [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 14 (Ecosystem)** | **F-14.4** | Companion Static GTFS Feed Generator (`.zip`) | `railmon export --gtfs-static` | Planned | `gtfs_rt/static_exporter.py` *(proposed)*, [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 14 (Ecosystem)** | **F-14.5** | Additional Telemetry & GIS Exports (GPX, KML & NDJSON Streaming) | `railmon history export --format gpx\|kml` / `--ndjson` | Planned | [`storage/repository.py`](../../storage/repository.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 14 (Ecosystem)** | **F-14.6** | Grafana Dashboard & Prometheus Alerting Rules Bundle | `railmon metrics --export-dashboard` | Planned | [`exporter/collector.py`](../../exporter/collector.py), [`train_tracker.py`](../../train_tracker.py) |
+| **Tier 14 (Ecosystem)** | **F-14.7** | Zero-Dependency Shell Autocompletion Generator | `railmon completions <shell>` | Planned | [`train_tracker.py`](../../train_tracker.py), [`tui/data/stations.json`](../../tui/data/stations.json) |
 
 ---
 
@@ -849,15 +869,15 @@ Expands `railmon` into multi-user operations, third-party transit apps, and ente
 
 ---
 
-### F-8.1: Embedded Zero-Dependency Web Map Daemon (`railmon serve`) — *Planned*
+### F-8.1: Embedded Zero-Dependency Web Map Daemon (`railmon serve`) — *Implemented*
 
 > **Detailed Implementation Plan:** [`../plans/features/f-8-1-embedded-zero-dependency-web-map-daemon-plan.md`](../plans/features/f-8-1-embedded-zero-dependency-web-map-daemon-plan.md)
 
 #### Overview
-A lightweight headless service utilizing Python's built-in `http.server` and socket library to serve a responsive browser GIS dashboard on `http://localhost:8080`.
-- Serves an embedded Leaflet / MapLibre single-page web app with OpenStreetMap / CartoDB tiles.
-- Pushes live train positions and track geometry via WebSockets or Server-Sent Events (SSE).
-- Requires zero third-party dependencies (`pip install` not required).
+A lightweight multi-threaded headless HTTP service in [`server/`](../../server) ([`server/daemon.py`](../../server/daemon.py), [`server/handler.py`](../../server/handler.py), [`server/sse.py`](../../server/sse.py), [`server/assets.py`](../../server/assets.py), [`server/models.py`](../../server/models.py)) utilizing Python's built-in `http.server` and socket library to serve a responsive browser GIS dashboard on `http://localhost:8080`.
+- Serves an embedded Leaflet single-page web app with CartoDB / OpenStreetMap tiles, corridor tracks, station nodes, infrastructure layers, speed limits, and conflict alert banners.
+- Pushes live train positions, trails, and safety conflict alerts via Server-Sent Events (`/api/stream`), exposes JSON REST endpoints (`/api/trains`, `/api/conflicts`, `/api/health`, `/api/history/train/{id}`), and cross-exposes `/metrics` (F-8.2) and `/gtfs-rt/*` (F-8.3).
+- Requires zero third-party runtime dependencies (`pip install` not required).
 
 ---
 
@@ -1037,7 +1057,471 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 
 ---
 
-## 12. Consolidated Controls & CLI Reference
+## 12. Tier 10: Upstream `railway.gov.gr` Telemetry & GIS Parity
+
+Unlocks live, unauthenticated upstream telemetry streams, sensor quality indicators, GIS layers, station media, and schema fixes documented in [`./railway-gov-gr-api-reference.md`](./railway-gov-gr-api-reference.md) that are not yet consumed by [`train_tracker.py`](../../train_tracker.py).
+
+### 12.1 Upstream Multiplexed Data & GIS Pipeline (Mermaid + ASCII)
+
+```mermaid
+flowchart TD
+    subgraph Upstream ["railway.gov.gr Public Endpoints"]
+        SSE["GET /api/train-stream (Multiplexed SSE)"]
+        MSD["GET /api/msd/geo (Full 9-Layer GIS)"]
+        STN["GET /api/public/stations/{id} & /station-media"]
+        CAB["GET /api/public/trains/{id}/stream (hls.*)"]
+    end
+
+    subgraph Client ["Client Layer (train_tracker.py)"]
+        MUX["Multiplexed SSE Parser"]
+        GEO_PARSE["Extended MSD Feature Parser"]
+        MEDIA["Station Metadata & Media Client"]
+        CAB_PARSE["Nested hls.* Parser & Recovery Poller"]
+    end
+
+    subgraph Consumers ["railmon Subsystems"]
+        STORE["TrainStateStore (Live + Ghost + Instant Trails)"]
+        SAFETY["Watchdogs (F-5.1 Conflicts / F-5.2 Dead Zones)"]
+        UI["TUI & Web Map (tui/ + server/)"]
+        FEEDS["GTFS-RT & Prometheus (gtfs_rt/ + exporter/)"]
+    end
+
+    SSE -->|"trainPositionsUx / trainHistory / scheduleCards / delayUpdates"| MUX
+    MSD -->|"dead_zone / crossing / switch / track attrs"| GEO_PARSE
+    STN --> MEDIA
+    CAB --> CAB_PARSE
+
+    MUX --> STORE
+    GEO_PARSE --> SAFETY
+    GEO_PARSE --> UI
+    STORE --> SAFETY
+    STORE --> UI
+    STORE --> FEEDS
+    MEDIA --> UI
+    CAB_PARSE --> UI
+```
+
+```text
++---------------------------------------------------------------------------------+
+|                   Upstream railway.gov.gr Multiplexed Ingestion                 |
++---------------------------------------------------------------------------------+
+   /api/train-stream                                      /api/msd/geo
+     |-- event: trainPositionsUx  (43 fields + ux.*)        |-- dead_zone (225)
+     |-- event: trainHistory      (~20-pt instant trails)   |-- crossing  (1000+)
+     |-- event: scheduleCards     (ghost scheduled runs)    |-- switch    (1000+)
+     +-- event: delayUpdates      (incremental deltas)      +-- track     (electrified/OOS)
+                   |                                                   |
+                   v                                                   v
+   +-----------------------------------+             +-----------------------------------+
+   |   TrainStateStore (tui/state.py)  | <---------> |  GIS & Watchdog Layer (tui/geo)   |
+   |  - Instant breadcrumb hydration   |             |  - RF dead-zone alert suppression |
+   |  - Ghost run tracking (no GPS)    |             |  - OSM railwayId edge matching    |
+   |  - Live delay delta patching      |             |  - RTK (fxk) & dead-reckon flags  |
+   +-----------------------------------+             +-----------------------------------+
+```
+
+---
+
+### F-10.1: Multiplexed SSE Ingestion (`trainHistory`, `scheduleCards` Ghosts & `delayUpdates`) — *Implemented*
+
+> **Detailed Implementation Plan:** [`../plans/features/f-10-1-multiplexed-sse-ingestion-plan.md`](../plans/features/f-10-1-multiplexed-sse-ingestion-plan.md)
+
+#### Overview
+Currently [`RailwayGovClient.stream_train_positions()`](../../train_tracker.py) filters strictly for `event: trainPositionsUx`, discarding three additional live SSE event channels documented in [`./railway-gov-gr-api-reference.md`](./railway-gov-gr-api-reference.md#72-multiplexed-sse-event-catalog):
+1. **`trainHistory` Instant Breadcrumb Hydration:** On initial connect, upstream delivers ~20 trailing 1 Hz points per active train. Ingesting this immediately hydrates `TrainRecord.trail` breadcrumbs and F-2.1 speed sparklines at startup instead of waiting for live ticks to accumulate.
+2. **`scheduleCards` ("Ghost" Runs Without GPS):** Surfaces active `in_progress` scheduled trains that lack a live transponder signal (`ghost: true`, `gpsStatus: "none"`, time-estimated `progress`) with a dedicated `[GHOST]` indicator in the TUI roster (toggleable via `u` / `U`), Station Departure Boards, and GTFS-RT `TripUpdates` ([`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py)).
+3. **`delayUpdates` Incremental Patching:** Applies event-driven delay deltas (`{"delays": [{"trainNumber": ..., "delay": ...}]}`) in-place between position batches for sub-second schedule accuracy.
+
+---
+
+### F-10.2: Extended Telemetry Signal & Track-Snap Fields (`inDeadZone`, `fxk`, `approximate`, `railwayId`) — *Planned*
+
+#### Overview
+Extend [`TrainPosition`](../../train_tracker.py) to parse additional live `trainPositionsUx` fields already transmitted on every SSE frame:
+- **`ux.signal.inDeadZone` & `ux.signal.zoneType`:** Explicit upstream RF/GNSS tunnel dead-zone classification.
+- **`approximate` (`bool`) & `fxk` (`bool`):** Distinguishes dead-reckoned/interpolated positions from locked HEPOS/RTK GNSS fixes.
+- **`railwayId` (`str`) & `alongTrackDistance` (`float`):** Exact snapped OpenStreetMap track edge ID and linear offset, enabling high-precision track-edge conflict validation in F-5.1.
+- **`distanceToNextStation_m` (`int`) & `nextStationId` (`str`):** Uses authoritative upstream along-track distance (falling back to Haversine when `null`) and direct station ObjectId resolution.
+
+#### Operational Integration
+- **Safety Watchdogs (F-5.1 & F-5.2):** Suppress false `[DROPPED]` / `[FROZEN]` alarms when `inDeadZone == True` or `approximate == True`, and display `[DEAD ZONE]` / `[RTK]` status badges in [`tui/renderer.py`](../../tui/renderer.py).
+- **Observability (F-8.2):** Expose `railmon_trains_in_dead_zone` and `railmon_trains_rtk_fixed` gauges in [`exporter/collector.py`](../../exporter/collector.py).
+
+---
+
+### F-10.3: Full MSD GIS Layers (`dead_zone` Polygons, Level Crossings, Switches & Track Attributes) — *Planned*
+
+#### Overview
+Expand [`RailwayGovClient.get_rail_infrastructure()`](../../train_tracker.py) and [`tui/geo.py`](../../tui/geo.py) beyond tunnels, bridges, and signals to ingest the full `/api/msd/geo` entity catalog (passing `limit=10000` per entity type to prevent silent truncation):
+- **RF/GNSS `dead_zone` Polygons (`225` features):** Point-in-polygon detection feeding directly into F-5.2 telemetry-drop resilience and map visualization.
+- **Level `crossing`s (`hasBarrier`):** Renders gated vs. ungated level crossings (`×` / `X`) on high-zoom TUI and Leaflet views.
+- **Turnout `switch`es (`isElectric`):** Highlights electric interlocking turnouts vs. manual points at major junctions.
+- **Enriched `track` Attributes (`electrified`, `isOOS`, `railway_type`):** Differentiates electrified 25 kV AC corridors, diesel branches, narrow-gauge lines (e.g., Odontotos rack railway), and out-of-service (`isOOS: true`) track sections.
+
+---
+
+### F-10.4: Station Directory, Amenities & Media Proxy (`railmon station <name>`) — *Planned*
+
+#### Overview
+Expose full station facility metadata from `/api/public/stations/{stationId}` and wrap `/api/public/station-media?pathname=...` (with strict pathname validation against path traversal) in [`train_tracker.py`](../../train_tracker.py):
+- **CLI Subcommand (`railmon station <query>`):** Displays bilingual station names (`el`/`en`), railway type (`station`/`halt`/`stop`), operational status, operator, street address, opening hours, contact details, accessibility & facility badges (`wheelchair`, `toilets`, `parking`), sanitized plain-text description, and downloadable photo URLs (`--download-photo`, `--json`).
+- **TUI Integration (`o` / `O`):** Displays station amenities and facility summary inside the Station Inspector pane ([`tui/renderer.py`](../../tui/renderer.py)).
+- **Web Map Integration (`railmon serve`):** Proxies station details and cover photos via `/api/station/{id}` and `/api/station-media` for rich station popups in [`server/assets.py`](../../server/assets.py).
+
+---
+
+### F-10.5: Live Cab Stream Schema Alignment (`hls.*`) & Tunnel Reconnect Recovery — *Planned*
+
+#### Overview
+Aligns [`CabStreamInfo.from_dict()`](../../train_tracker.py) with the live upstream `/api/public/trains/{trainId}/stream` schema verified in [`./railway-gov-gr-api-reference.md`](./railway-gov-gr-api-reference.md#58-get-apipublictrainstrainidstream):
+- **Nested `hls.*` Parsing:** Inspect `payload.get("hls", {})` for `playlistUrl`, `isLive`, and `streamingStatus` (while preserving backward compatibility with flat mock payloads).
+- **Liveness Predicate & Cache Busting:** Treat streams as playable when `playlistUrl` is present and `(isLive is True or streamingStatus.lower() == "live")`, appending `?_r=<epochMs>` on stall recovery.
+- **Tunnel Reconnect Polling:** Optionally poll every `1.5s–2.0s` (`--auto-reconnect`) when a locomotive temporarily loses cellular/Starlink uplink inside mountain tunnels.
+
+---
+
+## 13. Tier 11: Advanced TUI Dispatch, Profiles & Configuration
+
+Brings classic railway operations diagrams and persistent user customization to the terminal interface while maintaining 100% Python standard-library purity.
+
+---
+
+### F-11.1: Interactive Time-Distance (Marey / Stringline) Diagram (`y` / `Y` / `railmon history stringline`) — *Planned*
+
+#### Overview
+Plots a classic railway dispatcher **Time-Distance (Marey / Stringline) Diagram** directly on the Braille canvas (or ASCII fallback), mapping corridor stations and kilometer chainage along the vertical axis against wall-clock time along the horizontal axis. Operators immediately see scheduled vs. actual trajectories, single-track crossings, express overtakes, and suburban headway bunching.
+
+#### Visual Mockup (ASCII)
+```text
++------------------------------------------------------------------------------+
+| [ TIME-DISTANCE STRINGLINE: PATHE (ATHENS <-> THESSALONIKI) | 12:00 - 16:00 ]|
++------------------------------------------------------------------------------+
+| km 502 Thessaloniki |                    / IC52                   \ IC55     |
+| km 465 Platy        |                  /                           \         |
+| km 432 Katerini     |                /                              \        |
+| km 350 Larissa      |             / (X Crossing 13:42)               \       |
+| km 270 Domokos      |           /   \ IC53                            \      |
+| km 220 Lianokladi   |         /       \                                \     |
+| km  61 Oinoi        |       /           \   / 1597                      \    |
+| km   0 Athens       |_____/_______________\/_____________________________\___|
+|                     12:00      13:00      14:00      15:00      16:00        |
++------------------------------------------------------------------------------+
+| [y / Esc] Close   [0-3] Corridor   [+/-] Time Span   [h/l] Pan Time          |
++------------------------------------------------------------------------------+
+```
+
+#### Technical Design
+- **In-TUI Modal (`y` / `Y`):** Renders live session trails + SQLite history (when `--record` or `--replay` is active) overlaid against dashed scheduled timetable lines.
+- **CLI Subcommand (`railmon history stringline --corridor PATHE --from ... --to ...`):** Generates terminal Braille/ASCII or standalone SVG stringline diagrams from recorded SQLite runs.
+
+---
+
+### F-11.2: Corridor Elevation & Speed-vs-Chainage Profile (`z` / `Z` / `railmon history profile`) — *Planned*
+
+#### Overview
+Leverages the `altitude` (meters above sea level) and `chainage_m` fields already captured in [`TrainPosition`](../../train_tracker.py) and `telemetry_history` ([`storage/schema.py`](../../storage/schema.py)) to render a dual-track longitudinal profile:
+1. **Top Band:** Instantaneous train speed curve overlaid against corridor posted speed limits and active Temporary Speed Restrictions from [`tui/data/speed_limits.json`](../../tui/data/speed_limits.json).
+2. **Bottom Band:** Shaded terrain elevation profile highlighting steep mountain grades (Bralos, Kallidromo, Mount Othrys, Domokos Pass) and tunnel portals.
+
+#### Visual Mockup (ASCII)
+```text
++------------------------------------------------------------------------------+
+| [ SPEED & ELEVATION PROFILE: TRAIN IC52 (PATHE) | km 180 -> km 360 ]         |
++------------------------------------------------------------------------------+
+| 160 km/h |-------- limit ---------____----------- limit -------------------- |
+| 120 km/h |   ▄▄▄▄▄▄              /    \  ▄▄▄▄▄▄▄▄▄▄▄                         |
+|  80 km/h |  /      \___▄▄▄▄▄▄___/      \/           \                        |
+|   0 km/h +------------------------------------------------------------------ |
+| 600 m    |               ▲ Domokos Pass (580m)                               |
+| 300 m    |         ▄▄▄▄███▄▄▄▄                                               |
+|   0 m    |▄▄▄▄▄▄▄███████████████▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ |
+|          km 180   Lianokladi     [TUNNEL] Domokos          Larissa   km 360  |
++------------------------------------------------------------------------------+
+| [z / Esc] Close   [Tab] Switch Train   [e] Export CSV Profile                |
++------------------------------------------------------------------------------+
+```
+
+---
+
+### F-11.3: Persistent User Configuration (`~/.config/railmon/config.toml`) — *Planned*
+
+#### Overview
+Adds zero-dependency persistent configuration using Python 3.11+ standard-library `tomllib` (with an INI fallback for Python 3.10) resolved in strict precedence order: **CLI flags > environment variables (`RAILMON_*`) > `--config <path>` > user config file > built-in defaults**.
+
+#### Supported Configuration Keys
+- **`[tui]`:** Default `theme`, `corridor_preset`, `breadcrumb_mode`, `station_label_mode`, `track_color_mode`, `ascii_mode`, and `favorite_trains` / `favorite_stations`.
+- **`[storage]`:** Default `db_path`, `deadband_enabled`, `deadband_meters`, `retention_days`, and `archive_dir`.
+- **`[safety]`:** Custom Temporary Speed Restriction (TSR / slow-order) overrides and conflict audio-bell preferences.
+- **`[alerts]`:** Default webhook endpoints (resolved safely from environment variable references, never hardcoded secrets) and commuter watch presets.
+
+---
+
+## 14. Tier 12: Web Map Daemon (`railmon serve`) Parity & Interactive Upgrades
+
+Brings the browser GIS dashboard ([`server/`](../../server)) to full feature parity with the CLI, TUI, and SQLite analytical engine while preserving zero external dependencies.
+
+### 14.1 Expanded Web Map Architecture (Mermaid + ASCII)
+
+```mermaid
+flowchart LR
+    subgraph Sources ["Data & Persistence Sources"]
+        LIVE["Live SSE / Mock Worker"]
+        REPLAY["SQLite ReplayWorker (--replay)"]
+        SQLDB[("SQLite WAL History DB")]
+        UPSTREAM["railway.gov.gr Public REST & Media"]
+    end
+
+    subgraph Daemon ["WebMapServer (server/daemon.py & handler.py)"]
+        SSE_EP["/api/stream (Live or DVR SSE)"]
+        DVR_EP["/api/replay/control (Seek / Speed / Pause)"]
+        PROXY_EP["/api/station/* & /api/schedule/* & /api/cab/*"]
+        ANA_EP["/api/analytics/bottlenecks & /segments"]
+    end
+
+    subgraph Browser ["Embedded Leaflet SPA (server/assets.py)"]
+        MAP["Interactive Map + Heatmap Layer"]
+        DVR_UI["DVR Timeline Scrubber Bar"]
+        DRAWER["Station Board, Timetable, Photos & Cab Modal"]
+    end
+
+    LIVE --> SSE_EP
+    REPLAY --> SSE_EP
+    SQLDB --> REPLAY
+    SQLDB --> ANA_EP
+    UPSTREAM --> PROXY_EP
+
+    SSE_EP --> MAP
+    DVR_UI --> DVR_EP
+    DVR_EP --> REPLAY
+    PROXY_EP --> DRAWER
+    ANA_EP --> MAP
+```
+
+```text
++---------------------------------------------------------------------------------+
+|                      Upgraded railmon serve Architecture                        |
++---------------------------------------------------------------------------------+
+  Browser Leaflet SPA (server/assets.py)
+    |-- [DVR Scrubber]  --- POST/GET /api/replay/* ---> ReplayWorker -> SQLite WAL
+    |-- [Station Click] --- GET /api/station/{id}/* --> Cached Proxy -> railway.gov.gr
+    |-- [Train Click]   --- GET /api/schedule/{id}  --> Cached Proxy -> railway.gov.gr
+    |-- [Cab Stream]    --- GET /api/cab/{id}       --> HLS Resolver -> Cloudflare HLS
+    +-- [Heatmap Layer] --- GET /api/analytics/*    --> HistoricalRepository (F-9.1/9.2)
+```
+
+---
+
+### F-12.1: Web DVR Historical Playback & Timeline Scrubber (`railmon serve --replay <db>`) — *Planned*
+
+#### Overview
+Connects the existing SQLite `ReplayWorker` ([`tui/stream_worker.py`](../../tui/stream_worker.py)) to [`WebMapServer`](../../server/daemon.py), allowing operators to replay recorded historical traffic directly in a web browser:
+- **Timeline Controls:** Play/Pause toggle, interactive timeline scrub slider, $\pm 5\text{ min}$ skip buttons, and playback speed selector (`1x`, `5x`, `15x`, `60x`).
+- **Telemetry Sync:** Streams virtual-clock timestamps and historical trail segments over `/api/stream` so map markers, HUD roster, and speed readouts update identically to live mode.
+
+---
+
+### F-12.2: Inline Web Station Boards, Timetable Drawer, Station Photos & Cab Video Modal — *Planned*
+
+#### Overview
+Replaces the external departure redirect ([`server/assets.py`](../../server/assets.py#L941)) and unwired `/cab?train=...` link ([`server/assets.py`](../../server/assets.py#L1216)) with native in-dashboard panels backed by TTL-cached read-only proxy endpoints in [`server/handler.py`](../../server/handler.py):
+- **Station Drawer (`/api/station/{id}`, `/api/station/{id}/board`, `/api/station-media`):** Clicking any station node opens live arrivals/departures, accessibility/amenity badges, and station cover photography without leaving the SPA.
+- **Train Timetable Drawer (`/api/schedule/{id}`):** Clicking any train opens its complete calling-point itinerary with scheduled vs. actual times in `Europe/Athens` local time and platform numbers.
+- **Working Cab Stream Modal (`/api/cab/{id}`):** Resolves live Cloudflare HLS manifests (using F-10.5 `hls.*` parsing) and renders a clean modal with native Safari HLS playback / direct `.m3u8` player launch link and live status indicator.
+
+---
+
+### F-12.3: Web Corridor Bottleneck & Empirical Delay Heatmap Overlay — *Planned*
+
+#### Overview
+Exposes F-9.1 ([`railmon history bottlenecks`](../../storage/repository.py)) and F-9.2 ([`railmon history segments`](../../storage/repository.py)) via `/api/analytics/bottlenecks` and `/api/analytics/segments` when `railmon serve --db <path>` is active:
+- **Leaflet Heatmap Overlay:** Color-codes track segments and station circles by median delay delta and bottleneck index (`LOW` green -> `MED` amber -> `HIGH` red).
+- **Segment Tooltips:** Hovering any track section displays historical `p50` / `p90` transit durations, average dwell times, and sample counts.
+
+---
+
+## 15. Tier 13: Commuter Journey Planning & Fleet Watchdogs
+
+Expands passenger decision support and continuous operational alerting beyond single-train lookups.
+
+### 15.1 Journey Planner & Rule-Based Watchdog Flow (Mermaid + ASCII)
+
+```mermaid
+flowchart TD
+    subgraph Planner ["F-13.1: Delay-Aware Connection Planner"]
+        Q["railmon route ORIGIN DEST"]
+        UP["Upcoming Schedules + Live Delays"]
+        EMP["F-9.2 Empirical Segment Runtimes"]
+        GRAPH["Direct & 1-Transfer Itinerary Search (SKA / Larissa / Platy)"]
+        RISK["Transfer Buffer Risk Classifier (SAFE / TIGHT / MISSED)"]
+    end
+
+    subgraph Rules ["F-13.2: Multi-Train / Global Rule Watchdog"]
+        W["railmon watch --corridor / --all-conflicts"]
+        EVAL["Rule Engine (Delay Thresholds + F-5.1 Conflicts + F-5.2 Drops)"]
+        DISP["Multimodal Dispatcher (Desktop Toast / Bell / Discord / Slack / Telegram)"]
+    end
+
+    Q --> GRAPH
+    UP --> GRAPH
+    EMP --> GRAPH
+    GRAPH --> RISK
+
+    W --> EVAL
+    EVAL --> DISP
+```
+
+```text
++--------------------------------------+      +--------------------------------------+
+|    railmon route Airport Larissa     |      | railmon watch --corridor PATHE       |
++--------------------------------------+      |   --delay-gt 10 --all-conflicts      |
+                  |                           +--------------------------------------+
+                  v                                              |
+  Leg 1: 3203 Airport -> SKA (+2m)                               v
+         Transfer @ SKA: 14m -> 12m [OK]       Continuous Fleet Rule Evaluation:
+  Leg 2: IC54 SKA -> Larissa (+0m, p90)         - Per-corridor / per-station delay rules
+         Est. Arrival: 14:18 EET                - Global F-5.1 conflict forwarding
+                                                - Cooldown & deduplication per rule
+```
+
+---
+
+### F-13.1: Delay-Aware Point-to-Point Journey & Connection Planner (`railmon route` / `r`) — *Planned*
+
+#### Overview
+Combines `/api/public/schedules/upcoming`, live SSE delays, and F-9.2 empirical segment runtimes ([`storage/repository.py`](../../storage/repository.py)) to compute practical passenger itineraries:
+- **Direct & 1-Transfer Search:** Discovers both direct trains and realistic single-transfer connections across major interchange hubs (`SKA`, `Athens`, `Oinoi`, `Larissa`, `Platy`, `Thessaloniki`, `Kiato`).
+- **Live Transfer Risk Classification:** Adjusts incoming leg arrivals by live delay and empirical `p90` runtime to flag connections as `SAFE` ($\ge 10\text{ min}$ buffer), `TIGHT` ($3\text{--}9\text{ min}$), or `AT RISK / MISSED` ($< 3\text{ min}$).
+- **CLI & TUI Access:** `railmon route "Athens Airport" Larissa [--at HH:MM] [--json]` and interactive `r` / `R` prompt modal in the TUI.
+
+---
+
+### F-13.2: Fleet, Corridor & Global Conflict Rule-Based Watchdog (`railmon watch --corridor` / `--all-conflicts`) — *Planned*
+
+#### Overview
+Generalizes [`watchdog.py`](../../watchdog.py) from tracking a single train number to declarative multi-train, corridor, station, and fleet-wide operational watch rules:
+- **Commuter Rules:** e.g., `railmon watch --station Koropi --dest Athens --window 07:00-09:30 --delay-gt 10` notifies commuters whenever any morning train serving their commute exceeds a delay threshold.
+- **Safety Operations Rules:** e.g., `railmon watch --all-conflicts --corridor PATHE --webhook <url>` continuously forwards F-5.1 opposing/headway conflicts and F-5.2 telemetry drops to Discord, Slack, Telegram, or generic JSON webhooks with per-incident cooldown deduplication.
+
+---
+
+## 16. Tier 14: Historical Forensics, Fleet Analytics & Ecosystem Interoperability
+
+Extends SQLite long-term analytics, transit data standard interoperability, observability packaging, and CLI developer ergonomics.
+
+### 16.1 SQLite Schema v2 (`incidents`) & Paired GTFS Ecosystem (Mermaid + ASCII)
+
+```mermaid
+erDiagram
+    trains ||--o{ scheduled_trips : "operates"
+    scheduled_trips ||--o{ telemetry_history : "records"
+    trains ||--o{ safety_incidents : "triggers"
+    scheduled_trips ||--o{ safety_incidents : "contextualizes"
+
+    safety_incidents {
+        int id PK
+        text incident_type "CONFLICT | HEADWAY | DROP | FREEZE | OVERSPEED"
+        text severity "WARNING | CRITICAL"
+        text corridor
+        text primary_train_number
+        text secondary_train_number
+        timestamp started_at
+        timestamp resolved_at
+        real peak_value "min distance_km or max speed_kmh"
+        real lat
+        real lng
+        text metadata_json
+    }
+```
+
+```text
++---------------------------------------------------------------------------------+
+|                   Paired Static GTFS + GTFS-RT v2.0 Pipeline                    |
++---------------------------------------------------------------------------------+
+  /api/msd/geo (stations, tracks) + /api/public/schedules/upcoming
+                                |
+                                v
+      [ F-14.4: railmon export --gtfs-static --out hellenic_rail_gtfs.zip ]
+        |-- agency.txt, stops.txt, routes.txt, calendar.txt
+        |-- trips.txt, stop_times.txt, shapes.txt
+        |       (Shared deterministic trip_id / stop_id keys)
+        +---------------------------+-------------------------------+
+                                    |                               |
+                                    v                               v
+            [ F-8.3: GTFS-RT v2.0 (.pb / HTTP :8085) ]     OpenTripPlanner /
+              VehiclePositions + TripUpdates + Alerts      Transitland / Home Asst.
+```
+
+---
+
+### F-14.1: Persistent Safety Incident & Anomaly Audit Log (SQLite Schema v2) (`railmon history incidents`) — *Planned*
+
+#### Overview
+Currently F-5.1 conflicts, F-5.2 telemetry drops/sensor freezes, and F-5.3 overspeed alerts exist only in ephemeral in-memory state. Introducing an idempotent **Schema v2** migration (`PRAGMA user_version = 2`) in [`storage/schema.py`](../../storage/schema.py) adds a `safety_incidents` table written asynchronously by [`TelemetryRecorder`](../../storage/recorder.py):
+- **Incident Lifecycle Recording:** Opens a row on alert onset (`started_at`), updates peak severity/values (closest approach distance, peak exceedance speed), and stamps `resolved_at` upon clearance.
+- **Forensic CLI Queries (`railmon history incidents`):** Filter by `--type conflict|freeze|drop|overspeed`, `--corridor`, `--severity`, `--train`, or date window to identify chronic RF blackspots, recurring single-track conflict zones, and habitual overspeed segments.
+
+---
+
+### F-14.2: Locomotive Fleet Utilization & Coupled Consist (*Διπλή Έλξη*) Analytics (`railmon history fleet`) — *Planned*
+
+#### Overview
+Aggregates historical SQLite telemetry grouped by physical `locomotive_number` rather than commercial `train_number`:
+- **Utilization Metrics:** Total kilometers traveled (integrated from geodesic breadcrumb spans), active motion hours vs. dwell/idle hours, average/peak operating speeds, and assigned routes per traction unit (e.g., HellasSprinter `120-xxx`, Siemens Desiro `460-xxx`, Adtranz `220-xxx`).
+- **Coupled Consist Detection:** Automatically detects paired locomotives operating simultaneously under the same commercial `train_number` (*Διπλή Έλξη*) and reports consist pairing frequency.
+
+---
+
+### F-14.3: Automated Self-Contained Operations Reports (`railmon history report`) — *Planned*
+
+#### Overview
+Generates comprehensive daily, weekly, or custom-window operational summaries directly from SQLite WAL history (`--format markdown|html --out report.html`):
+- **KPIs & Trends:** Network and per-corridor on-time performance (OTP), delay distributions by day-of-week and hour-of-day, top 10 most delayed services, worst dwell bottlenecks (F-9.1), and safety incident counts (F-14.1).
+- **Zero-Dependency Visuals:** Standalone HTML output embeds inline SVG charts and CSS (zero external CDN scripts required) suitable for offline archiving, email attachments, or static hosting.
+
+---
+
+### F-14.4: Companion Static GTFS Feed Generator (`railmon export --gtfs-static`) — *Planned*
+
+#### Overview
+Complements the implemented GTFS-RT v2.0 exporter (F-8.3) by synthesizing a standards-compliant **Static GTFS `.zip` archive** (`agency.txt`, `stops.txt`, `routes.txt`, `calendar.txt`, `trips.txt`, `stop_times.txt`, `shapes.txt`) using Python's built-in `zipfile` and `csv` modules:
+- **Key Alignment:** Emits deterministic `trip_id`, `route_id`, and `stop_id` identifiers matching [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py) so downstream transit platforms (OpenTripPlanner, Transitland, Home Assistant, MobilityData validators) can immediately join static schedules with live GTFS-RT `VehiclePositions` and `TripUpdates`.
+- **Dual Serving:** Optionally serves `/gtfs/static.zip` alongside `/gtfs-rt/*` from `railmon export --gtfs-rt --serve` and `railmon serve`.
+
+---
+
+### F-14.5: Additional Telemetry & GIS Exports (GPX, KML & NDJSON Streaming) — *Planned*
+
+#### Overview
+Broadens `railmon`'s interoperability with GPS analyzers, 3D earth viewers, and analytical data pipelines using standard-library `xml.etree.ElementTree` and `json`:
+- **GPX 1.1 (`--format gpx`) & KML (`--format kml`):** Exports recorded trajectories (`railmon history export <train> --format gpx|kml`) with WGS84 coordinates, `<ele>` altitude profiles, UTC `<time>` stamps, and speed/delay metadata for Google Earth, Garmin/Strava tools, and QGIS.
+- **NDJSON Live Streaming (`railmon stream --ndjson`):** Emits one compact JSON object per train update per line to `stdout` for seamless Unix piping into `jq`, DuckDB, ClickHouse, or log aggregators.
+
+---
+
+### F-14.6: Grafana Dashboard & Prometheus Alerting Rules Bundle — *Planned*
+
+#### Overview
+Packages ready-to-import observability templates pre-wired to all 24 `railmon_*` metrics exposed by F-8.2 ([`exporter/collector.py`](../../exporter/collector.py)):
+- **Grafana Dashboard JSON:** Pre-built panels for live fleet count, corridor punctuality ratios, per-train speed/delay time series, watchdog conflict/freeze/drop counters, SSE ingestion latency, and SQLite WAL size/queue depth.
+- **Prometheus Alerting Rules YAML:** Production-ready alert groups for critical opposing conflicts, severe punctuality drops, stale telemetry streams, and SQLite write-queue saturation.
+- **CLI Export Helper:** `railmon metrics --export-dashboard grafana.json` and `railmon metrics --export-alerts alerts.yml` emit the bundled assets directly from the CLI.
+
+---
+
+### F-14.7: Zero-Dependency Shell Autocompletion Generator (`railmon completions <shell>`) — *Planned*
+
+#### Overview
+Generates native tab-completion scripts for `bash`, `zsh`, `fish`, and PowerShell (`pwsh`) directly from the live `argparse` command tree in [`train_tracker.py`](../../train_tracker.py) and bundled station/corridor catalogs ([`tui/data/stations.json`](../../tui/data/stations.json)):
+```bash
+# Examples
+eval "$(railmon completions bash)"
+railmon completions zsh > ~/.zfunc/_railmon
+railmon completions pwsh | Out-String | Invoke-Expression
+```
+
+---
+
+## 17. Consolidated Controls & CLI Reference
 
 ### A. Interactive TUI Keybindings
 
@@ -1063,32 +1547,56 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 | **`[` / `]`** | **Replay** | **Scrub historical replay timeline `-5 min` / `+5 min`** | **Implemented (Tier 4)** |
 | **`<` / `>`** | **Replay** | **Decrease / Increase historical replay speed (`1x`..`60x`)** | **Implemented (Tier 4)** |
 | **`i` / `I`** | **Normal** | **Open Train Timetable & Intermediate Stop Itinerary modal** | **Implemented (Tier 6)** |
+| **`a` / `A`** | **Normal** | **Toggle proximity & delay push alerting watchdog for selected train** | **Implemented (Tier 6)** |
 | **`w` / `W`** | **Normal** | **Launch forward cab video stream in external media player (`mpv`)** | **Implemented (Tier 7)** |
 | **`g` / `G`** | **Normal** | **Cycle infrastructure GIS layer (`All` → `Tunnels/Bridges` → `Off`)** | **Implemented (Tier 7)** |
-| **`F10` / `K`** | **Normal** | **Cycle terminal color themes (Azure, Amber, Green, Solarized)** | **Planned (Tier 7)** |
+| **`F10` / `K`** | **Normal** | **Cycle terminal color themes (Azure, Amber, Green, Solarized, Mono)** | **Implemented (Tier 7)** |
 | **`D`** | **Normal** | **Toggle dual split-screen multi-train follow view** | **Planned (Tier 7)** |
+| **`u` / `U`** | **Normal** | **Toggle untracked scheduled "ghost" runs (`scheduleCards`) visibility** | **Implemented (Tier 10)** |
+| **`o` / `O`** | **Normal** | **Inspect station directory, amenities & accessibility metadata** | **Planned (Tier 10)** |
+| **`y` / `Y`** | **Normal** | **Open Time-Distance (Marey / Stringline) diagram modal** | **Planned (Tier 11)** |
+| **`z` / `Z`** | **Normal** | **Open Corridor Elevation & Speed-vs-Chainage profile modal** | **Planned (Tier 11)** |
+| **`r` / `R`** | **Normal** | **Open Delay-Aware Point-to-Point Route & Connection Planner modal** | **Planned (Tier 13)** |
 
 ---
 
 ### B. Command-Line Interface (CLI) Commands
 
-| Command | Tier | Description |
-| :--- | :--- | :--- |
-| `railmon --tui` | Tier 0 | Launch interactive terminal map dashboard |
-| `railmon --tui --record` | Tier 4 | Launch TUI with concurrent SQLite telemetry recording |
-| `railmon --tui --replay <db>` | Tier 4 | Launch TUI historical DVR replay and timeline scrubber |
-| `railmon departures <station>` | **Tier 6** | Query upcoming departures and arrivals for a station |
-| `railmon schedule <train_num>` | **Tier 6** | Display full timetable stop itinerary for a train |
-| `railmon watch <train_num>` | **Tier 6** | Background watcher firing notifications on delay or proximity |
-| `railmon serve [--port 8080]` | **Tier 8** | Start zero-dependency local web map and SSE server |
-| `railmon metrics [--port 9100]` | **Tier 8** | Expose operational Prometheus / OpenMetrics endpoint |
-| `railmon export --gtfs-rt [--serve]` | **Tier 8** | Export or serve GTFS-Realtime v2.0 Protocol Buffer feeds |
-| `railmon history bottlenecks` | **Tier 9** | Output corridor dwell and delay bottleneck analysis |
-| `railmon history segments` | **Tier 9** | Profile empirical station-to-station transit runtimes and percentiles |
+| Command | Tier | Status | Description |
+| :--- | :--- | :--- | :--- |
+| `railmon --tui` | Tier 0 | **Implemented** | Launch interactive terminal map dashboard |
+| `railmon --tui --record` | Tier 4 | **Implemented** | Launch TUI with concurrent SQLite telemetry recording |
+| `railmon --tui --replay <db>` | Tier 4 | **Implemented** | Launch TUI historical DVR replay and timeline scrubber |
+| `railmon conflicts` / `sensor-health` / `speed-limits` | Tier 5 | **Implemented** | Audit active track conflicts, sensor drops/freezes, and corridor speed limits |
+| `railmon departures <station>` | Tier 6 | **Implemented** | Query upcoming departures and arrivals for a station |
+| `railmon schedule <train_num>` | Tier 6 | **Implemented** | Display full timetable stop itinerary for a train |
+| `railmon watch <train_num>` | Tier 6 | **Implemented** | Background watcher firing notifications on delay or proximity |
+| `railmon cab <train_num>` | Tier 7 | **Implemented** | Launch or inspect live locomotive forward cab HLS video stream |
+| `railmon infrastructure` | Tier 7 | **Implemented** | Inspect GIS infrastructure assets (tunnels, bridges, signals) |
+| `railmon serve [--port 8080]` | Tier 8 | **Implemented** | Start zero-dependency local web map and SSE server |
+| `railmon metrics [--port 9100]` | Tier 8 | **Implemented** | Expose operational Prometheus / OpenMetrics endpoint |
+| `railmon export --gtfs-rt [--serve]` | Tier 8 | **Implemented** | Export or serve GTFS-Realtime v2.0 Protocol Buffer feeds |
+| `railmon history bottlenecks` | Tier 9 | **Implemented** | Output corridor dwell and delay bottleneck analysis |
+| `railmon history segments` | Tier 9 | **Implemented** | Profile empirical station-to-station transit runtimes and percentiles |
+| `railmon station <name>` | **Tier 10** | Planned | Display station metadata, accessibility amenities, and cover photos |
+| `railmon history stringline` | **Tier 11** | Planned | Render corridor Time-Distance (Marey / Stringline) diagram |
+| `railmon history profile <train>` | **Tier 11** | Planned | Render elevation & speed-vs-chainage profile against speed limits |
+| `railmon --config <config.toml>` | **Tier 11** | Planned | Load persistent user configuration, favorites, and custom TSRs |
+| `railmon serve --replay <db>` | **Tier 12** | Planned | Launch web GIS dashboard with interactive SQLite DVR timeline scrubber |
+| `railmon route <origin> <dest>` | **Tier 13** | Planned | Delay-aware direct and 1-transfer journey & connection planner |
+| `railmon watch --corridor / --all-conflicts` | **Tier 13** | Planned | Fleet-wide, station, and corridor rule-based alert watchdog daemon |
+| `railmon history incidents` | **Tier 14** | Planned | Query persisted SQLite Schema v2 safety conflict and anomaly logs |
+| `railmon history fleet` | **Tier 14** | Planned | Locomotive fleet mileage, utilization, and coupled consist analytics |
+| `railmon history report` | **Tier 14** | Planned | Generate standalone Markdown or self-contained HTML+SVG ops reports |
+| `railmon export --gtfs-static` | **Tier 14** | Planned | Synthesize companion static GTFS `.zip` archive aligned with GTFS-RT |
+| `railmon history export --format gpx\|kml` | **Tier 14** | Planned | Export recorded trajectories to GPX 1.1 or KML format |
+| `railmon stream --ndjson` | **Tier 14** | Planned | Emit newline-delimited JSON telemetry stream to stdout |
+| `railmon metrics --export-dashboard` | **Tier 14** | Planned | Export pre-wired Grafana dashboard JSON and Prometheus alert rules |
+| `railmon completions <shell>` | **Tier 14** | Planned | Generate shell tab-completion scripts (`bash`, `zsh`, `fish`, `pwsh`) |
 
 ---
 
-## 13. Phased Implementation & Verification Plan
+## 18. Phased Implementation & Verification Plan
 
 ### Phase 1: Tier 1 Parity (`s` Sorting & `b` Breadcrumb Modes) — *Completed*
 - Added [`RosterSortMode`](../../tui/state.py#L40) and [`BreadcrumbMode`](../../tui/state.py#L48) enums and deterministic comparators in [`tui/state.py`](../../tui/state.py).
@@ -1107,31 +1615,51 @@ Replaces raw Euclidean/Haversine velocity-based ETA calculations with empirical 
 - Added instant trajectory snapshot export (`e`/`E`) generating GeoJSON and CSV files directly from in-memory or SQLite records in [`storage/repository.py`](../../storage/repository.py).
 - Implemented SQLite DVR replay engine (`ReplayWorker`), timeline scrubbing (`[`/`]`), and speed multiplier (`<`/`>`) in [`tui/stream_worker.py`](../../tui/stream_worker.py) and [`tui/app.py`](../../tui/app.py).
 
-### Phase 5: Tier 5 Safety & Anomaly Watchdogs — *Planned*
-1. **Safety Engine Module ([`tui/safety.py`](../../tui/safety.py)):**
-   - Implement `evaluate_conflicts(active_records: List[TrainRecord]) -> List[ConflictAlert]` testing pairwise Haversine distances, corridor IDs, and heading convergence.
-   - Implement `evaluate_telemetry_drops(active_records: List[TrainRecord]) -> List[SensorAnomaly]`.
-2. **State Store & Presentation Integration:**
-   - Store active conflicts on [`StateSnapshot`](../../tui/state.py).
-   - Render flashing status alerts and optional terminal bell in [`TUIRenderer.render_status_bar`](../../tui/renderer.py).
-3. **Automated Verification:**
-   - Unit tests covering opposing vectors, same-direction safe spacing, stationary false positives, and audio bell rate-limiting.
+### Phase 5: Tier 5 Safety & Anomaly Watchdogs (F-5.1, F-5.2 & F-5.3 Implemented) — *Completed*
+- Implemented corridor headway & opposing train conflict watchdog (`F-5.1`), telemetry drop & sensor freezing watchdog (`F-5.2`), and corridor speed limit / TSR exceedance alerts (`F-5.3`) across [`tui/geo.py`](../../tui/geo.py), [`tui/state.py`](../../tui/state.py), [`tui/renderer.py`](../../tui/renderer.py), [`watchdog.py`](../../watchdog.py), and CLI subcommands `railmon conflicts`, `railmon sensor-health`, `railmon speed-limits`, and `railmon slow-orders`.
+- Hardened against real-world telemetry edge cases (tunnel deadbands, station dwell preemption, packet freshness, coupled consist headway suppression, and dynamic corridor snapping).
 
-### Phase 6: Tier 6 Commuter & Route Services (F-6.1, F-6.2 & F-6.3 Implemented)
+### Phase 6: Tier 6 Commuter & Route Services (F-6.1, F-6.2 & F-6.3 Implemented) — *Completed*
 1. **F-6.1 (*Completed*):** Added `departures` subparser in [`train_tracker.py`](../../train_tracker.py), multi-key diacritic-insensitive station resolution and suggestion engine in [`tui/mock_engine.py`](../../tui/mock_engine.py), responsive UTF-8 / ASCII tabular formatter in [`storage/cli_formatters.py`](../../storage/cli_formatters.py), offline `--demo` timetable synthesis, and automated test suite in [`tests/test_cli_departures.py`](../../tests/test_cli_departures.py).
-2. **F-6.2 (*Completed*):** Implement itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>` (see detailed plan in [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md)).
-3. **F-6.3 (*Implemented*):** Added `watch` subparser in [`train_tracker.py`](../../train_tracker.py), train trip watchdog evaluator, proximity calculations, and multimodal alert dispatchers in [`watchdog.py`](../../watchdog.py), in-TUI watchdog alert integration in [`tui/app.py`](../../tui/app.py) (`a`/`A`), and automated test suites in [`tests/test_watchdog.py`](../../tests/test_watchdog.py), [`tests/test_cli_watch.py`](../../tests/test_cli_watch.py), and [`tests/test_tui_watch.py`](../../tests/test_tui_watch.py) (see detailed plan in [`docs/plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md`](../plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md)).
+2. **F-6.2 (*Completed*):** Implemented itinerary inspection overlay in [`tui/renderer.py`](../../tui/renderer.py) bound to `i`/`I` and CLI `railmon schedule <train_num>` (see detailed plan in [`docs/plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md`](../plans/features/f-6-2-train-timetable-and-intermediate-stop-inspector-plan.md)).
+3. **F-6.3 (*Completed*):** Added `watch` subparser in [`train_tracker.py`](../../train_tracker.py), train trip watchdog evaluator, proximity calculations, and multimodal alert dispatchers in [`watchdog.py`](../../watchdog.py), in-TUI watchdog alert integration in [`tui/app.py`](../../tui/app.py) (`a`/`A`), and automated test suites in [`tests/test_watchdog.py`](../../tests/test_watchdog.py), [`tests/test_cli_watch.py`](../../tests/test_cli_watch.py), and [`tests/test_tui_watch.py`](../../tests/test_tui_watch.py) (see detailed plan in [`docs/plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md`](../plans/features/f-6-3-proximity-delay-push-alerting-engine-plan.md)).
 
-### Phase 7: Tier 7 Visual Enhancements & GIS Layers (F-7.1, F-7.2 & F-7.3 Implemented)
-1. **F-7.2 (*Implemented*):** Ingest tunnel, bridge, and signal GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`, overlay portals (`∩` / `[ ]`), bridges (`═` / `||`), and interlocking signals (`◆` / `[S]`), detect in-tunnel transit (`[TUNNEL]` badge), and toggle layers via `g` / `G` and CLI `railmon infrastructure` (see detailed plan in [`../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md`](../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md)).
-2. **F-7.3 (*Implemented*):** Implement color palette switcher in [`tui/theme.py`](../../tui/theme.py) and [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`) (see detailed plan in [`../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md`](../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md)).
-3. **F-7.1 (*Implemented*):** Add cab stream launcher subprocess execution in [`tui/app.py`](../../tui/app.py) (`w`/`W`) and CLI `railmon cab` (see detailed plan in [`../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md`](../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md)).
+### Phase 7: Tier 7 Visual Enhancements & GIS Layers (F-7.1, F-7.2 & F-7.3 Implemented; F-7.4 Planned)
+1. **F-7.2 (*Completed*):** Ingest tunnel, bridge, and signal GeoJSON in [`tui/geo.py`](../../tui/geo.py) from `/api/msd/geo`, overlay portals (`∩` / `[ ]`), bridges (`═` / `||`), and interlocking signals (`◆` / `[S]`), detect in-tunnel transit (`[TUNNEL]` badge), and toggle layers via `g` / `G` and CLI `railmon infrastructure` (see detailed plan in [`../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md`](../plans/features/f-7-2-infrastructure-gis-layers-tunnels-bridges-signals-plan.md)).
+2. **F-7.3 (*Completed*):** Implemented color palette switcher in [`tui/theme.py`](../../tui/theme.py) and [`tui/renderer.py`](../../tui/renderer.py) (`F10`/`K`) (see detailed plan in [`../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md`](../plans/features/f-7-3-custom-terminal-color-theme-profiles-plan.md)).
+3. **F-7.1 (*Completed*):** Added cab stream launcher subprocess execution in [`tui/app.py`](../../tui/app.py) (`w`/`W`) and CLI `railmon cab` (see detailed plan in [`../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md`](../plans/features/f-7-1-live-locomotive-cab-video-stream-launcher-plan.md)).
+4. **F-7.4 (*Planned*):** Implement dual split-screen multi-train follow viewport (`D`) in [`tui/renderer.py`](../../tui/renderer.py) and [`tui/app.py`](../../tui/app.py).
 
-### Phase 8: Tier 8 Integrations & DevOps — *Planned*
-1. Implement zero-dependency HTTP server in [`train_tracker.py`](../../train_tracker.py) for `railmon serve`.
-2. Implement Prometheus text-format exporter for `railmon metrics`.
-3. Build GTFS-RT feed generator.
+### Phase 8: Tier 8 Integrations & DevOps (F-8.1, F-8.2 & F-8.3 Implemented) — *Completed*
+1. **F-8.1 (*Completed*):** Implemented zero-dependency multi-threaded web map daemon (`railmon serve`) in [`server/`](../../server) with embedded Leaflet SPA, SSE broadcasting, and REST endpoints.
+2. **F-8.2 (*Completed*):** Implemented zero-dependency Prometheus 0.0.4 & OpenMetrics 1.0.0 exporter (`railmon metrics`) in [`exporter/`](../../exporter) and cross-exposed `/metrics` on `railmon serve`.
+3. **F-8.3 (*Completed*):** Implemented zero-dependency GTFS-Realtime v2.0 binary Protobuf & ProtoJSON feed exporter and HTTP server (`railmon export --gtfs-rt`) in [`gtfs_rt/`](../../gtfs_rt).
 
-### Phase 9: Tier 9 Historical Analytics & Predictive Engine (F-9.1 & F-9.2 Implemented)
+### Phase 9: Tier 9 Historical Analytics & Predictive Engine (F-9.1 & F-9.2 Implemented) — *Completed*
 1. Added bottleneck and dwell analytical SQL queries in [`storage/repository.py`](../../storage/repository.py) and CLI `railmon history bottlenecks`.
 2. Implemented empirical segment transit duration profiling and hybrid kinematic/empirical ETA prediction (`F-9.2`) in [`storage/repository.py`](../../storage/repository.py), [`storage/cli_formatters.py`](../../storage/cli_formatters.py), [`tui/renderer.py`](../../tui/renderer.py), and CLI `railmon history segments`.
+
+### Phase 10: Tier 10 Upstream `railway.gov.gr` Telemetry & GIS Parity (F-10.1 Implemented; F-10.2–F-10.5 Planned)
+1. **F-10.1 (*Completed*):** Implemented multiplexed SSE frame decoding (`SSEEventType`, `SSEFrame`, `TrainHistoryPoint`, `GhostTrain`, `DelayUpdate`, `stream_events()`) in [`train_tracker.py`](../../train_tracker.py), out-of-order `trainHistory` staging, isolated `_ghosts` registry with live supersession & selection promotion, and consist-aware `delayUpdates` in [`tui/state.py`](../../tui/state.py), [`tui/stream_worker.py`](../../tui/stream_worker.py), [`tui/mock_engine.py`](../../tui/mock_engine.py), [`tui/app.py`](../../tui/app.py) (`u`/`U`), [`tui/renderer.py`](../../tui/renderer.py), [`gtfs_rt/mapper.py`](../../gtfs_rt/mapper.py), and [`exporter/collector.py`](../../exporter/collector.py). Verified via [`tests/test_multiplexed_sse.py`](../../tests/test_multiplexed_sse.py).
+2. Align `CabStreamInfo.from_dict()` with nested upstream `hls.*` payloads and add tunnel-drop recovery polling (`F-10.5`).
+3. Extend `TrainPosition` signal/track-snap fields (`inDeadZone`, `fxk`, `approximate`, `railwayId`, `distanceToNextStation_m`) (`F-10.2`).
+4. Ingest full `/api/msd/geo` layers (`dead_zone`, `crossing`, `switch`, enriched `track` attributes) (`F-10.3`) and wrap `/api/public/station-media` for `railmon station` (`F-10.4`).
+
+### Phase 11: Tier 11 Advanced TUI Dispatch, Profiles & Configuration — *Planned*
+1. Build Braille/ASCII Time-Distance (Marey / Stringline) modal (`y`/`Y`) and `railmon history stringline` (`F-11.1`).
+2. Build Corridor Elevation & Speed-vs-Chainage profile modal (`z`/`Z`) and `railmon history profile` (`F-11.2`).
+3. Implement zero-dependency `tomllib`/INI user configuration loader (`--config` / `~/.config/railmon/config.toml`) (`F-11.3`).
+
+### Phase 12: Tier 12 Web Map Daemon (`railmon serve`) Parity & Interactive Upgrades — *Planned*
+1. Wire `ReplayWorker` and browser timeline scrubber controls into `railmon serve --replay <db>` (`F-12.1`).
+2. Add TTL-cached `/api/station/*`, `/api/schedule/*`, and `/api/cab/*` endpoints and embedded drawers/modals in [`server/assets.py`](../../server/assets.py) (`F-12.2`).
+3. Expose `/api/analytics/bottlenecks` and `/api/analytics/segments` as interactive Leaflet delay heatmap overlays (`F-12.3`).
+
+### Phase 13: Tier 13 Commuter Journey Planning & Fleet Watchdogs — *Planned*
+1. Implement direct & 1-transfer delay-aware connection search in `railmon route` and TUI `r`/`R` modal (`F-13.1`).
+2. Extend [`watchdog.py`](../../watchdog.py) with declarative corridor, station-window, and global conflict rule-based alerting (`F-13.2`).
+
+### Phase 14: Tier 14 Historical Forensics, Fleet Analytics & Ecosystem Interoperability — *Planned*
+1. Implement idempotent SQLite Schema v2 migration (`safety_incidents`) and `railmon history incidents` (`F-14.1`).
+2. Implement locomotive utilization / coupled consist analytics (`railmon history fleet`, `F-14.2`) and self-contained Markdown/HTML+SVG reports (`railmon history report`, `F-14.3`).
+3. Add companion Static GTFS `.zip` generator (`F-14.4`), GPX/KML/NDJSON exports (`F-14.5`), Grafana dashboard & Prometheus alert bundles (`F-14.6`), and shell autocompletion generator (`F-14.7`).

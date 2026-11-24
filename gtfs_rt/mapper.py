@@ -47,10 +47,16 @@ from gtfs_rt.models import (
     VehicleStopStatus,
 )
 from storage.repository import parse_iso_to_epoch
-from train_tracker import TrainPosition
+from train_tracker import GhostTrain, TrainPosition
 from tui.geo import GeoPoint
 from tui.mock_engine import StationNode, haversine_distance, load_stations
-from tui.state import StateSnapshot, TrainRecord, _train_matches_corridor
+from tui.state import (
+    GhostTrainRecord,
+    StateSnapshot,
+    TrainRecord,
+    _ghost_matches_corridor,
+    _train_matches_corridor,
+)
 
 logger = logging.getLogger("railmon.gtfs_rt.mapper")
 
@@ -670,6 +676,198 @@ class GtfsRtMapper:
             return self.schedules.get(pos.schedule_id, pos.train_number, now=now_ts)
         return None
 
+    def _is_ghost_eligible(self, ghost: GhostTrain) -> bool:
+        """Check whether an untracked GhostTrain qualifies for TripUpdate / Alert emission."""
+        if not self.config.include_ghosts:
+            return False
+        if _RE_TEST_TRAIN.match((ghost.train_number or "").strip()):
+            return False
+        if self.config.corridor_filter and not _ghost_matches_corridor(
+            ghost, self.config.corridor_filter
+        ):
+            return False
+        combined = f"{ghost.service_type or ''} {ghost.category or ''}".casefold()
+        if not self.config.include_freight and any(tok in combined for tok in _FREIGHT_TOKENS):
+            return False
+        return True
+
+    @staticmethod
+    def _ghost_route_id(ghost: GhostTrain) -> str:
+        """Map a GhostTrain corridor/service type to canonical GTFS route_id."""
+        corr = (ghost.corridor or "").strip().upper()
+        combined = f"{corr} {ghost.service_type or ''} {ghost.category or ''}".casefold()
+        if any(tok in combined for tok in _PROAST_TOKENS):
+            sub = corr if corr in ("PIRAIR", "KIATO", "CHALKIDA", "KIAAIGIO") else "ATH"
+            return f"OSE-PROASTIAKOS-{sub}"
+        if any(tok in combined for tok in _IC_TOKENS):
+            return "OSE-PATHE-IC"
+        if corr in ("PATHE", "E85", "MAINLINE"):
+            return "OSE-PATHE-REG"
+        if corr:
+            safe_corr = _RE_NON_ALNUM.sub("-", corr).strip("-") or "NETWORK"
+            return f"OSE-REGIONAL-{safe_corr}"
+        return "OSE-RAIL"
+
+    @staticmethod
+    def _ghost_epoch(ghost: GhostTrain, fallback: float) -> int:
+        """Resolve POSIX UTC integer seconds for a GhostTrain observation."""
+        if ghost.timestamp:
+            parsed = parse_iso_to_epoch(ghost.timestamp)
+            if parsed > 0.0 and math.isfinite(parsed):
+                return int(parsed)
+        return max(0, int(fallback))
+
+    @staticmethod
+    def _ghost_trip_id(ghost: GhostTrain, ref_epoch: int) -> str:
+        """Compute stable canonical GTFS trip_id for a GhostTrain."""
+        if ghost.schedule_id and ghost.schedule_id.strip():
+            return ghost.schedule_id.strip()
+        service_date = _local_service_date(ref_epoch)
+        clean_num = (ghost.train_number or ghost.id or "UNKNOWN").strip()
+        return f"{clean_num}-{service_date}"
+
+    def _build_ghost_trip_desc(
+        self,
+        ghost: GhostTrain,
+        ref_epoch: int,
+        sched: Optional[Dict[str, Any]] = None,
+    ) -> TripDescriptor:
+        """Build GTFS-RT TripDescriptor for an untracked GhostTrain (F-10.1)."""
+        dep_iso = (
+            str(sched["scheduledDeparture"])
+            if (sched and sched.get("scheduledDeparture"))
+            else ghost.scheduled_departure
+        )
+        return TripDescriptor(
+            trip_id=self._ghost_trip_id(ghost, ref_epoch),
+            start_time=_local_start_time(dep_iso),
+            start_date=_local_service_date(ref_epoch),
+            schedule_relationship=ScheduleRel.SCHEDULED,
+            route_id=self._ghost_route_id(ghost),
+        )
+
+    def _build_ghost_trip_entity(
+        self,
+        grec: GhostTrainRecord,
+        now_ts: float,
+        sched: Optional[Dict[str, Any]],
+    ) -> FeedEntity:
+        """Translate a non-superseded GhostTrainRecord into a GTFS-RT TripUpdate."""
+        ghost = grec.ghost
+        evt_epoch = self._ghost_epoch(ghost, grec.last_updated or now_ts)
+        delay_sec = int(ghost.delay) * 60
+        trip_desc = self._build_ghost_trip_desc(ghost, evt_epoch, sched)
+
+        stop_updates = (
+            self._stops_from_schedule(sched, delay_sec)
+            if sched is not None
+            else ()
+        )
+        if not stop_updates:
+            fallback_stops: List[StopTimeUpdate] = []
+            dest_stn = self.stations.resolve(ghost.destination)
+            if dest_stn is not None:
+                dest_stop_id = self.stations.stop_id_for(dest_stn, self.config.stop_id_field)
+                arr_evt = self._stop_event(ghost.scheduled_arrival, delay_sec) or StopTimeEvent(
+                    delay=delay_sec
+                )
+                fallback_stops.append(
+                    StopTimeUpdate(
+                        stop_id=dest_stop_id,
+                        arrival=arr_evt,
+                        schedule_relationship=StopScheduleRel.SCHEDULED,
+                    )
+                )
+            stop_updates = tuple(fallback_stops)
+
+        tu = TripUpdate(
+            trip=trip_desc,
+            stop_time_update=stop_updates,
+            vehicle=None,
+            timestamp=evt_epoch,
+            delay=delay_sec,
+        )
+        tid = trip_desc.trip_id or (ghost.train_number or ghost.id)
+        return FeedEntity(id=f"tu:{tid}", trip_update=tu)
+
+    def _build_ghost_delay_alert(
+        self,
+        grec: GhostTrainRecord,
+        now_ts: float,
+        sched: Optional[Dict[str, Any]],
+    ) -> Optional[FeedEntity]:
+        """Synthesize a bilingual SIGNIFICANT_DELAYS Alert for a delayed GhostTrain."""
+        ghost = grec.ghost
+        if ghost.delay < self.config.delay_alert_min:
+            return None
+
+        evt_epoch = self._ghost_epoch(ghost, grec.last_updated or now_ts)
+        trip_desc = self._build_ghost_trip_desc(ghost, evt_epoch, sched)
+        tid = trip_desc.trip_id or ghost.train_number
+        sev = AlertSeverity.SEVERE if ghost.delay >= 30 else AlertSeverity.WARNING
+        route_str = f"{ghost.origin or '?'} -> {ghost.destination or '?'}"
+
+        alert = Alert(
+            active_period=(TimeRange(start=evt_epoch),),
+            informed_entity=(
+                EntitySelector(
+                    agency_id=self.config.agency_id,
+                    route_id=trip_desc.route_id,
+                    route_type=2,
+                    trip=trip_desc,
+                ),
+            ),
+            cause=AlertCause.UNKNOWN_CAUSE,
+            effect=AlertEffect.SIGNIFICANT_DELAYS,
+            url=_build_bilingual(_TRACKER_URL, _TRACKER_URL),
+            header_text=_build_bilingual(
+                f"Αμαξοστοιχία {ghost.train_number}: Καθυστέρηση +{ghost.delay} λεπτά",
+                f"Train {ghost.train_number}: Delayed +{ghost.delay} minutes",
+            ),
+            description_text=_build_bilingual(
+                f"Η αμαξοστοιχία {ghost.train_number} ({route_str}) παρουσιάζει καθυστέρηση {ghost.delay} λεπτών.",
+                f"Train {ghost.train_number} ({route_str}) is currently running {ghost.delay} minutes late.",
+            ),
+            severity_level=sev,
+        )
+        return FeedEntity(id=f"al:delay:{tid}", alert=alert)
+
+    def _lookup_ghost_schedule(
+        self,
+        ghost: GhostTrain,
+        now_ts: float,
+        overrides: Optional[Dict[str, Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve optional enriched schedule dictionary for a GhostTrain."""
+        if overrides:
+            if ghost.schedule_id and ghost.schedule_id in overrides:
+                return overrides[ghost.schedule_id]
+            if ghost.train_number in overrides:
+                return overrides[ghost.train_number]
+        if self.config.enrich_schedules:
+            return self.schedules.get(ghost.schedule_id, ghost.train_number, now=now_ts)
+        return None
+
+    def _collect_eligible_ghosts(
+        self,
+        ghost_records: Sequence[GhostTrainRecord],
+        live_trip_ids: set[str],
+        now_ts: float,
+    ) -> List[GhostTrainRecord]:
+        """Filter and deduplicate ghost records whose trip_id is not already covered live."""
+        seen_ids: set[str] = set(live_trip_ids)
+        selected: List[GhostTrainRecord] = []
+        for grec in ghost_records:
+            if not self._is_ghost_eligible(grec.ghost):
+                continue
+            evt_epoch = self._ghost_epoch(grec.ghost, grec.last_updated or now_ts)
+            tid = self._ghost_trip_id(grec.ghost, evt_epoch)
+            if tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            selected.append(grec)
+        return selected
+
     def _collect_entities(
         self,
         records: Sequence[TrainRecord],
@@ -677,10 +875,20 @@ class GtfsRtMapper:
         feed_kind: FeedKind,
         now_ts: float,
         overrides: Optional[Dict[str, Dict[str, Any]]],
+        ghost_records: Sequence[GhostTrainRecord] = (),
     ) -> Tuple[FeedEntity, ...]:
         """Assemble deterministic, sorted FeedEntity tuple for requested feed_kind."""
         eligible = [rec for rec in records if self._is_eligible(rec.position)]
         deduped = self._dedup_trip_records(eligible, now_ts)
+        live_trip_ids = {
+            self._trip_id_for(rec.position, _pos_epoch(rec.position, rec.last_updated or now_ts))
+            for rec in deduped
+        }
+        eligible_ghosts = (
+            self._collect_eligible_ghosts(ghost_records, live_trip_ids, now_ts)
+            if ghost_records
+            else []
+        )
         entities: List[FeedEntity] = []
 
         if feed_kind in (FeedKind.COMBINED, FeedKind.VEHICLES):
@@ -692,6 +900,9 @@ class GtfsRtMapper:
             for rec in deduped:
                 sched = self._lookup_schedule(rec.position, now_ts, overrides)
                 entities.append(self._build_trip_entity(rec, now_ts, sched))
+            for grec in eligible_ghosts:
+                g_sched = self._lookup_ghost_schedule(grec.ghost, now_ts, overrides)
+                entities.append(self._build_ghost_trip_entity(grec, now_ts, g_sched))
 
         if self.config.include_alerts and feed_kind in (FeedKind.COMBINED, FeedKind.ALERTS):
             for rec in deduped:
@@ -699,6 +910,11 @@ class GtfsRtMapper:
                 delay_ent = self._build_delay_alert(rec, now_ts, sched)
                 if delay_ent is not None:
                     entities.append(delay_ent)
+            for grec in eligible_ghosts:
+                g_sched = self._lookup_ghost_schedule(grec.ghost, now_ts, overrides)
+                g_alert = self._build_ghost_delay_alert(grec, now_ts, g_sched)
+                if g_alert is not None:
+                    entities.append(g_alert)
             for conflict in conflicts:
                 conf_ent = self._build_conflict_alert(conflict, now_ts)
                 if conf_ent is not None:
@@ -715,12 +931,14 @@ class GtfsRtMapper:
     ) -> FeedMessage:
         """Build a GTFS-RT FeedMessage from an immutable TrainStateStore snapshot."""
         now_ts = float(now) if now is not None else time.time()
+        ghost_map = getattr(snapshot, "ghost_trains", {}) or {}
         entities = self._collect_entities(
             records=list(snapshot.trains.values()),
             conflicts=snapshot.active_conflicts,
             feed_kind=feed_kind,
             now_ts=now_ts,
             overrides=None,
+            ghost_records=list(ghost_map.values()),
         )
         header = FeedHeader(
             gtfs_realtime_version=GTFS_RT_VERSION,

@@ -147,7 +147,8 @@ class TestTrainTelemetryCollector(unittest.TestCase):
 
     def test_empty_store_metrics(self) -> None:
         fams = self.collector.collect()
-        self.assertEqual(len(fams), 7)
+        self.assertEqual(len(fams), 8)
+        self.assertIn("railmon_ghost_trains", {f.name for f in fams})
         # All families present but zero samples
         for fam in fams:
             self.assertEqual(len(fam.samples), 0)

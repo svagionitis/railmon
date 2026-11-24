@@ -1479,6 +1479,163 @@ class MockTelemetryEngine:
             else:
                 time.sleep(interval_sec)
 
+    def _build_initial_history_frame(self, now: float, points_per_train: int = 15) -> Any:
+        """Build synthetic startup SSEFrame(TRAIN_HISTORY) trailing behind each simulated train."""
+        from train_tracker import SSEEventType, SSEFrame, TrainHistoryPoint
+
+        entries: List[Tuple[str, Tuple[TrainHistoryPoint, ...]]] = []
+        for train in self.trains:
+            if getattr(train, "is_telemetry_dropped", False):
+                continue
+            track_len = max(1.0, float(train.track.total_length_m))
+            step_m = max(150.0, (train.cruise_speed_kmh / 3.6) * 8.0)
+            pts: List[TrainHistoryPoint] = []
+            for idx in range(points_per_train, 0, -1):
+                back_dist = train.current_distance_m - (train.direction * step_m * idx)
+                clamped_dist = max(0.0, min(track_len, back_dist))
+                pt, hdg = train.track.interpolate_at_distance(clamped_dist)
+                spd_factor = 0.75 + 0.25 * (1.0 - (idx / float(points_per_train + 1)))
+                spd_val = round(max(10.0, train.cruise_speed_kmh * spd_factor), 1)
+                pts.append(
+                    TrainHistoryPoint(
+                        lat=pt.lat,
+                        lng=pt.lng,
+                        timestamp_epoch=now - float(idx),
+                        speed=spd_val,
+                        course=hdg,
+                        track_heading=hdg,
+                    )
+                )
+            if pts:
+                entries.append((train.id, tuple(pts)))
+        return SSEFrame(
+            event_type=SSEEventType.TRAIN_HISTORY,
+            history=tuple(entries),
+            received_at=now,
+        )
+
+    @staticmethod
+    def _build_mock_ghost_frame(now: float, tick: int, ghost_delay: int) -> Any:
+        """Build synthetic SSEFrame(SCHEDULE_CARDS) representing untracked ghost runs."""
+        from train_tracker import GhostTrain, SSEEventType, SSEFrame
+
+        dep_utc = datetime.fromtimestamp(now - 1800.0, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+        arr_utc_1 = datetime.fromtimestamp(now + 2100.0, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+        arr_utc_2 = datetime.fromtimestamp(now + 3300.0, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+        now_iso = datetime.fromtimestamp(now, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+        prog_1 = (0.42 + (tick * 0.004)) % 0.95
+        prog_2 = (0.25 + (tick * 0.003)) % 0.95
+
+        ghosts = (
+            GhostTrain(
+                id="schedule:mock-ghost-1237",
+                train_number="1237",
+                schedule_id="mock-ghost-1237",
+                schedule_number="1237-DEMO-2232",
+                name="1237",
+                service_type="Suburban",
+                category="Προαστιακός",
+                origin="Αεροδρόμιο",
+                destination="Πειραιάς",
+                corridor="PIRAIR",
+                scheduled_departure=dep_utc,
+                scheduled_arrival=arr_utc_1,
+                delay=ghost_delay,
+                progress=round(prog_1, 3),
+                timestamp=now_iso,
+            ),
+            GhostTrain(
+                id="schedule:mock-ghost-1520",
+                train_number="1520",
+                schedule_id="mock-ghost-1520",
+                schedule_number="1520-DEMO-1915",
+                name="1520",
+                service_type="Regional",
+                category="Επιβατικά",
+                origin="Λάρισα",
+                destination="Βόλος",
+                corridor="THESSALY",
+                scheduled_departure=dep_utc,
+                scheduled_arrival=arr_utc_2,
+                delay=0,
+                progress=round(prog_2, 3),
+                timestamp=now_iso,
+            ),
+        )
+        return SSEFrame(
+            event_type=SSEEventType.SCHEDULE_CARDS,
+            ghosts=ghosts,
+            received_at=now,
+        )
+
+    def stream_events(
+        self,
+        interval_sec: float = 1.0,
+        stop_event: Optional[threading.Event] = None,
+    ) -> Generator[Any, None, None]:
+        """Multiplexed SSE simulation generator (history, ghosts, positions, delay deltas)."""
+        from train_tracker import DelayUpdate, SSEEventType, SSEFrame
+
+        tick = 0
+        ghost_delay = 2
+        now = time.time()
+
+        # Upstream emits trainHistory and scheduleCards before/alongside initial positions
+        yield self._build_initial_history_frame(now=now)
+        yield self._build_mock_ghost_frame(now=now, tick=tick, ghost_delay=ghost_delay)
+
+        while stop_event is None or not stop_event.is_set():
+            now = time.time()
+            positions = self.step(interval_sec)
+            yield SSEFrame(
+                event_type=SSEEventType.TRAIN_POSITIONS_UX,
+                positions=tuple(positions),
+                received_at=now,
+            )
+
+            tick += 1
+            if tick % 10 == 0:
+                yield self._build_mock_ghost_frame(now=now, tick=tick, ghost_delay=ghost_delay)
+            if tick % 15 == 0:
+                ghost_delay = 4 if ghost_delay <= 2 else 2
+                updates: List[DelayUpdate] = [
+                    DelayUpdate(
+                        train_number="1237",
+                        delay=ghost_delay,
+                        schedule_id="mock-ghost-1237",
+                    )
+                ]
+                if self.trains:
+                    lead = self.trains[0]
+                    next_dly = max(0, int(lead.delay_minutes) + (1 if tick % 30 == 15 else -1))
+                    lead.delay_minutes = next_dly
+                    updates.append(
+                        DelayUpdate(
+                            train_number=lead.train_number,
+                            delay=next_dly,
+                            train_id=lead.id,
+                        )
+                    )
+                yield SSEFrame(
+                    event_type=SSEEventType.DELAY_UPDATES,
+                    delays=tuple(updates),
+                    received_at=now,
+                )
+
+            if stop_event is not None:
+                if stop_event.wait(timeout=interval_sec):
+                    return
+            else:
+                time.sleep(interval_sec)
+
     def reset(self) -> None:
         """Reset all simulated trains to their initial schedule origins."""
         for train in self.trains:

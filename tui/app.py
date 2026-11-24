@@ -67,6 +67,7 @@ from tui.renderer import (
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
+    GhostVisibilityMode,
     InfrastructureLayerMode,
     InputMode,
     InspectorMode,
@@ -468,11 +469,21 @@ class TUIApp:
     def toggle_follow(self) -> None:
         """Toggle real-time auto-follow camera tracking for selected train."""
         snapshot = self.store.get_snapshot()
+        if snapshot.selected_train is None and snapshot.selected_ghost is not None:
+            self._set_toast("[Ghost run has no live GPS coordinates to follow]", is_error=True)
+            return
         if not snapshot.selected_train:
             # If no train is currently selected, select the first active train
             selected_id = self.store.select_next()
             if selected_id:
-                self.store.set_follow_mode(True)
+                updated = self.store.get_snapshot()
+                if updated.selected_train is not None:
+                    self.store.set_follow_mode(True)
+                elif updated.selected_ghost is not None:
+                    self._set_toast(
+                        "[Ghost run has no live GPS coordinates to follow]",
+                        is_error=True,
+                    )
         else:
             self.store.toggle_follow_mode()
 
@@ -492,6 +503,16 @@ class TUIApp:
     def cycle_breadcrumbs(self) -> BreadcrumbMode:
         """Cycle historical breadcrumb trail visibility mode (ALL -> SELECTED -> OFF)."""
         return self.store.cycle_breadcrumb_mode()
+
+    def toggle_ghost_trains(self) -> GhostVisibilityMode:
+        """Toggle visibility of untracked scheduled ghost runs (scheduleCards) (F-10.1)."""
+        mode = self.store.toggle_ghost_visibility()
+        snap = self.store.get_snapshot()
+        if mode == GhostVisibilityMode.SHOW:
+            self._set_toast(f"[Ghosts: SHOW ({snap.ghost_count} active)]")
+        else:
+            self._set_toast("[Ghosts: HIDDEN]")
+        return mode
 
     def cycle_station_labels(self) -> StationLabelMode:
         """Cycle station label visibility mode (HUBS_AND_SECONDARY -> HUBS_ONLY -> MARKERS_ONLY)."""
@@ -744,7 +765,13 @@ class TUIApp:
         snapshot = self.store.get_snapshot()
         selected = snapshot.selected_train
         if selected is None:
-            self._set_toast("[! No train selected to export]", is_error=True)
+            if snapshot.selected_ghost is not None:
+                self._set_toast(
+                    "[! Cannot export trajectory: ghost run has no GPS telemetry]",
+                    is_error=True,
+                )
+            else:
+                self._set_toast("[! No train selected to export]", is_error=True)
             return None
 
         pos = selected.position
@@ -918,6 +945,10 @@ class TUIApp:
         elif key in (getattr(curses, "KEY_F10", 274), ord("K")):
             self.cycle_theme()
 
+        # Toggle untracked scheduled ghost runs visibility (F-10.1)
+        elif key in (ord("u"), ord("U")):
+            self.toggle_ghost_trains()
+
         # Tier 4 export ('e'/'E') & DVR timeline scrubbing / speed ('[', ']', '<', '>')
         elif self._handle_dvr_and_export_input(key):
             pass
@@ -999,20 +1030,30 @@ class TUIApp:
             return
 
         snapshot = self.store.get_snapshot()
-        if not snapshot.selected_train:
+        selected_record: Any = snapshot.selected_train
+        train_num: Optional[str] = None
+        if snapshot.selected_train is not None:
+            train_num = (
+                snapshot.selected_train.position.train_number
+                or snapshot.selected_train.position.id
+            )
+        elif snapshot.selected_ghost is not None:
+            selected_record = snapshot.selected_ghost
+            train_num = (
+                snapshot.selected_ghost.ghost.train_number
+                or snapshot.selected_ghost.ghost.id
+            )
+
+        if not train_num:
             self._set_toast("[Select a train first to inspect timetable]", is_error=True)
             return
 
-        train_num = (
-            snapshot.selected_train.position.train_number
-            or snapshot.selected_train.position.id
-        )
         self.show_timetable = True
         self.input_mode = InputMode.TIMETABLE
         self.timetable_scroll_offset = 0
         self._timetable_user_scrolled = False
         self._force_redraw = True
-        self._fetch_timetable_for_train(str(train_num), snapshot.selected_train)
+        self._fetch_timetable_for_train(str(train_num), selected_record)
 
     def _auto_scroll_to_current_stop(self) -> None:
         """Auto-adjust timetable_scroll_offset to vertically center the active calling point."""
@@ -1109,7 +1150,18 @@ class TUIApp:
             try:
                 from train_tracker import RailwayGovClient
                 client = RailwayGovClient()
-                data = client.get_schedule_by_train_number(clean_num)
+                is_ghost_rec = hasattr(record, "ghost") and getattr(record, "ghost", None) is not None
+                ghost_sched_id = getattr(record.ghost, "schedule_id", None) if is_ghost_rec else None
+                data: Optional[Dict[str, Any]] = None
+                if is_ghost_rec and ghost_sched_id:
+                    try:
+                        cand = client.get_schedule_by_id(str(ghost_sched_id))
+                        if isinstance(cand, dict) and cand.get("stops"):
+                            data = cand
+                    except Exception as sched_exc:
+                        logger.debug("Schedule lookup by ID %s failed: %s", ghost_sched_id, sched_exc)
+                if not data:
+                    data = client.get_schedule_by_train_number(clean_num)
                 if not data or not data.get("stops"):
                     data = generate_mock_train_schedule(clean_num)
                 self._timetable_cache[clean_num] = (time.time(), data)
@@ -1204,7 +1256,13 @@ class TUIApp:
         """Trigger asynchronous resolution and external player launch for selected train."""
         snapshot = self.store.get_snapshot()
         if not snapshot.selected_train:
-            self._set_toast("Select a train first to launch cab video stream", is_error=True)
+            if snapshot.selected_ghost is not None:
+                self._set_toast(
+                    "Cab video unavailable for untracked ghost run",
+                    is_error=True,
+                )
+            else:
+                self._set_toast("Select a train first to launch cab video stream", is_error=True)
             return
 
         train_num = str(
@@ -1440,21 +1498,26 @@ class TUIApp:
         g = self.geometry
         inner_h = g.roster_h - 2
         visible_rows = max(0, inner_h - 1)
-        train_count = len(snapshot.filtered_trains)
-        if visible_rows <= 0 or train_count == 0:
+        live_count = len(snapshot.filtered_trains)
+        ghosts = getattr(snapshot, "filtered_ghosts", ())
+        total_count = live_count + len(ghosts)
+        if visible_rows <= 0 or total_count == 0:
             return
 
         r_idx = my - (g.roster_y + 2)
         if not (0 <= r_idx < visible_rows):
             return
 
-        offset = calculate_scroll_offset(snapshot.selected_index, train_count, visible_rows)
+        offset = calculate_scroll_offset(snapshot.selected_index, total_count, visible_rows)
         item_idx = offset + r_idx
-        if 0 <= item_idx < train_count:
+        if 0 <= item_idx < live_count:
             train_id = snapshot.filtered_trains[item_idx].position.id
             self.store.select_by_id(train_id)
             if is_double:
                 self.store.set_follow_mode(True)
+        elif live_count <= item_idx < total_count:
+            ghost_id = ghosts[item_idx - live_count].ghost.id
+            self.store.select_by_id(ghost_id)
 
     def _handle_map_mouse(
         self,
@@ -1546,18 +1609,24 @@ class TUIApp:
         if not (0 <= row_idx < max_rows):
             return
 
-        selected_tid = snapshot.selected_train.position.id if snapshot.selected_train else None
+        selected_tid = (
+            snapshot.selected_train.position.id
+            if snapshot.selected_train
+            else (snapshot.selected_ghost.ghost.id if snapshot.selected_ghost else None)
+        )
         entries = compute_station_board_entries(
             station=station,
             trains=snapshot.filtered_trains,
             resolve_station_fn=self.renderer.resolve_station,
             selected_train_id=selected_tid,
+            ghosts=getattr(snapshot, "filtered_ghosts", ()),
         )
         if 0 <= row_idx < len(entries):
             target_tid = entries[row_idx].train_id
             self.store.select_by_id(target_tid)
             if is_double:
-                self.store.set_follow_mode(True)
+                if target_tid in snapshot.trains:
+                    self.store.set_follow_mode(True)
                 self.store.set_inspector_mode(InspectorMode.TRAIN)
 
     def _handle_mouse_input(self) -> bool:

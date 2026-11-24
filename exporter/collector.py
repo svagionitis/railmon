@@ -182,6 +182,19 @@ class TrainTelemetryCollector(BaseCollector):
                     labels={"corridor": corr, "severity": tier}, value=tier_count
                 )
 
+        fam_ghosts = MetricFamily(
+            "railmon_ghost_trains",
+            "Count of active scheduled ghost runs lacking live GPS telemetry",
+            MetricType.GAUGE,
+            unit="trains",
+        )
+        ghost_corridors: Dict[str, int] = {}
+        for grec in (getattr(snap, "ghost_trains", {}) or {}).values():
+            g_corr = str(getattr(grec.ghost, "corridor", None) or "UNKNOWN")
+            ghost_corridors[g_corr] = ghost_corridors.get(g_corr, 0) + 1
+        for g_corr, g_count in sorted(ghost_corridors.items()):
+            fam_ghosts.add_sample(labels={"corridor": g_corr}, value=g_count)
+
         return [
             fam_active,
             fam_delay,
@@ -190,6 +203,7 @@ class TrainTelemetryCollector(BaseCollector):
             fam_delayed_tier,
             fam_punctuality,
             fam_avg_delay,
+            fam_ghosts,
         ]
 
 
@@ -366,11 +380,23 @@ class StreamMetricsCollector(BaseCollector):
             value=float(snap.total_messages_received),
         )
 
+        fam_events = MetricFamily(
+            "railmon_stream_events_total",
+            "Cumulative multiplexed SSE events received per channel",
+            MetricType.COUNTER,
+            unit="events",
+        )
+        for evt_name, evt_count in getattr(snap, "stream_event_counts", ()):
+            fam_events.add_sample(
+                labels={"event_type": str(evt_name)},
+                value=float(evt_count),
+            )
+
         now = time.time()
         lat = max(0.0, now - snap.last_stream_update) if snap.last_stream_update > 0 else 0.0
         fam_latency.add_sample(labels={"endpoint": self.endpoint}, value=lat)
 
-        return [fam_conn, fam_msgs, fam_reconn, fam_latency]
+        return [fam_conn, fam_msgs, fam_reconn, fam_latency, fam_events]
 
 
 class StorageMetricsCollector(BaseCollector):

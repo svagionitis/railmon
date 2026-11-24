@@ -7,13 +7,14 @@ telemetry inspection panels.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from enum import Enum, auto
 import curses
 import math
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import unicodedata
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from tui.geo import (
     BrailleCanvas,
@@ -44,6 +45,8 @@ from tui.mock_engine import (
 from tui.state import (
     BreadcrumbMode,
     ConnectionStatus,
+    GhostTrainRecord,
+    GhostVisibilityMode,
     InfrastructureLayerMode,
     InputMode,
     InspectorMode,
@@ -937,12 +940,104 @@ def _natural_train_id_sort_key(train_number: str, train_id: str) -> Tuple[int, s
     return (1, tn or train_id)
 
 
+def _resolve_renderer_athens_tz() -> tzinfo:
+    """Resolve Europe/Athens tzinfo with UTC+2 fallback when tzdata is absent."""
+    try:
+        return ZoneInfo("Europe/Athens")
+    except (ZoneInfoNotFoundError, KeyError, OSError):
+        return timezone(timedelta(hours=2))
+
+
+_ATHENS_TZ: tzinfo = _resolve_renderer_athens_tz()
+
+
+def _format_athens_hhmm(iso_ts: Optional[str], include_tz: bool = True) -> str:
+    """Convert an ISO-8601 UTC timestamp string into local Europe/Athens HH:MM display."""
+    if not iso_ts or not isinstance(iso_ts, str):
+        return "--:--"
+    cleaned = iso_ts.strip()
+    if not cleaned:
+        return "--:--"
+    try:
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone(_ATHENS_TZ)
+        if include_tz:
+            tz_abbr = local_dt.tzname() or "EET"
+            return f"{local_dt.strftime('%H:%M')} {tz_abbr}"
+        return local_dt.strftime("%H:%M")
+    except (ValueError, TypeError, OverflowError):
+        return "--:--"
+
+
+def _append_ghost_board_entries(
+    entries: List[StationBoardEntry],
+    station: StationNode,
+    ghosts: Sequence[GhostTrainRecord],
+    resolve_station_fn: Callable[[Optional[str]], Optional[StationNode]],
+    selected_train_id: Optional[str],
+    stn_norm_el: str,
+    stn_norm_en: str,
+) -> None:
+    """Append matching coordinate-less ghost runs to a station proximity board (F-10.1)."""
+    for grec in ghosts:
+        g = grec.ghost
+        matched_origin = False
+        matched_dest = False
+        for is_orig, endpoint_name in ((True, g.origin), (False, g.destination)):
+            if not endpoint_name:
+                continue
+            resolved = resolve_station_fn(endpoint_name)
+            norm_ep = normalize_station_key(endpoint_name)
+            is_hit = (resolved is not None and resolved.id == station.id) or (
+                bool(norm_ep)
+                and (
+                    (bool(stn_norm_el) and stn_norm_el in norm_ep)
+                    or (bool(stn_norm_en) and stn_norm_en in norm_ep)
+                )
+            )
+            if is_hit:
+                if is_orig:
+                    matched_origin = True
+                else:
+                    matched_dest = True
+
+        if not (matched_origin or matched_dest):
+            continue
+
+        dly_int = int(g.delay)
+        delay_str = f"+{dly_int}m" if dly_int > 0 else (f"{dly_int}m" if dly_int < 0 else "0m")
+        ref_iso = g.scheduled_departure if matched_origin else g.scheduled_arrival
+        hhmm = _format_athens_hhmm(ref_iso, include_tz=False)
+        eta_str = hhmm if hhmm != "--:--" else "SCHD"
+
+        entries.append(
+            StationBoardEntry(
+                train_id=g.id,
+                train_number=(g.train_number or g.id).strip(),
+                direction="GHT",
+                distance_km=9999.0,
+                dist_str="N/A",
+                eta_str=eta_str,
+                delay_min=dly_int,
+                delay_str=delay_str,
+                is_matched_route=True,
+                is_selected=selected_train_id is not None and g.id == selected_train_id,
+                color_pair=PAIR_STATION_DIM,
+            )
+        )
+
+
 def compute_station_board_entries(
     station: StationNode,
     trains: Sequence[TrainRecord],
     resolve_station_fn: Callable[[Optional[str]], Optional[StationNode]],
     selected_train_id: Optional[str] = None,
     proximity_radius_km: float = DEFAULT_STATION_PROXIMITY_KM,
+    ghosts: Sequence[GhostTrainRecord] = (),
 ) -> List[StationBoardEntry]:
     """Compute and sort approaching / at-station trains for a given StationNode.
 
@@ -1051,6 +1146,17 @@ def compute_station_board_entries(
                 is_selected=is_selected,
                 color_pair=color_pair,
             )
+        )
+
+    if ghosts:
+        _append_ghost_board_entries(
+            entries=entries,
+            station=station,
+            ghosts=ghosts,
+            resolve_station_fn=resolve_station_fn,
+            selected_train_id=selected_train_id,
+            stn_norm_el=stn_norm_el,
+            stn_norm_en=stn_norm_en,
         )
 
     entries.sort(
@@ -1891,12 +1997,39 @@ class TUIRenderer:
         return f" #  TRAIN{self.glyphs.sort_asc}   TY  SPD  DLY  ST"
 
 
+    def _render_ghost_roster_row(
+        self,
+        win: Any,
+        row_y: int,
+        item_idx: int,
+        grec: GhostTrainRecord,
+        is_selected: bool,
+        select_attr: int,
+        max_x: int,
+    ) -> None:
+        """Render a single untracked scheduled ghost row in the roster table (F-10.1)."""
+        g = grec.ghost
+        cursor_mark = ">" if is_selected else " "
+        seq_num = f"{item_idx + 1:2d}"
+        train_label = (g.train_number or g.id)[:8]
+        train_num = f"{train_label:<8}"
+        t_type = self._format_roster_type(g.service_type or g.category)
+        dly = int(g.delay)
+        dly_str = f"+{dly}m" if dly > 0 else (f"{dly}m" if dly < 0 else " 0m")
+        if len(dly_str) > 4:
+            dly_str = dly_str[:4]
+        dly_str = f"{dly_str:>4}"
+        row_line = f"{cursor_mark} {seq_num} {train_num} {t_type:<2}  --- {dly_str} GHT"
+        ghost_attr = safe_color_pair(PAIR_STATION_DIM, curses.A_DIM) | curses.A_DIM
+        row_attr = select_attr if is_selected else ghost_attr
+        safe_addstr(win, row_y, 1, row_line, row_attr, max_w=max_x - 2, ascii_mode=self.ascii_mode)
+
     def render_roster(
         self,
         win: Any,
         snapshot: StateSnapshot,
     ) -> None:
-        """Render the Active Trains Roster pane with scrollable table.
+        """Render the Active Trains Roster pane with scrollable table (live + optional ghosts).
 
         Args:
             win: Roster curses window.
@@ -1919,9 +2052,20 @@ class TUIRenderer:
         except curses.error:
             pass
 
-        train_count = len(snapshot.filtered_trains)
+        live_count = len(snapshot.filtered_trains)
+        ghosts = getattr(snapshot, "filtered_ghosts", ())
+        ghost_vis = getattr(snapshot, "ghost_visibility_mode", GhostVisibilityMode.SHOW)
+        total_ghost_active = getattr(snapshot, "ghost_count", len(ghosts))
+        total_count = live_count + len(ghosts)
+
+        ghost_badge = ""
+        if len(ghosts) > 0:
+            ghost_badge = f" | +{len(ghosts)} GHOST" if max_x >= 38 else f"|+{len(ghosts)}G"
+        elif ghost_vis == GhostVisibilityMode.HIDE and total_ghost_active > 0:
+            ghost_badge = " | GHOST OFF" if max_x >= 38 else "|G:OFF"
+
         filter_tag = f" (Filter: '{snapshot.filter_query}')" if snapshot.filter_query else ""
-        title = f" ACTIVE TRAINS ({train_count}){filter_tag} "
+        title = f" ACTIVE TRAINS ({live_count}{ghost_badge}){filter_tag} "
         safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
         sort_mode = getattr(snapshot, "sort_mode", RosterSortMode.TRAIN_ID)
@@ -1930,21 +2074,33 @@ class TUIRenderer:
 
         inner_h = max_y - 2
         visible_rows = max(0, inner_h - 1)  # exclude table header
-        if visible_rows <= 0 or train_count == 0:
-            if train_count == 0:
+        if visible_rows <= 0 or total_count == 0:
+            if total_count == 0:
                 safe_addstr(win, 2, 2, "No trains match filter.", border_attr, ascii_mode=self.ascii_mode)
             return
 
-        offset = calculate_scroll_offset(snapshot.selected_index, train_count, visible_rows)
+        offset = calculate_scroll_offset(snapshot.selected_index, total_count, visible_rows)
 
         for r_idx in range(visible_rows):
             item_idx = offset + r_idx
-            if item_idx >= train_count:
+            if item_idx >= total_count:
                 break
+
+            is_selected = item_idx == snapshot.selected_index
+            if item_idx >= live_count:
+                self._render_ghost_roster_row(
+                    win=win,
+                    row_y=2 + r_idx,
+                    item_idx=item_idx,
+                    grec=ghosts[item_idx - live_count],
+                    is_selected=is_selected,
+                    select_attr=select_attr,
+                    max_x=max_x,
+                )
+                continue
 
             record = snapshot.filtered_trains[item_idx]
             pos = record.position
-            is_selected = item_idx == snapshot.selected_index
 
             watched_ids = getattr(snapshot, "watched_train_ids", ())
             pos_id_norm = str(pos.id or "").strip().upper()
@@ -2044,12 +2200,18 @@ class TUIRenderer:
             safe_addstr(win, 2, 2, "Coords:", title_attr, max_w=9, ascii_mode=self.ascii_mode)
             safe_addstr(win, 2, 12, coords_str, val_attr, max_w=max_x - 13, ascii_mode=self.ascii_mode)
 
-        selected_tid = snapshot.selected_train.position.id if snapshot.selected_train else None
+        selected_ghost = getattr(snapshot, "selected_ghost", None)
+        selected_tid = (
+            snapshot.selected_train.position.id
+            if snapshot.selected_train
+            else (selected_ghost.ghost.id if selected_ghost else None)
+        )
         entries = compute_station_board_entries(
             station=station,
             trains=snapshot.filtered_trains,
             resolve_station_fn=self.resolve_station,
             selected_train_id=selected_tid,
+            ghosts=getattr(snapshot, "filtered_ghosts", ()),
         )
 
         # Leave a blank visual spacer row on taller windows (inner_h >= 10), pack tightly on 80x24 (inner_h = 9)
@@ -2259,6 +2421,68 @@ class TUIRenderer:
                 )
         return f"{pos.status or 'In Service'}", val_attr
 
+    def _render_ghost_inspector(
+        self,
+        win: Any,
+        grec: GhostTrainRecord,
+        max_y: int,
+        max_x: int,
+    ) -> None:
+        """Render telemetry details for a selected untracked scheduled ghost run (F-10.1)."""
+        border_attr = safe_color_pair(PAIR_BORDER, curses.A_NORMAL)
+        title_attr = safe_color_pair(PAIR_HEADER, curses.A_BOLD) | curses.A_BOLD
+        val_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL)
+        dim_attr = safe_color_pair(PAIR_DEFAULT, curses.A_NORMAL) | curses.A_DIM
+        warn_attr = safe_color_pair(PAIR_TRAIN_WARN, curses.A_BOLD) | curses.A_BOLD
+
+        g = grec.ghost
+        safe_addstr(
+            win,
+            0,
+            2,
+            "[ SELECTED GHOST RUN ]",
+            border_attr | curses.A_BOLD,
+            max_w=max_x - 4,
+            ascii_mode=self.ascii_mode,
+        )
+
+        dly_display, delay_attr = self._resolve_inspector_delay_display(g)
+        route_str = f"{g.origin or 'N/A'} -> {g.destination or 'N/A'}"
+        dep_str = _format_athens_hhmm(g.scheduled_departure)
+        arr_str = _format_athens_hhmm(g.scheduled_arrival)
+        prog_str = format_progress_bar(g.progress, max_x - 14)
+
+        rows = [
+            ("Train No:", f"{g.train_number or g.id} [GHOST]", warn_attr),
+            ("Service:", f"{g.service_type or g.category or 'Scheduled'}", val_attr),
+            ("Route:", route_str, val_attr),
+            ("Corridor:", format_corridor_display_name(g.corridor or "UNKNOWN"), val_attr),
+            ("Sched Dep:", dep_str, val_attr),
+            ("Sched Arr:", arr_str, val_attr),
+            ("Delay:", dly_display, delay_attr),
+            ("Est. Prog:", prog_str, val_attr),
+            ("GPS Signal:", "NONE (Un-tracked schedule)", dim_attr),
+            ("Timetable:", "Press [i] for full stops", val_attr),
+            ("Schedule:", g.schedule_number or g.schedule_id or "N/A", dim_attr),
+        ]
+
+        inner_h = max_y - 2
+        label_w = 13
+        for idx, (label, val, attr) in enumerate(rows):
+            if idx >= inner_h:
+                break
+            row_y = 1 + idx
+            safe_addstr(win, row_y, 2, label, title_attr, max_w=label_w, ascii_mode=self.ascii_mode)
+            safe_addstr(
+                win,
+                row_y,
+                2 + label_w,
+                val,
+                attr,
+                max_w=max(1, max_x - (3 + label_w)),
+                ascii_mode=self.ascii_mode,
+            )
+
     def render_inspector(
         self,
         win: Any,
@@ -2295,10 +2519,15 @@ class TUIRenderer:
         except curses.error:
             pass
 
+        record = snapshot.selected_train
+        selected_ghost = getattr(snapshot, "selected_ghost", None)
+        if record is None and selected_ghost is not None:
+            self._render_ghost_inspector(win, selected_ghost, max_y=max_y, max_x=max_x)
+            return
+
         title = " SELECTED TRAIN TELEMETRY "
         safe_addstr(win, 0, 2, f"[{title}]", border_attr | curses.A_BOLD, max_w=max_x - 4, ascii_mode=self.ascii_mode)
 
-        record = snapshot.selected_train
         if record is None:
             empty_msg1 = "No train selected."
             select_hint = "[UP/DOWN]" if self.ascii_mode else "[↑/↓]"
@@ -2508,7 +2737,7 @@ class TUIRenderer:
             )
         return (
             f" [q] Quit  [h/j/k/l] Pan  [+/-] Zoom  [Tab] Select  [s] Sort  [b] Trails  "
-            f"[e] Export  [i] Timetable  [w] Cab View  [v] Labels  [t] Tracks  [m] Stations  {follow_str}  [F10/K] Theme  [/] Filter  [?] Help  [0..3] Presets"
+            f"[e] Export  [i] Timetable  [w] Cab View  [v] Labels  [t] Tracks  [u] Ghosts  [m] Stations  {follow_str}  [F10/K] Theme  [/] Filter  [?] Help  [0..3] Presets"
         )
 
     def render_status_bar(
@@ -2681,6 +2910,7 @@ class TUIRenderer:
                 ("Tab, n / p, Click", "Select Next / Previous or click train / station"),
                 ("s / S", "Cycle train roster sorting (Train ID, Speed, Delay)"),
                 ("b / B", "Cycle breadcrumb trails (All, Selected, Off)"),
+                ("u / U", "Toggle untracked scheduled ghost runs (scheduleCards)"),
                 ("m / M", "Cycle station departure board / Return to train view"),
                 ("i / I", "Inspect timetable & intermediate stops for selected train"),
                 ("w / W", "Launch live locomotive forward cab video stream"),

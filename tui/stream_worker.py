@@ -14,11 +14,19 @@ import urllib.error
 from storage.db import Database
 from storage.models import ReplayBounds
 from storage.repository import HistoricalRepository, _epoch_to_iso_utc
-from train_tracker import RailwayGovClient, TrainPosition, parse_retry_after
+from train_tracker import (
+    RailwayGovClient,
+    SSEEventType,
+    SSEFrame,
+    TrainPosition,
+    parse_retry_after,
+)
 from tui.mock_engine import MockTelemetryEngine
 from tui.state import ConnectionStatus, REPLAY_SPEED_MULTIPLIERS, TrainStateStore
 
 logger = logging.getLogger("railmon." + __name__)
+
+StreamItem = Union[List[TrainPosition], SSEFrame]
 
 
 class StreamWorker:
@@ -33,7 +41,7 @@ class StreamWorker:
         client: Optional[RailwayGovClient] = None,
         mock_engine: Optional[MockTelemetryEngine] = None,
         custom_stream: Optional[
-            Union[Generator[List[TrainPosition], None, None], Iterable[List[TrainPosition]]]
+            Union[Generator[StreamItem, None, None], Iterable[StreamItem], Any]
         ] = None,
         recorder: Optional[Any] = None,
         base_backoff_sec: float = 3.0,
@@ -147,11 +155,7 @@ class StreamWorker:
                         self._consecutive_failures = 0
                         self._disconnect_time = None
 
-                    if batch:
-                        self.store.update_positions(batch)
-                        if self.recorder is not None and getattr(self.recorder, "is_running", False):
-                            self.recorder.enqueue_batch(batch)
-
+                    self._dispatch_stream_item(batch)
                     self._check_prune()
 
                 # If generator completed normally without error
@@ -201,24 +205,63 @@ class StreamWorker:
 
         self.store.set_connection_status(ConnectionStatus.DISCONNECTED, "Stream disconnected")
 
-    def _get_stream_generator(self) -> Iterable[List[TrainPosition]]:
-        """Instantiate appropriate telemetry stream source."""
+    def _dispatch_stream_item(self, item: Any) -> None:
+        """Route a multiplexed SSEFrame or legacy TrainPosition batch to store and recorder."""
+        if isinstance(item, SSEFrame):
+            self.store.record_stream_event(item.event_type.value)
+            if item.event_type in (
+                SSEEventType.TRAIN_POSITIONS_UX,
+                SSEEventType.TRAIN_POSITIONS,
+            ):
+                if item.positions:
+                    pos_list = list(item.positions)
+                    self.store.update_positions(pos_list)
+                    if self.recorder is not None and getattr(self.recorder, "is_running", False):
+                        self.recorder.enqueue_batch(pos_list)
+            elif item.event_type == SSEEventType.TRAIN_HISTORY:
+                if item.history:
+                    self.store.hydrate_train_history(item.history)
+            elif item.event_type == SSEEventType.SCHEDULE_CARDS:
+                self.store.update_ghost_trains(list(item.ghosts))
+            elif item.event_type == SSEEventType.DELAY_UPDATES:
+                if item.delays:
+                    self.store.apply_delay_updates(list(item.delays))
+            elif item.event_type == SSEEventType.ERROR:
+                logger.warning("Upstream SSE error frame: %s", item.error_message or "unknown")
+            return
+
+        if item:
+            self.store.update_positions(item)
+            if self.recorder is not None and getattr(self.recorder, "is_running", False):
+                self.recorder.enqueue_batch(item)
+
+    def _get_stream_generator(self) -> Iterable[Any]:
+        """Instantiate appropriate telemetry stream source (multiplexed SSE or legacy batch)."""
         if callable(self.custom_stream):
             return self.custom_stream()
-        elif self.custom_stream is not None:
+        if self.custom_stream is not None:
             return self.custom_stream
-        elif self.mock_engine is not None:
+        if self.mock_engine is not None:
+            if hasattr(self.mock_engine, "stream_events"):
+                return self.mock_engine.stream_events(
+                    interval_sec=1.0,
+                    stop_event=self._stop_event,
+                )
             return self.mock_engine.stream_positions(
                 interval_sec=1.0,
                 stop_event=self._stop_event,
             )
-        elif self.client is not None:
+        if self.client is not None:
+            if hasattr(self.client, "stream_events"):
+                return self.client.stream_events(
+                    reconnect_delay=0.0,
+                    stop_event=self._stop_event,
+                )
             return self.client.stream_train_positions(
                 reconnect_delay=0.0,
                 stop_event=self._stop_event,
             )
-        else:
-            raise ValueError("No valid telemetry source provided to StreamWorker")
+        raise ValueError("No valid telemetry source provided to StreamWorker")
 
 
 def _snap_replay_speed(multiplier: float) -> float:

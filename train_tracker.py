@@ -556,6 +556,217 @@ class CabStreamInfo:
         )
 
 
+MAX_SSE_FRAME_BYTES: int = 4 * 1024 * 1024  # 4 MiB hard cap per SSE frame (PY-MISRA-02)
+MAX_HISTORY_TRAINS_PER_FRAME: int = 500
+MAX_HISTORY_POINTS_PER_TRAIN: int = 50
+MAX_GHOSTS_PER_FRAME: int = 500
+MAX_DELAY_UPDATES_PER_FRAME: int = 500
+MIN_VALID_DELAY_MIN: int = -120
+MAX_VALID_DELAY_MIN: int = 1440
+
+
+def _parse_iso_utc_epoch(raw_ts: Any) -> Optional[float]:
+    """Parse an ISO-8601 timestamp string into finite UTC POSIX epoch seconds."""
+    if not raw_ts or not isinstance(raw_ts, str):
+        return None
+    cleaned = raw_ts.strip()
+    if not cleaned:
+        return None
+    try:
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        epoch = dt.timestamp()
+        return epoch if math.isfinite(epoch) and epoch > 0.0 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+class SSEEventType(Enum):
+    """Supported multiplexed SSE event channels from /api/train-stream (F-10.1)."""
+
+    TRAIN_POSITIONS_UX = "trainPositionsUx"
+    TRAIN_POSITIONS = "trainPositions"
+    TRAIN_HISTORY = "trainHistory"
+    SCHEDULE_CARDS = "scheduleCards"
+    DELAY_UPDATES = "delayUpdates"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class TrainHistoryPoint:
+    """Single trailing breadcrumb point delivered by SSE event: trainHistory."""
+
+    lat: float
+    lng: float
+    timestamp_epoch: float
+    speed: float = 0.0
+    course: Optional[float] = None
+    track_heading: Optional[float] = None
+    iso_timestamp: Optional[str] = None
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        fallback_epoch: float,
+    ) -> "TrainHistoryPoint":
+        """Defensively parse and validate a trainHistory point dictionary."""
+        if not isinstance(data, dict):
+            raise TypeError(f"TrainHistoryPoint payload must be a dict, got {type(data).__name__}")
+
+        lat = _safe_optional_float(data.get("lat"))
+        lng = _safe_optional_float(data.get("lng"))
+        if lat is None or lng is None:
+            raise ValueError("TrainHistoryPoint missing finite lat/lng")
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lng <= 180.0):
+            raise ValueError(f"TrainHistoryPoint out of WGS84 bounds: ({lat}, {lng})")
+        if abs(lat) < 1e-9 and abs(lng) < 1e-9:
+            raise ValueError("TrainHistoryPoint at Null Island (0.0, 0.0) rejected")
+
+        iso_ts = _safe_optional_str(data.get("ts") or data.get("timestamp") or data.get("receivedAt"))
+        parsed_epoch = _parse_iso_utc_epoch(iso_ts)
+        if parsed_epoch is None:
+            parsed_epoch = _parse_iso_utc_epoch(data.get("receivedAt"))
+        epoch = parsed_epoch if parsed_epoch is not None else float(fallback_epoch)
+        if not math.isfinite(epoch):
+            epoch = float(fallback_epoch)
+
+        speed = max(0.0, _safe_float(data.get("speed"), default=0.0))
+        raw_course = _safe_optional_float(data.get("course"))
+        course = (raw_course % 360.0) if raw_course is not None else None
+        raw_heading = _safe_optional_float(data.get("trackHeading"))
+        track_heading = (raw_heading % 360.0) if raw_heading is not None else None
+
+        return cls(
+            lat=lat,
+            lng=lng,
+            timestamp_epoch=epoch,
+            speed=speed,
+            course=course,
+            track_heading=track_heading,
+            iso_timestamp=iso_ts,
+        )
+
+
+@dataclass(frozen=True)
+class GhostTrain:
+    """In-progress scheduled run lacking live GPS telemetry (SSE event: scheduleCards)."""
+
+    id: str
+    train_number: str
+    schedule_id: Optional[str]
+    schedule_number: Optional[str]
+    name: Optional[str]
+    service_type: Optional[str]
+    category: Optional[str]
+    origin: Optional[str]
+    destination: Optional[str]
+    corridor: Optional[str]
+    scheduled_departure: Optional[str]
+    scheduled_arrival: Optional[str]
+    delay: int
+    progress: Optional[float]
+    schedule_status: str = "in_progress"
+    gps_status: str = "none"
+    signal_status: str = "none"
+    timestamp: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GhostTrain":
+        """Defensively parse a scheduleCards ghost object."""
+        if not isinstance(data, dict):
+            raise TypeError(f"GhostTrain payload must be a dict, got {type(data).__name__}")
+
+        schedule_id = _safe_optional_str(data.get("scheduleId") or data.get("_id"))
+        train_num = _safe_optional_str(data.get("trainNumber") or data.get("name"))
+        raw_id = _safe_optional_str(data.get("id"))
+        if raw_id is None:
+            if schedule_id is not None:
+                raw_id = f"schedule:{schedule_id}"
+            elif train_num is not None:
+                raw_id = f"ghost:{train_num}"
+        if not raw_id:
+            raise ValueError("GhostTrain missing id, scheduleId, and trainNumber")
+
+        resolved_num = train_num or raw_id
+        raw_delay = _safe_int(data.get("delay"), default=0)
+        delay = max(MIN_VALID_DELAY_MIN, min(MAX_VALID_DELAY_MIN, raw_delay))
+
+        raw_prog = _safe_optional_float(data.get("progress"))
+        progress = max(0.0, min(1.0, raw_prog)) if raw_prog is not None else None
+
+        return cls(
+            id=raw_id,
+            train_number=resolved_num,
+            schedule_id=schedule_id,
+            schedule_number=_safe_optional_str(data.get("scheduleNumber")),
+            name=_safe_optional_str(data.get("name")),
+            service_type=_safe_optional_str(data.get("serviceType")),
+            category=_safe_optional_str(data.get("category")),
+            origin=_safe_optional_str(data.get("origin")),
+            destination=_safe_optional_str(data.get("destination")),
+            corridor=_safe_optional_str(data.get("corridor")),
+            scheduled_departure=_safe_optional_str(data.get("scheduledDeparture")),
+            scheduled_arrival=_safe_optional_str(data.get("scheduledArrival")),
+            delay=delay,
+            progress=progress,
+            schedule_status=_safe_optional_str(data.get("scheduleStatus")) or "in_progress",
+            gps_status=_safe_optional_str(data.get("gpsStatus")) or "none",
+            signal_status=_safe_optional_str(data.get("signalStatus")) or "none",
+            timestamp=_safe_optional_str(data.get("timestamp")),
+        )
+
+
+@dataclass(frozen=True)
+class DelayUpdate:
+    """Incremental train delay delta delivered by SSE event: delayUpdates."""
+
+    train_number: str
+    delay: int
+    train_id: Optional[str] = None
+    schedule_id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DelayUpdate":
+        """Defensively parse a delayUpdates item with finite delay bounds."""
+        if not isinstance(data, dict):
+            raise TypeError(f"DelayUpdate payload must be a dict, got {type(data).__name__}")
+
+        train_num = _safe_optional_str(data.get("trainNumber"))
+        train_id = _safe_optional_str(data.get("trainId") or data.get("id"))
+        schedule_id = _safe_optional_str(data.get("scheduleId"))
+        if not (train_num or train_id or schedule_id):
+            raise ValueError("DelayUpdate missing trainNumber, trainId, and scheduleId")
+
+        raw_delay = _safe_optional_int(data.get("delay"))
+        if raw_delay is None:
+            raise ValueError("DelayUpdate missing finite integer delay")
+        clamped_delay = max(MIN_VALID_DELAY_MIN, min(MAX_VALID_DELAY_MIN, raw_delay))
+
+        return cls(
+            train_number=train_num or "",
+            delay=clamped_delay,
+            train_id=train_id,
+            schedule_id=schedule_id,
+        )
+
+
+@dataclass(frozen=True)
+class SSEFrame:
+    """Immutable multiplexed frame decoded from /api/train-stream (F-10.1)."""
+
+    event_type: SSEEventType
+    positions: Tuple[TrainPosition, ...] = ()
+    history: Tuple[Tuple[str, Tuple[TrainHistoryPoint, ...]], ...] = ()
+    ghosts: Tuple[GhostTrain, ...] = ()
+    delays: Tuple[DelayUpdate, ...] = ()
+    error_message: Optional[str] = None
+    received_at: float = 0.0
+
+
 def validate_stream_url(url: str) -> str:
     """Validate that stream URL strictly uses http or https scheme.
 
@@ -973,6 +1184,183 @@ class RailwayGovClient:
         return trains
 
     @staticmethod
+    def _decode_sse_history(
+        payload_str: str,
+        now: float,
+    ) -> Optional[Tuple[Tuple[str, Tuple[TrainHistoryPoint, ...]], ...]]:
+        """Parse SSE event: trainHistory JSON into immutable per-train point tuples."""
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError as exc:
+            logger.debug("Skipping malformed trainHistory JSON payload: %s", exc)
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        raw_history = payload.get("history")
+        if not isinstance(raw_history, dict):
+            return None
+
+        parsed_entries: List[Tuple[str, Tuple[TrainHistoryPoint, ...]]] = []
+        for idx, (raw_tid, raw_points) in enumerate(raw_history.items()):
+            if idx >= MAX_HISTORY_TRAINS_PER_FRAME:
+                break
+            tid = str(raw_tid).strip()
+            if not tid or not isinstance(raw_points, list):
+                continue
+            trimmed = raw_points[-MAX_HISTORY_POINTS_PER_TRAIN:]
+            pts: List[TrainHistoryPoint] = []
+            total_pts = len(trimmed)
+            for p_idx, item in enumerate(trimmed):
+                if not isinstance(item, dict):
+                    continue
+                fallback_ts = now - float(total_pts - p_idx)
+                try:
+                    pts.append(TrainHistoryPoint.from_dict(item, fallback_epoch=fallback_ts))
+                except (ValueError, TypeError) as exc:
+                    logger.debug("Skipping invalid trainHistory point for %s: %s", tid, exc)
+            if pts:
+                pts.sort(key=lambda pt: pt.timestamp_epoch)
+                parsed_entries.append((tid, tuple(pts)))
+        return tuple(parsed_entries)
+
+    @staticmethod
+    def _decode_sse_schedule_cards(payload_str: str) -> Optional[Tuple[GhostTrain, ...]]:
+        """Parse SSE event: scheduleCards JSON into a tuple of GhostTrain records."""
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError as exc:
+            logger.debug("Skipping malformed scheduleCards JSON payload: %s", exc)
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        raw_ghosts = payload.get("ghosts")
+        if not isinstance(raw_ghosts, list):
+            return None
+
+        ghosts: List[GhostTrain] = []
+        for item in raw_ghosts[:MAX_GHOSTS_PER_FRAME]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                ghosts.append(GhostTrain.from_dict(item))
+            except (ValueError, TypeError) as exc:
+                logger.debug("Skipping invalid scheduleCards ghost item: %s", exc)
+        return tuple(ghosts)
+
+    @staticmethod
+    def _decode_sse_delay_updates(payload_str: str) -> Optional[Tuple[DelayUpdate, ...]]:
+        """Parse SSE event: delayUpdates JSON into a tuple of DelayUpdate items."""
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError as exc:
+            logger.debug("Skipping malformed delayUpdates JSON payload: %s", exc)
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        raw_delays = payload.get("delays")
+        if not isinstance(raw_delays, list):
+            return None
+
+        updates: List[DelayUpdate] = []
+        for item in raw_delays[:MAX_DELAY_UPDATES_PER_FRAME]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                updates.append(DelayUpdate.from_dict(item))
+            except (ValueError, TypeError) as exc:
+                logger.debug("Skipping invalid delayUpdates item: %s", exc)
+        return tuple(updates)
+
+    @staticmethod
+    def _decode_sse_error(payload_str: str) -> str:
+        """Extract a concise diagnostic string from an SSE event: error payload."""
+        try:
+            payload = json.loads(payload_str)
+            if isinstance(payload, dict):
+                msg = payload.get("error") or payload.get("message") or payload_str
+                return str(msg)[:256]
+            return str(payload)[:256]
+        except json.JSONDecodeError:
+            return payload_str[:256]
+
+    @classmethod
+    def _decode_sse_frame(
+        cls,
+        event_name: str,
+        payload_str: str,
+        include_raw_positions: bool,
+        now: float,
+    ) -> Optional[SSEFrame]:
+        """Decode a single completed SSE event into a typed SSEFrame, or None if ignored."""
+        if event_name == SSEEventType.TRAIN_POSITIONS_UX.value:
+            trains = cls._decode_sse_positions(payload_str)
+            if trains is None:
+                return None
+            return SSEFrame(
+                event_type=SSEEventType.TRAIN_POSITIONS_UX,
+                positions=tuple(trains),
+                received_at=now,
+            )
+
+        if event_name == SSEEventType.TRAIN_POSITIONS.value:
+            if not include_raw_positions:
+                return None
+            trains = cls._decode_sse_positions(payload_str)
+            if trains is None:
+                return None
+            return SSEFrame(
+                event_type=SSEEventType.TRAIN_POSITIONS,
+                positions=tuple(trains),
+                received_at=now,
+            )
+
+        if event_name == SSEEventType.TRAIN_HISTORY.value:
+            history = cls._decode_sse_history(payload_str, now=now)
+            if history is None:
+                return None
+            return SSEFrame(
+                event_type=SSEEventType.TRAIN_HISTORY,
+                history=history,
+                received_at=now,
+            )
+
+        if event_name == SSEEventType.SCHEDULE_CARDS.value:
+            ghosts = cls._decode_sse_schedule_cards(payload_str)
+            if ghosts is None:
+                return None
+            return SSEFrame(
+                event_type=SSEEventType.SCHEDULE_CARDS,
+                ghosts=ghosts,
+                received_at=now,
+            )
+
+        if event_name == SSEEventType.DELAY_UPDATES.value:
+            delays = cls._decode_sse_delay_updates(payload_str)
+            if delays is None:
+                return None
+            return SSEFrame(
+                event_type=SSEEventType.DELAY_UPDATES,
+                delays=delays,
+                received_at=now,
+            )
+
+        if event_name == SSEEventType.ERROR.value:
+            return SSEFrame(
+                event_type=SSEEventType.ERROR,
+                error_message=cls._decode_sse_error(payload_str),
+                received_at=now,
+            )
+
+        logger.debug("Ignoring unrecognized SSE event channel: %r", event_name)
+        return None
+
+    @staticmethod
     def _compute_sse_reconnect_wait(
         err: Exception,
         reconnect_delay: float,
@@ -1018,15 +1406,17 @@ class RailwayGovClient:
             )
         return wait_time, attempt + 1
 
-    def _iter_sse_payloads(
+    def _iter_sse_frames(
         self,
         resp: Any,
-        event_filter: str,
         stop_event: Optional[threading.Event],
-    ) -> Generator[List[TrainPosition], None, None]:
-        """Iterate over raw SSE HTTP response lines and yield decoded TrainPosition batches."""
+        include_raw_positions: bool = False,
+    ) -> Generator[SSEFrame, None, None]:
+        """Iterate over raw SSE HTTP response lines and yield bounded multiplexed SSEFrames."""
         current_event = "message"
         data_buffer: List[str] = []
+        buffered_bytes: int = 0
+        oversized_frame: bool = False
 
         for raw_line in resp:
             if stop_event is not None and stop_event.is_set():
@@ -1034,16 +1424,120 @@ class RailwayGovClient:
 
             line = raw_line.decode("utf-8", errors="ignore").strip()
             if not line:
-                if data_buffer and current_event == event_filter:
-                    trains = self._decode_sse_positions("".join(data_buffer))
-                    if trains is not None:
-                        yield trains
+                if data_buffer and not oversized_frame:
+                    frame = self._decode_sse_frame(
+                        event_name=current_event,
+                        payload_str="".join(data_buffer),
+                        include_raw_positions=include_raw_positions,
+                        now=time.time(),
+                    )
+                    if frame is not None:
+                        yield frame
                 data_buffer = []
+                buffered_bytes = 0
+                oversized_frame = False
                 current_event = "message"
+            elif line.startswith(":"):
+                continue  # W3C SSE comment / keep-alive heartbeat
             elif line.startswith("event:"):
                 current_event = line.split(":", 1)[1].strip()
             elif line.startswith("data:"):
-                data_buffer.append(line.split(":", 1)[1].strip())
+                chunk = line.split(":", 1)[1].strip()
+                buffered_bytes += len(chunk.encode("utf-8", errors="ignore"))
+                if buffered_bytes > MAX_SSE_FRAME_BYTES:
+                    if not oversized_frame:
+                        logger.warning(
+                            "Dropping oversized SSE '%s' frame exceeding %d bytes.",
+                            current_event,
+                            MAX_SSE_FRAME_BYTES,
+                        )
+                    oversized_frame = True
+                    data_buffer = []
+                elif not oversized_frame:
+                    data_buffer.append(chunk)
+
+    def _iter_sse_payloads(
+        self,
+        resp: Any,
+        event_filter: str,
+        stop_event: Optional[threading.Event],
+    ) -> Generator[List[TrainPosition], None, None]:
+        """Iterate over raw SSE HTTP response lines and yield decoded TrainPosition batches."""
+        include_raw = event_filter == SSEEventType.TRAIN_POSITIONS.value
+        for frame in self._iter_sse_frames(
+            resp=resp,
+            stop_event=stop_event,
+            include_raw_positions=include_raw,
+        ):
+            if frame.event_type.value == event_filter:
+                yield list(frame.positions)
+
+    def stream_events(
+        self,
+        include_raw_positions: bool = False,
+        reconnect_delay: float = 3.0,
+        stop_event: Optional[threading.Event] = None,
+        timeout: float = 10.0,
+    ) -> Generator[SSEFrame, None, None]:
+        """Stream multiplexed SSE frames (positions, history, ghost cards, delays, errors).
+
+        Args:
+            include_raw_positions: Whether to also emit raw 'trainPositions' frames alongside
+                smoothed 'trainPositionsUx' frames (default: False).
+            reconnect_delay: Base seconds to wait before reconnecting on error. If <= 0,
+                connection exceptions are raised directly to the caller (e.g. StreamWorker).
+            stop_event: Optional threading.Event to signal immediate stream termination.
+            timeout: Socket read timeout in seconds (default: 10.0).
+        """
+        stream_url = f"{self.base_url}/api/train-stream"
+        headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
+        attempt = 0
+        disconnect_time: Optional[float] = None
+        consecutive_failures: int = 0
+
+        while stop_event is None or not stop_event.is_set():
+            try:
+                req = urllib.request.Request(stream_url, headers=headers)
+                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=timeout) as resp:
+                    for frame in self._iter_sse_frames(
+                        resp=resp,
+                        stop_event=stop_event,
+                        include_raw_positions=include_raw_positions,
+                    ):
+                        if consecutive_failures > 0 and disconnect_time is not None:
+                            logger.info(
+                                "Upstream SSE connection re-established after %.1fs outage.",
+                                time.monotonic() - disconnect_time,
+                            )
+                            consecutive_failures = 0
+                            disconnect_time = None
+                        yield frame
+                        attempt = 0
+
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    if reconnect_delay <= 0.0:
+                        return
+
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                if reconnect_delay <= 0.0:
+                    raise
+
+                if consecutive_failures == 0:
+                    disconnect_time = time.monotonic()
+
+                wait_time, attempt = self._compute_sse_reconnect_wait(
+                    e, reconnect_delay, attempt, consecutive_failures
+                )
+                consecutive_failures += 1
+
+                if stop_event is not None:
+                    if stop_event.wait(timeout=wait_time):
+                        return
+                else:
+                    time.sleep(wait_time)
 
     def stream_train_positions(
         self,
@@ -1063,51 +1557,15 @@ class RailwayGovClient:
             stop_event: Optional threading.Event to signal immediate stream termination.
             timeout: Socket read timeout in seconds (default: 10.0).
         """
-        stream_url = f"{self.base_url}/api/train-stream"
-        headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
-        attempt = 0
-        disconnect_time: Optional[float] = None
-        consecutive_failures: int = 0
-
-        while stop_event is None or not stop_event.is_set():
-            try:
-                req = urllib.request.Request(stream_url, headers=headers)
-                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=timeout) as resp:
-                    for trains in self._iter_sse_payloads(resp, event_filter, stop_event):
-                        if consecutive_failures > 0 and disconnect_time is not None:
-                            logger.info(
-                                "Upstream SSE connection re-established after %.1fs outage.",
-                                time.monotonic() - disconnect_time,
-                            )
-                            consecutive_failures = 0
-                            disconnect_time = None
-                        yield trains
-                        attempt = 0
-
-                    if stop_event is not None and stop_event.is_set():
-                        return
-                    if reconnect_delay <= 0:
-                        return
-
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                if stop_event is not None and stop_event.is_set():
-                    return
-                if reconnect_delay <= 0:
-                    raise
-
-                if consecutive_failures == 0:
-                    disconnect_time = time.monotonic()
-
-                wait_time, attempt = self._compute_sse_reconnect_wait(
-                    e, reconnect_delay, attempt, consecutive_failures
-                )
-                consecutive_failures += 1
-
-                if stop_event is not None:
-                    if stop_event.wait(timeout=wait_time):
-                        return
-                else:
-                    time.sleep(wait_time)
+        include_raw = event_filter == SSEEventType.TRAIN_POSITIONS.value
+        for frame in self.stream_events(
+            include_raw_positions=include_raw,
+            reconnect_delay=reconnect_delay,
+            stop_event=stop_event,
+            timeout=timeout,
+        ):
+            if frame.event_type.value == event_filter:
+                yield list(frame.positions)
 
 
 def _positive_int(val: str) -> int:

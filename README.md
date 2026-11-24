@@ -9,7 +9,7 @@
 ## Features
 
 - **Braille Terminal Map**: Sub-character GIS projection rendering the Greek railway network, corridors, stations, and active train vectors with direction-aware glyphs (`▲`, `▼`, `◄`, `►`, `▲/►`, etc.).
-- **Live SSE Telemetry**: Consumes live updates from `railway.gov.gr/api/train-stream` with automatic exponential reconnection and thread-safe state synchronization.
+- **Multiplexed Live SSE Telemetry**: Consumes live `trainPositionsUx`, startup `trainHistory` (instant breadcrumb & sparkline hydration), `scheduleCards` (untracked scheduled "ghost" runs without live GPS, toggleable via `u`/`U`), and consist-aware `delayUpdates` from `railway.gov.gr/api/train-stream` with automatic exponential reconnection and thread-safe state synchronization.
 - **Interactive TUI Dashboard**:
   - **Live Roster**: Searchable train list with real-time delay indicators, speed, and origin/destination info.
   - **Telemetry Inspector**: Deep inspection of locomotive ID, HEPOS spatial coordinates, speed, track heading, chainage, and corridor progress.
@@ -251,6 +251,7 @@ curl http://127.0.0.1:8085/gtfs-rt/feed.json
 | `f` | Toggle Camera Follow mode on selected train |
 | `c` | Cycle railway corridor filter (Mainline, Suburban, etc.) |
 | `b` | Toggle historical breadcrumb trails |
+| `u` / `U` | Toggle untracked scheduled "ghost" runs (`scheduleCards`) visibility |
 | `s` | Cycle train roster sorting (Train ID, Speed, Delay) |
 | `i` / `I` | Inspect full timetable & intermediate stops for selected train |
 | `w` / `W` | Launch live locomotive forward cab video stream (`mpv`/`ffplay`/browser) |

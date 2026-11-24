@@ -201,6 +201,7 @@ class GtfsRtConfig:
     include_unassigned: bool = False
     include_freight: bool = False
     include_alerts: bool = True
+    include_ghosts: bool = True
     delay_alert_min: int = 15
     station_proximity_m: float = 250.0
     incoming_proximity_m: float = 1500.0

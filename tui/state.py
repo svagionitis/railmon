@@ -2,14 +2,14 @@
 Thread-safe state repository and reactive models for live train telemetry and UI state.
 """
 
-from collections import deque
-from dataclasses import dataclass, field
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 import threading
 import time
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
-from train_tracker import TrainPosition
+from train_tracker import DelayUpdate, GhostTrain, TrainHistoryPoint, TrainPosition
 from tui.geo import (
     DEFAULT_CORRIDOR_SPEED_RULES,
     DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC,
@@ -104,8 +104,19 @@ class InfrastructureLayerMode(Enum):
     OFF = auto()             # Hide all infrastructure overlays
 
 
+class GhostVisibilityMode(Enum):
+    """Visibility policy for untracked scheduled ghost runs in TUI roster and boards (F-10.1)."""
+
+    SHOW = auto()  # Default: display active non-superseded ghost runs
+    HIDE = auto()  # Hide ghost runs from TUI roster and Station Departure Board
+
+
 # Supported playback speed multipliers for SQLite Historical DVR Mode (F-4.2)
 REPLAY_SPEED_MULTIPLIERS: Tuple[float, ...] = (1.0, 5.0, 15.0, 60.0)
+DEFAULT_MAX_TRAIL_LEN: int = 25
+DEFAULT_GHOST_STALE_TIMEOUT_SEC: float = 300.0
+MAX_PENDING_HISTORY_TRAINS: int = 500
+PENDING_HISTORY_TTL_SEC: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -245,6 +256,25 @@ class TrainRecord:
         return (time.time() - self.last_updated) > threshold_sec
 
 
+@dataclass
+class GhostTrainRecord:
+    """Stateful wrapper around a GhostTrain maintaining observation metadata (F-10.1)."""
+
+    ghost: GhostTrain
+    first_seen: float = field(default_factory=time.time)
+    last_updated: float = field(default_factory=time.time)
+    update_count: int = 1
+
+    def clone(self) -> "GhostTrainRecord":
+        """Create a thread-isolated copy for immutable StateSnapshot."""
+        return GhostTrainRecord(
+            ghost=self.ghost,
+            first_seen=self.first_seen,
+            last_updated=self.last_updated,
+            update_count=self.update_count,
+        )
+
+
 @dataclass(frozen=True)
 class StateSnapshot:
     """Immutable point-in-time snapshot consumed by the Curses renderer."""
@@ -294,6 +324,14 @@ class StateSnapshot:
     advisory_conflict_count: int = 0
     selected_conflict: Optional[ConflictAlert] = None
     duplicate_train_numbers: FrozenSet[str] = field(default_factory=frozenset)
+    ghost_trains: Dict[str, GhostTrainRecord] = field(default_factory=dict)
+    filtered_ghosts: Tuple[GhostTrainRecord, ...] = ()
+    selected_ghost: Optional[GhostTrainRecord] = None
+    ghost_visibility_mode: GhostVisibilityMode = GhostVisibilityMode.SHOW
+    ghost_count: int = 0
+    history_hydrated_trains: int = 0
+    delay_updates_applied: int = 0
+    stream_event_counts: Tuple[Tuple[str, int], ...] = ()
 
 
 # Known Hellenic Railways corridor keywords and aliases
@@ -416,6 +454,80 @@ def _delay_sort_key(rec: TrainRecord) -> Tuple[float, Tuple[int, str, str, str]]
     return (-dly, _natural_sort_key(rec))
 
 
+def _ghost_matches_corridor(ghost: GhostTrain, target: str) -> bool:
+    """Check if a coordinate-less ghost run matches a corridor filter."""
+    norm_target = target.strip().upper()
+    corridor = (ghost.corridor or "").strip().upper()
+    if corridor:
+        return _matches_explicit_corridor_tag(corridor, norm_target)
+
+    service_type = (ghost.service_type or "").strip().upper()
+    category = (ghost.category or "").strip().upper()
+    origin = (ghost.origin or "").strip().upper()
+    destination = (ghost.destination or "").strip().upper()
+
+    combined_type = f"{service_type} {category}"
+    is_suburban = (
+        "SUBURBAN" in combined_type
+        or "PROAST" in combined_type
+        or "ΠΡΟΑΣΤ" in combined_type
+        or _has_station_keyword(origin, destination, "", _PROAST_STATIONS)
+    )
+    is_intercity = "INTERCITY" in combined_type or "IC" in service_type
+
+    if norm_target in ("PROASTIAKOS", "PROASTIAKOS_ATH", "SUBURBAN"):
+        return is_suburban
+    if norm_target in ("PATHE", "PATHE_MAINLINE", "MAINLINE"):
+        return is_intercity
+    if norm_target in ("NORTHERN", "NORTHERN_GREECE", "NORTH") and not is_suburban:
+        return _has_station_keyword(origin, destination, "", _NORTHERN_STATIONS)
+    if norm_target in ("THESSALY",) and not is_suburban:
+        return _has_station_keyword(origin, destination, "", _THESSALY_STATIONS)
+    return False
+
+
+def _ghost_natural_sort_key(rec: GhostTrainRecord) -> Tuple[int, str, str]:
+    """Natural alphanumeric sort key for ghost trains."""
+    tn = (rec.ghost.train_number or "").strip()
+    gid = str(rec.ghost.id or "").strip()
+    digits = "".join(ch for ch in tn if ch.isdigit())
+    if digits:
+        return (0, f"{int(digits):010d}_{tn}", gid)
+    return (1, tn or gid, gid)
+
+
+def _ghost_delay_sort_key(rec: GhostTrainRecord) -> Tuple[float, Tuple[int, str, str]]:
+    """Sort ghost trains by descending delay with natural train number tie-breaker."""
+    return (-float(rec.ghost.delay), _ghost_natural_sort_key(rec))
+
+
+def _dedup_merge_breadcrumbs(
+    existing: Sequence[HistoricalBreadcrumb],
+    incoming: Sequence[HistoricalBreadcrumb],
+    max_len: int,
+    threshold_deg: float = 1e-5,
+) -> Deque[HistoricalBreadcrumb]:
+    """Chronologically merge and deduplicate breadcrumbs within a bounded deque."""
+    combined = sorted(
+        list(existing) + list(incoming),
+        key=lambda crumb: crumb.timestamp,
+    )
+    deduped: List[HistoricalBreadcrumb] = []
+    for crumb in combined:
+        if deduped:
+            prev = deduped[-1]
+            same_pos = (
+                abs(prev.lat - crumb.lat) <= threshold_deg
+                and abs(prev.lng - crumb.lng) <= threshold_deg
+            )
+            if same_pos and abs(prev.timestamp - crumb.timestamp) < 0.5:
+                continue
+        deduped.append(crumb)
+    if len(deduped) > max_len:
+        deduped = deduped[-max_len:]
+    return deque(deduped, maxlen=max_len)
+
+
 
 def _tally_snapshot_train_metrics(
     trains: Dict[str, TrainRecord],
@@ -466,19 +578,28 @@ class TrainStateStore:
     def __init__(
         self,
         stale_timeout_sec: float = DEFAULT_LIVE_STALE_TIMEOUT_SEC,
-        max_trail_len: int = 15,
+        max_trail_len: int = DEFAULT_MAX_TRAIL_LEN,
         initial_theme: Optional[ThemeProfile] = None,
+        ghost_stale_timeout_sec: float = DEFAULT_GHOST_STALE_TIMEOUT_SEC,
     ) -> None:
         self._lock = threading.RLock()
         self._stale_timeout_sec = stale_timeout_sec
         self._max_trail_len = max_trail_len
+        self._ghost_stale_timeout_sec = max(10.0, float(ghost_stale_timeout_sec))
 
         # Telemetry data
         self._trains: Dict[str, TrainRecord] = {}
+        self._ghosts: Dict[str, GhostTrainRecord] = {}
+        self._pending_history: "OrderedDict[str, Tuple[float, Tuple[HistoricalBreadcrumb, ...]]]" = (
+            OrderedDict()
+        )
         self._total_messages: int = 0
         self._last_update_ts: float = 0.0
         self._last_prune_ts: float = 0.0
         self._total_trains_pruned: int = 0
+        self._history_hydrated_trains: int = 0
+        self._delay_updates_applied: int = 0
+        self._stream_event_counts: Dict[str, int] = {}
         self._version: int = 0
 
         # UI & View state
@@ -488,6 +609,7 @@ class TrainStateStore:
         self._corridor_filter: Optional[str] = None
         self._sort_mode: RosterSortMode = RosterSortMode.TRAIN_ID
         self._breadcrumb_mode: BreadcrumbMode = BreadcrumbMode.ALL
+        self._ghost_visibility_mode: GhostVisibilityMode = GhostVisibilityMode.SHOW
         self._inspector_mode: InspectorMode = InspectorMode.TRAIN
         self._selected_station_id: Optional[str] = None
         self._station_cycle_anchor_id: Optional[str] = None
@@ -632,15 +754,251 @@ class TrainStateStore:
                 station_dwell_start=new_dwell_start,
                 sensor_health=health,
             )
-            record.trail.append(
-                HistoricalBreadcrumb(
-                    lat=pos.lat,
-                    lng=pos.lng,
-                    timestamp=ts,
-                    speed=float(pos.speed) if pos.speed is not None else 0.0,
-                )
+            staged = self._pending_history.pop(pos.id, None)
+            live_crumb = HistoricalBreadcrumb(
+                lat=pos.lat,
+                lng=pos.lng,
+                timestamp=ts,
+                speed=float(pos.speed) if pos.speed is not None else 0.0,
             )
+            if staged is not None and (ts - staged[0]) <= PENDING_HISTORY_TTL_SEC:
+                record.trail = _dedup_merge_breadcrumbs(
+                    existing=staged[1],
+                    incoming=(live_crumb,),
+                    max_len=self._max_trail_len,
+                )
+            else:
+                record.trail.append(live_crumb)
             self._trains[pos.id] = record
+        self._maybe_promote_selected_ghost(pos)
+
+    def _active_live_identifiers(self) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+        """Return (live_schedule_ids, live_train_numbers_upper) across active GPS trains."""
+        sched_ids: Set[str] = set()
+        train_nums: Set[str] = set()
+        for rec in self._trains.values():
+            sid = (rec.position.schedule_id or "").strip()
+            if sid:
+                sched_ids.add(sid)
+            tn = (rec.position.train_number or "").strip().upper()
+            if tn:
+                train_nums.add(tn)
+        return frozenset(sched_ids), frozenset(train_nums)
+
+    @staticmethod
+    def _is_ghost_superseded(
+        ghost: GhostTrain,
+        live_sched_ids: FrozenSet[str],
+        live_train_nums: FrozenSet[str],
+    ) -> bool:
+        """Return True if a live GPS train already covers this ghost run."""
+        sid = (ghost.schedule_id or "").strip()
+        if sid and sid in live_sched_ids:
+            return True
+        tn = (ghost.train_number or "").strip().upper()
+        if tn and tn in live_train_nums:
+            return True
+        return False
+
+    def _maybe_promote_selected_ghost(self, pos: TrainPosition) -> None:
+        """Promote active selection from a ghost run to a matching live GPS train."""
+        if not self._selected_id or self._selected_id not in self._ghosts:
+            return
+        sel_ghost = self._ghosts[self._selected_id].ghost
+        pos_sid = (pos.schedule_id or "").strip()
+        ghost_sid = (sel_ghost.schedule_id or "").strip()
+        same_sched = bool(pos_sid and ghost_sid and pos_sid == ghost_sid)
+        same_num = bool(
+            pos.train_number
+            and sel_ghost.train_number
+            and pos.train_number.strip().upper() == sel_ghost.train_number.strip().upper()
+        )
+        if same_sched or same_num:
+            self._selected_id = pos.id
+
+    def _visible_non_superseded_ghosts(self) -> Dict[str, GhostTrainRecord]:
+        """Return cloned map of active ghost runs not superseded by live GPS trains."""
+        live_sids, live_nums = self._active_live_identifiers()
+        return {
+            gid: grec.clone()
+            for gid, grec in self._ghosts.items()
+            if not self._is_ghost_superseded(grec.ghost, live_sids, live_nums)
+        }
+
+    def record_stream_event(self, event_name: str) -> None:
+        """Increment cumulative counter for a multiplexed SSE event channel (F-10.1)."""
+        clean_name = str(event_name or "").strip()
+        if not clean_name:
+            return
+        with self._lock:
+            self._stream_event_counts[clean_name] = (
+                self._stream_event_counts.get(clean_name, 0) + 1
+            )
+
+    def hydrate_train_history(
+        self,
+        history: Sequence[Tuple[str, Sequence[TrainHistoryPoint]]],
+        now: Optional[float] = None,
+    ) -> int:
+        """Hydrate live train trails or stage pending history for unseen trains (F-10.1)."""
+        with self._lock:
+            ref_now = float(now) if now is not None else time.time()
+            hydrated_count = 0
+
+            for train_id, points in history:
+                tid = str(train_id or "").strip()
+                if not tid or not points:
+                    continue
+                incoming = tuple(
+                    HistoricalBreadcrumb(
+                        lat=pt.lat,
+                        lng=pt.lng,
+                        timestamp=pt.timestamp_epoch,
+                        speed=max(0.0, float(pt.speed)),
+                    )
+                    for pt in points
+                )
+                if tid in self._trains:
+                    rec = self._trains[tid]
+                    rec.trail = _dedup_merge_breadcrumbs(
+                        existing=list(rec.trail),
+                        incoming=incoming,
+                        max_len=self._max_trail_len,
+                    )
+                    hydrated_count += 1
+                else:
+                    prev = self._pending_history.get(tid)
+                    prior_crumbs = prev[1] if prev is not None else ()
+                    merged = _dedup_merge_breadcrumbs(
+                        existing=prior_crumbs,
+                        incoming=incoming,
+                        max_len=self._max_trail_len,
+                    )
+                    self._pending_history[tid] = (ref_now, tuple(merged))
+                    self._pending_history.move_to_end(tid)
+                    while len(self._pending_history) > MAX_PENDING_HISTORY_TRAINS:
+                        self._pending_history.popitem(last=False)
+                    hydrated_count += 1
+
+            if hydrated_count > 0:
+                self._history_hydrated_trains += hydrated_count
+                self._total_messages += 1
+                self._last_update_ts = max(self._last_update_ts, ref_now)
+                self._version += 1
+            return hydrated_count
+
+    def update_ghost_trains(
+        self,
+        ghosts: Sequence[GhostTrain],
+        now: Optional[float] = None,
+    ) -> int:
+        """Replace active scheduleCards ghost snapshot while preserving metadata (F-10.1)."""
+        with self._lock:
+            ref_now = float(now) if now is not None else time.time()
+            old_selected_ghost = (
+                self._ghosts.get(self._selected_id)
+                if self._selected_id is not None
+                else None
+            )
+
+            new_ghosts: Dict[str, GhostTrainRecord] = {}
+            for ghost in ghosts:
+                gid = ghost.id.strip()
+                if not gid:
+                    continue
+                prev = self._ghosts.get(gid)
+                if prev is not None:
+                    new_ghosts[gid] = GhostTrainRecord(
+                        ghost=ghost,
+                        first_seen=prev.first_seen,
+                        last_updated=ref_now,
+                        update_count=prev.update_count + 1,
+                    )
+                else:
+                    new_ghosts[gid] = GhostTrainRecord(
+                        ghost=ghost,
+                        first_seen=ref_now,
+                        last_updated=ref_now,
+                        update_count=1,
+                    )
+
+            self._ghosts = new_ghosts
+
+            if old_selected_ghost is not None and self._selected_id not in self._ghosts:
+                promoted_id = self._find_live_match_for_ghost(old_selected_ghost.ghost)
+                self._selected_id = promoted_id
+                if promoted_id is None:
+                    self._follow_mode = False
+
+            self._total_messages += 1
+            self._last_update_ts = max(self._last_update_ts, ref_now)
+            self._version += 1
+            return len(new_ghosts)
+
+    def _find_live_match_for_ghost(self, ghost: GhostTrain) -> Optional[str]:
+        """Locate an active live GPS train matching a vanished ghost run."""
+        g_sid = (ghost.schedule_id or "").strip()
+        g_num = (ghost.train_number or "").strip().upper()
+        for tid, rec in self._trains.items():
+            p_sid = (rec.position.schedule_id or "").strip()
+            if g_sid and p_sid and g_sid == p_sid:
+                return tid
+            p_num = (rec.position.train_number or "").strip().upper()
+            if g_num and p_num and g_num == p_num:
+                return tid
+        return None
+
+    @staticmethod
+    def _delay_update_matches_live(upd: DelayUpdate, pos: TrainPosition) -> bool:
+        """Determine whether a DelayUpdate applies to a live TrainPosition."""
+        if upd.train_id and pos.id == upd.train_id:
+            return True
+        if upd.schedule_id and pos.schedule_id and pos.schedule_id == upd.schedule_id:
+            return True
+        if upd.train_number and pos.train_number:
+            return pos.train_number.strip().upper() == upd.train_number.strip().upper()
+        return False
+
+    @staticmethod
+    def _delay_update_matches_ghost(upd: DelayUpdate, ghost: GhostTrain) -> bool:
+        """Determine whether a DelayUpdate applies to a GhostTrain."""
+        if upd.schedule_id and ghost.schedule_id and ghost.schedule_id == upd.schedule_id:
+            return True
+        if upd.train_number and ghost.train_number:
+            return ghost.train_number.strip().upper() == upd.train_number.strip().upper()
+        return False
+
+    def apply_delay_updates(
+        self,
+        updates: Sequence[DelayUpdate],
+        now: Optional[float] = None,
+    ) -> int:
+        """Patch delays in-place across all matching live consists and ghosts (F-10.1).
+
+        Preserves TrainRecord.last_updated so incremental delay deltas never mask GPS dropouts.
+        """
+        with self._lock:
+            ref_now = float(now) if now is not None else time.time()
+            modified = 0
+
+            for upd in updates:
+                for rec in self._trains.values():
+                    if self._delay_update_matches_live(upd, rec.position):
+                        if rec.position.delay != upd.delay:
+                            rec.position = replace(rec.position, delay=upd.delay)
+                            modified += 1
+                for grec in self._ghosts.values():
+                    if self._delay_update_matches_ghost(upd, grec.ghost):
+                        if grec.ghost.delay != upd.delay:
+                            grec.ghost = replace(grec.ghost, delay=upd.delay)
+                            modified += 1
+
+            self._total_messages += 1
+            self._last_update_ts = max(self._last_update_ts, ref_now)
+            if modified > 0:
+                self._delay_updates_applied += modified
+                self._version += 1
+            return modified
 
     def _recompute_conflicts(self, now: float) -> None:
         """Evaluate and cache pairwise conflicts across all active trains (caller holds self._lock)."""
@@ -807,7 +1165,29 @@ class TrainStateStore:
                 tid for tid, rec in self._trains.items()
                 if (ref_now - rec.last_updated) > cutoff
             ]
+            # Evict expired pending trainHistory staging entries and stale ghosts (F-10.1)
+            expired_pending = [
+                tid
+                for tid, (staged_at, _) in self._pending_history.items()
+                if (ref_now - staged_at) > PENDING_HISTORY_TTL_SEC
+            ]
+            for tid in expired_pending:
+                del self._pending_history[tid]
+
+            stale_ghost_ids = [
+                gid
+                for gid, grec in self._ghosts.items()
+                if (ref_now - grec.last_updated) > self._ghost_stale_timeout_sec
+            ]
+            for gid in stale_ghost_ids:
+                del self._ghosts[gid]
+                if self._selected_id == gid:
+                    self._selected_id = None
+                    self._follow_mode = False
+
             if not stale_ids:
+                if stale_ghost_ids:
+                    self._version += 1
                 self._last_prune_ts = ref_now
                 return 0
 
@@ -1043,13 +1423,23 @@ class TrainStateStore:
             trains_copy = {tid: rec.clone() for tid, rec in self._trains.items()}
             filtered = self._compute_filtered_list(trains_copy)
 
+            ghost_trains_copy = self._visible_non_superseded_ghosts()
+            filtered_ghosts = self._compute_filtered_ghosts(ghost_trains_copy)
+
             sel_idx = -1
-            selected_record = None
+            selected_record: Optional[TrainRecord] = None
+            selected_ghost: Optional[GhostTrainRecord] = None
             if self._selected_id and self._selected_id in trains_copy:
                 selected_record = trains_copy[self._selected_id]
                 for idx, rec in enumerate(filtered):
                     if rec.position.id == self._selected_id:
                         sel_idx = idx
+                        break
+            elif self._selected_id and self._selected_id in ghost_trains_copy:
+                selected_ghost = ghost_trains_copy[self._selected_id]
+                for g_idx, grec in enumerate(filtered_ghosts):
+                    if grec.ghost.id == self._selected_id:
+                        sel_idx = len(filtered) + g_idx
                         break
 
             overspeed_ids, frozen_ids, dropped_ids, stale_cnt = _tally_snapshot_train_metrics(trains_copy)
@@ -1116,6 +1506,14 @@ class TrainStateStore:
                 advisory_conflict_count=advisory_conflicts,
                 selected_conflict=sel_conflict,
                 duplicate_train_numbers=duplicate_train_numbers,
+                ghost_trains=ghost_trains_copy,
+                filtered_ghosts=tuple(filtered_ghosts),
+                selected_ghost=selected_ghost,
+                ghost_visibility_mode=self._ghost_visibility_mode,
+                ghost_count=len(ghost_trains_copy),
+                history_hydrated_trains=self._history_hydrated_trains,
+                delay_updates_applied=self._delay_updates_applied,
+                stream_event_counts=tuple(sorted(self._stream_event_counts.items())),
             )
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
@@ -1130,46 +1528,68 @@ class TrainStateStore:
                 return self._trains.get(self._selected_id)
             return None
 
+    def _combined_roster_ids(self) -> List[str]:
+        """Return ordered selectable IDs across filtered live trains and visible ghosts."""
+        filtered_live = self._compute_filtered_list(self._trains)
+        visible_ghosts = self._visible_non_superseded_ghosts()
+        filtered_ghosts = self._compute_filtered_ghosts(visible_ghosts)
+        return [rec.position.id for rec in filtered_live] + [
+            grec.ghost.id for grec in filtered_ghosts
+        ]
+
     def select_next(self) -> Optional[str]:
-        """Move cursor selection to next train in filtered roster (with wrap-around)."""
+        """Move cursor selection to next train or visible ghost in roster (with wrap-around)."""
         with self._lock:
-            filtered = self._compute_filtered_list(self._trains)
-            if not filtered:
+            roster_ids = self._combined_roster_ids()
+            if not roster_ids:
                 self._selected_id = None
                 self._follow_mode = False
                 return None
 
-            curr_idx = self._get_current_index(filtered)
-            next_idx = (curr_idx + 1) % len(filtered)
-            self._selected_id = filtered[next_idx].position.id
+            curr_idx = roster_ids.index(self._selected_id) if self._selected_id in roster_ids else -1
+            next_idx = (curr_idx + 1) % len(roster_ids)
+            next_id = roster_ids[next_idx]
+            self._selected_id = next_id
+            if next_id not in self._trains:
+                self._follow_mode = False
             self._version += 1
             return self._selected_id
 
     def select_prev(self) -> Optional[str]:
-        """Move cursor selection to previous train in filtered roster (with wrap-around)."""
+        """Move cursor selection to previous train or visible ghost in roster (with wrap-around)."""
         with self._lock:
-            filtered = self._compute_filtered_list(self._trains)
-            if not filtered:
+            roster_ids = self._combined_roster_ids()
+            if not roster_ids:
                 self._selected_id = None
                 self._follow_mode = False
                 return None
 
-            curr_idx = self._get_current_index(filtered)
+            curr_idx = roster_ids.index(self._selected_id) if self._selected_id in roster_ids else -1
             if curr_idx < 0:
-                prev_idx = len(filtered) - 1
+                prev_idx = len(roster_ids) - 1
             else:
-                prev_idx = (curr_idx - 1 + len(filtered)) % len(filtered)
-            self._selected_id = filtered[prev_idx].position.id
+                prev_idx = (curr_idx - 1 + len(roster_ids)) % len(roster_ids)
+            prev_id = roster_ids[prev_idx]
+            self._selected_id = prev_id
+            if prev_id not in self._trains:
+                self._follow_mode = False
             self._version += 1
             return self._selected_id
 
     def select_by_id(self, train_id: str) -> bool:
-        """Explicitly select a train by its identifier."""
+        """Explicitly select a live train or visible ghost run by its identifier."""
         with self._lock:
             if train_id in self._trains:
                 self._selected_id = train_id
                 self._version += 1
                 return True
+            if self._ghost_visibility_mode == GhostVisibilityMode.SHOW:
+                visible_ghosts = self._visible_non_superseded_ghosts()
+                if train_id in visible_ghosts:
+                    self._selected_id = train_id
+                    self._follow_mode = False
+                    self._version += 1
+                    return True
             return False
 
     def clear_selection(self) -> None:
@@ -1433,10 +1853,39 @@ class TrainStateStore:
             self._version += 1
             return self._theme_profile
 
+    def set_ghost_visibility_mode(self, mode: GhostVisibilityMode) -> None:
+        """Explicitly set ghost scheduled run visibility mode (F-10.1)."""
+        if not isinstance(mode, GhostVisibilityMode):
+            raise TypeError(f"Expected GhostVisibilityMode, got {type(mode).__name__}")
+        with self._lock:
+            if self._ghost_visibility_mode != mode:
+                self._ghost_visibility_mode = mode
+                if mode == GhostVisibilityMode.HIDE and self._selected_id in self._ghosts:
+                    self._selected_id = None
+                    self._follow_mode = False
+                self._version += 1
+
+    def toggle_ghost_visibility(self) -> GhostVisibilityMode:
+        """Toggle visibility of untracked scheduled ghost runs: SHOW <-> HIDE (F-10.1)."""
+        with self._lock:
+            next_mode = (
+                GhostVisibilityMode.HIDE
+                if self._ghost_visibility_mode == GhostVisibilityMode.SHOW
+                else GhostVisibilityMode.SHOW
+            )
+            self._ghost_visibility_mode = next_mode
+            if next_mode == GhostVisibilityMode.HIDE and self._selected_id in self._ghosts:
+                self._selected_id = None
+                self._follow_mode = False
+            self._version += 1
+            return self._ghost_visibility_mode
+
     def clear(self) -> None:
         """Reset state store completely."""
         with self._lock:
             self._trains.clear()
+            self._ghosts.clear()
+            self._pending_history.clear()
             self._selected_id = None
             self._follow_mode = False
             self._inspector_mode = InspectorMode.TRAIN
@@ -1444,11 +1893,46 @@ class TrainStateStore:
             self._station_cycle_anchor_id = None
             self._total_messages = 0
             self._last_update_ts = 0.0
+            self._history_hydrated_trains = 0
+            self._delay_updates_applied = 0
+            self._stream_event_counts.clear()
             self._version += 1
 
     # ------------------------------------------------------------------
     # Internal Filter & Sorting Logic
     # ------------------------------------------------------------------
+
+    def _compute_filtered_ghosts(
+        self,
+        ghosts: Dict[str, GhostTrainRecord],
+    ) -> List[GhostTrainRecord]:
+        """Filter and sort active non-superseded ghost runs for the roster pane."""
+        if self._ghost_visibility_mode == GhostVisibilityMode.HIDE:
+            return []
+
+        results: List[GhostTrainRecord] = []
+        q = self._filter_query.lower()
+
+        for grec in ghosts.values():
+            g = grec.ghost
+            if self._corridor_filter and not _ghost_matches_corridor(g, self._corridor_filter):
+                continue
+            if q:
+                searchable = (
+                    f"{g.train_number or ''} {g.id or ''} {g.name or ''} "
+                    f"{g.origin or ''} {g.destination or ''} "
+                    f"{g.service_type or ''} {g.category or ''} "
+                    f"{g.corridor or ''} ghost"
+                ).lower()
+                if q not in searchable:
+                    continue
+            results.append(grec)
+
+        if self._sort_mode == RosterSortMode.DELAY:
+            results.sort(key=_ghost_delay_sort_key)
+        else:
+            results.sort(key=_ghost_natural_sort_key)
+        return results
 
     def _compute_filtered_list(self, trains: Dict[str, TrainRecord]) -> List[TrainRecord]:
         """Filter and sort active trains by commercial train number and corridor."""
