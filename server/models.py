@@ -37,8 +37,8 @@ class TileProvider(str, Enum):
     def attribution(self) -> str:
         """Return legal attribution string for tiles."""
         if self == TileProvider.OSM:
-            return '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        return '&copy; <a href="https://carto.com/attributions">CARTO</a>'
+            return '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
+        return '&copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener noreferrer">CARTO</a>'
 
 
 @dataclass(frozen=True)

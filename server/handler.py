@@ -5,10 +5,11 @@ import json
 import logging
 import math
 import queue
+import secrets
 import socket
 import time
 from http.server import BaseHTTPRequestHandler
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import urllib.parse
 
 from exporter.formatter import MetricsFormatter, negotiate_metrics_format
@@ -20,6 +21,25 @@ if TYPE_CHECKING:
     from server.daemon import WebMapServer
 
 logger = logging.getLogger("railmon.server.handler")
+
+_API_CSP_POLICY: str = "default-src 'none'; frame-ancestors 'none'"
+
+
+def build_spa_csp_header(csp_nonce: str) -> str:
+    """Build a strict Content-Security-Policy header scoped to a per-request nonce."""
+    return (
+        "default-src 'none'; "
+        f"script-src 'nonce-{csp_nonce}' https://unpkg.com/leaflet@1.9.4/dist/leaflet.js; "
+        "style-src 'self' 'unsafe-inline' https://unpkg.com/leaflet@1.9.4/dist/leaflet.css; "
+        "img-src 'self' data: https://*.basemaps.cartocdn.com "
+        "https://*.tile.openstreetmap.org https://unpkg.com/leaflet@1.9.4/dist/images/; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        "frame-ancestors 'none'"
+    )
 
 
 def _sanitize_float(val: Any, default: float = 0.0) -> float:
@@ -113,13 +133,15 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
             self._send_json_error(404, f"Endpoint '{raw_path}' not found")
 
     def _handle_root(self, is_head: bool = False) -> None:
-        """Serve embedded single-page application dashboard HTML."""
+        """Serve embedded single-page application dashboard HTML with strict per-request CSP."""
         cfg = getattr(self.server, "config", None)
-        html_content = get_spa_html(cfg).encode("utf-8")
+        csp_nonce = secrets.token_urlsafe(16)
+        html_content = get_spa_html(cfg, csp_nonce=csp_nonce).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(html_content)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store")
+        self._add_security_headers(csp_policy=build_spa_csp_header(csp_nonce))
         self._add_cors_headers()
         self.end_headers()
         if not is_head:
@@ -292,6 +314,7 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         if is_compressed:
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()
         self.end_headers()
 
@@ -335,6 +358,7 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
 
         if etag_matches(self.headers.get("If-None-Match"), etag):
             self.send_response(304)
+            self._add_security_headers(csp_policy=_API_CSP_POLICY)
             self._add_cors_headers()
             self.send_header("ETag", etag)
             self.send_header("Cache-Control", "public, max-age=5")
@@ -357,6 +381,7 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Entity-Count", str(cached.entity_count))
         if is_compressed:
             self.send_header("Content-Encoding", "gzip")
+        self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()
         self.end_headers()
         if not is_head:
@@ -407,6 +432,7 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("Connection", "keep-alive")
+        self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()
         self.end_headers()
 
@@ -422,6 +448,7 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-transform")
             self.send_header("Connection", "keep-alive")
+            self._add_security_headers(csp_policy=_API_CSP_POLICY)
             self._add_cors_headers()
             self.end_headers()
 
@@ -518,6 +545,7 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
+        self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()
         self.end_headers()
         if not is_head:
@@ -537,9 +565,18 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(error_body)))
         self.send_header("Connection", "close")
+        self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()
         self.end_headers()
         self.wfile.write(error_body)
+
+    def _add_security_headers(self, csp_policy: Optional[str] = None) -> None:
+        """Attach baseline HTTP security headers to responses."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if csp_policy:
+            self.send_header("Content-Security-Policy", csp_policy)
 
     def _add_cors_headers(self) -> None:
         """Attach permissive CORS headers if enabled in server configuration."""

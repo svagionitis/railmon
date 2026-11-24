@@ -653,13 +653,71 @@ class WatchdogEvaluator:
 # Multimodal Zero-Dependency Push Notification Dispatchers
 # ==============================================================================
 
+_MAX_NOTIFICATION_TITLE_LEN: int = 256
+_MAX_NOTIFICATION_BODY_LEN: int = 1024
+
+_DARWIN_NOTIFICATION_SCRIPT: Tuple[str, ...] = (
+    "on run argv",
+    '  display notification (item 2 of argv) with title (item 1 of argv) subtitle "railmon"',
+    "end run",
+)
+
+_WINDOWS_TOAST_PS_SCRIPT: str = (
+    "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
+    "ContentType = WindowsRuntime] > $null; "
+    "$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
+    "[Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
+    "$textNodes = $template.GetElementsByTagName('text'); "
+    "$textNodes.Item(0).AppendChild("
+    "$template.CreateTextNode([string]$env:RAILMON_NOTIFY_TITLE)) > $null; "
+    "$textNodes.Item(1).AppendChild("
+    "$template.CreateTextNode([string]$env:RAILMON_NOTIFY_MSG)) > $null; "
+    "$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('railmon'); "
+    "$notification = [Windows.UI.Notifications.ToastNotification]::new($template); "
+    "$notifier.Show($notification);"
+)
+
+
+def _sanitize_notification_text(
+    text: Any,
+    max_len: int,
+    allow_newlines: bool = False,
+) -> str:
+    """Strip NUL and disallowed control characters and bound notification length."""
+    raw = "" if text is None else str(text)
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+    cleaned_chars: List[str] = []
+    for ch in normalized:
+        code = ord(ch)
+        if code == 0 or code == 0x7F or (0x80 <= code <= 0x9F):
+            continue
+        if code < 0x20:
+            if allow_newlines and ch in ("\n", "\t"):
+                cleaned_chars.append(ch)
+            elif ch in ("\n", "\t"):
+                cleaned_chars.append(" ")
+            continue
+        cleaned_chars.append(ch)
+
+    cleaned = "".join(cleaned_chars)
+    if not allow_newlines:
+        cleaned = " ".join(cleaned.split())
+    else:
+        cleaned = cleaned.strip()
+
+    if len(cleaned) > max_len:
+        return cleaned[: max(0, max_len - 3)] + "..."
+    return cleaned
+
+
 def dispatch_terminal_bell() -> None:
     """Emit an audible terminal bell escape character to stdout."""
     try:
         sys.stdout.write("\a")
         sys.stdout.flush()
-    except Exception:
-        pass
+    except (OSError, ValueError) as exc:
+        logger.debug("Terminal bell write skipped: %s", exc)
 
     # Windows console alert beep fallback
     if sys.platform == "win32":
@@ -667,57 +725,85 @@ def dispatch_terminal_bell() -> None:
             import winsound
 
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-        except Exception:
-            pass
+        except (ImportError, OSError, RuntimeError) as exc:
+            logger.debug("Windows console beep unavailable: %s", exc)
 
 
 def dispatch_desktop_notification(title: str, message: str) -> bool:
     """Dispatch a native desktop notification across Windows, macOS, or Linux.
 
-    Zero third-party dependencies: relies on notify-send, osascript, or PowerShell.
+    Zero third-party dependencies: passes notification text strictly out-of-band
+    (argv after '--' on Linux/macOS, child environment variables on Windows) so
+    untrusted telemetry can never be interpreted as code or CLI flags.
     """
+    safe_title = _sanitize_notification_text(
+        title, max_len=_MAX_NOTIFICATION_TITLE_LEN, allow_newlines=False
+    )
+    safe_msg = _sanitize_notification_text(
+        message, max_len=_MAX_NOTIFICATION_BODY_LEN, allow_newlines=True
+    )
     system = sys.platform
+
     try:
         if system.startswith("linux") or "bsd" in system:
             subprocess.Popen(
-                ["notify-send", "-a", "railmon", "-i", "dialog-information", title, message],
+                [
+                    "notify-send",
+                    "-a",
+                    "railmon",
+                    "-i",
+                    "dialog-information",
+                    "--",
+                    safe_title,
+                    safe_msg,
+                ],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             return True
 
-        elif system == "darwin":
-            clean_title = title.replace('"', '\\"')
-            clean_msg = message.replace('"', '\\"')
-            script = f'display notification "{clean_msg}" with title "{clean_title}" subtitle "railmon"'
+        if system == "darwin":
+            cmd: List[str] = ["osascript"]
+            for stmt in _DARWIN_NOTIFICATION_SCRIPT:
+                cmd.extend(["-e", stmt])
+            cmd.extend(["--", safe_title, safe_msg])
             subprocess.Popen(
-                ["osascript", "-e", script],
+                cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             return True
 
-        elif system == "win32":
-            clean_title = title.replace("'", "''")
-            clean_msg = message.replace("'", "''")
-            ps_script = (
-                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
-                "$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
-                "$textNodes = $template.GetElementsByTagName('text'); "
-                f"$textNodes.Item(0).AppendChild($template.CreateTextNode('{clean_title}')) > $null; "
-                f"$textNodes.Item(1).AppendChild($template.CreateTextNode('{clean_msg}')) > $null; "
-                "$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('railmon'); "
-                "$notification = [Windows.UI.Notifications.ToastNotification]::new($template); "
-                "$notifier.Show($notification);"
-            )
+        if system == "win32":
+            child_env = os.environ.copy()
+            child_env["RAILMON_NOTIFY_TITLE"] = safe_title
+            child_env["RAILMON_NOTIFY_MSG"] = safe_msg
+            popen_kwargs: Dict[str, Any] = {
+                "env": child_env,
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if create_no_window:
+                popen_kwargs["creationflags"] = create_no_window
             subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    _WINDOWS_TOAST_PS_SCRIPT,
+                ],
+                **popen_kwargs,
             )
             return True
 
-    except Exception as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         logger.debug("Desktop notification dispatch failed: %s", exc)
     return False
 

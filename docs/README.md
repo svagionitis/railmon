@@ -111,6 +111,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p0-12-track-conflict-detection-resilience-fix-plan.md`](./plans/fixes/p0/p0-12-track-conflict-detection-resilience-fix-plan.md) | Track conflict watchdog resilience, dynamic corridor snapping & station siding headway suppression |
 | [`p0-13-duplicate-train-numbers-disambiguation-fix-plan.md`](./plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md) | Duplicate train numbers disambiguation, multi-unit consist detection & stable roster ordering |
 | [`p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md`](./plans/fixes/p0/p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md) | Four shipping CLI bugs (`history bottlenecks`/`segments`/`trips` crashes & silent GTFS-RT `--from-db --out-dir` data loss) |
+| [`p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md`](./plans/fixes/p0/p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md) | Arbitrary command/code execution (RCE) in desktop notifications (`watchdog.py`) & DOM-based XSS + strict CSP in Web SPA (`server/`) |
 
 #### P1 — High-Priority Plans (`plans/fixes/p1/`)
 

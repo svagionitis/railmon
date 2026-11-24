@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from server.models import ServerConfig, TileProvider
 
@@ -745,7 +745,7 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="header-controls">
-      <select id="tileSelect" class="tile-select" onchange="switchTileProvider(this.value)">
+      <select id="tileSelect" class="tile-select">
         <option value="carto-dark">CartoDB Dark Matter</option>
         <option value="carto-light">CartoDB Positron</option>
         <option value="osm">OpenStreetMap</option>
@@ -753,16 +753,16 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
 
       <div class="layer-toggles">
         <label class="layer-toggle-label">
-          <input type="checkbox" id="layerTracks" checked onchange="toggleLayer('tracks', this.checked)"> Tracks
+          <input type="checkbox" id="layerTracks" data-layer="tracks" checked> Tracks
         </label>
         <label class="layer-toggle-label">
-          <input type="checkbox" id="layerStations" checked onchange="toggleLayer('stations', this.checked)"> Stations
+          <input type="checkbox" id="layerStations" data-layer="stations" checked> Stations
         </label>
         <label class="layer-toggle-label">
-          <input type="checkbox" id="layerInfra" checked onchange="toggleLayer('infra', this.checked)"> Infra
+          <input type="checkbox" id="layerInfra" data-layer="infra" checked> Infra
         </label>
         <label class="layer-toggle-label">
-          <input type="checkbox" id="layerTrails" onchange="toggleLayer('trails', this.checked)"> Trails
+          <input type="checkbox" id="layerTrails" data-layer="trails"> Trails
         </label>
       </div>
     </div>
@@ -779,23 +779,23 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="conflictBanner" class="conflict-banner">
       <span>⚠️ <strong>WATCHDOG CONFLICT ALERT:</strong> <span id="conflictText">Headway Violation</span></span>
       <div class="alert-actions">
-        <button onclick="dismissConflictBanner()">Dismiss</button>
+        <button id="dismissConflictBtn" type="button">Dismiss</button>
       </div>
     </div>
 
     <div id="map"></div>
 
-    <button id="sidebarToggle" class="sidebar-toggle-btn" onclick="toggleSidebar()">☰</button>
+    <button id="sidebarToggle" type="button" class="sidebar-toggle-btn">☰</button>
 
     <aside id="sidebar">
       <div class="roster-toolbar">
-        <input type="text" id="searchInput" class="search-box" placeholder="Filter train ID, line, station..." oninput="handleSearch(this.value)">
+        <input type="text" id="searchInput" class="search-box" placeholder="Filter train ID, line, station...">
         <div class="sort-row">
           <span>Sort By:</span>
           <div class="sort-btn-group">
-            <button id="sortBtnId" class="sort-btn active" onclick="setSort('id')">ID</button>
-            <button id="sortBtnSpeed" class="sort-btn" onclick="setSort('speed')">Speed</button>
-            <button id="sortBtnDelay" class="sort-btn" onclick="setSort('delay')">Delay</button>
+            <button id="sortBtnId" type="button" class="sort-btn active" data-sort="id">ID</button>
+            <button id="sortBtnSpeed" type="button" class="sort-btn" data-sort="speed">Speed</button>
+            <button id="sortBtnDelay" type="button" class="sort-btn" data-sort="delay">Delay</button>
           </div>
         </div>
       </div>
@@ -821,11 +821,38 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script>
-    // Injected Server Runtime Parameters
-    const INITIAL_TILE_URL = '__TILE_URL__';
-    const INITIAL_ATTRIBUTION = '__ATTRIBUTION__';
-    const INITIAL_TILE_PROVIDER = '__TILE_PROVIDER__';
+  <script id="railmonConfig" type="application/json">__RAILMON_CONFIG_JSON__</script>
+  <script__SCRIPT_NONCE_ATTR__>
+    // Parse Server-Injected Runtime Parameters from Non-Executable JSON Block
+    const RAILMON_CONFIG = JSON.parse(
+      (document.getElementById('railmonConfig') || {}).textContent || '{}'
+    );
+    const INITIAL_TILE_URL = RAILMON_CONFIG.tileUrl || 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+    const INITIAL_ATTRIBUTION = RAILMON_CONFIG.attribution || '&copy; CARTO';
+    const INITIAL_TILE_PROVIDER = RAILMON_CONFIG.tileProvider || 'carto-dark';
+
+    // Safe DOM & Sanitization Helpers
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+
+    function escapeHtml(value) {
+      const text = (value === null || value === undefined) ? '' : String(value);
+      return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function safeText(value, fallback = '') {
+      if (value === null || value === undefined || value === '') return fallback;
+      return String(value);
+    }
+
+    function safeFiniteNumber(value, fallback = 0) {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : fallback;
+    }
 
     // Application Reactive State
     const trainsMap = new Map();
@@ -892,11 +919,49 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
     map.on('moveend', function() {
       const center = map.getCenter();
       const zoom = map.getZoom();
-      document.getElementById('mapCenterCoords').innerText =
+      document.getElementById('mapCenterCoords').textContent =
         `${center.lat.toFixed(4)}°N, ${center.lng.toFixed(4)}°E (Zoom ${zoom})`;
     });
 
     // 2. Fetch and Render Railway Vector Topologies
+    function buildStationPopupElement(properties) {
+      const p = properties || {};
+      const container = document.createElement('div');
+      container.className = 'station-popup';
+
+      const heading = document.createElement('h4');
+      const nameEl = safeText(p.name_el, 'Station');
+      const nameEn = safeText(p.name_en, '');
+      heading.textContent = nameEn ? `${nameEl} (${nameEn})` : nameEl;
+      container.appendChild(heading);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.appendChild(document.createTextNode('Code: '));
+      const codeEl = document.createElement('strong');
+      codeEl.textContent = safeText(p.code, '--');
+      meta.appendChild(codeEl);
+      meta.appendChild(document.createTextNode(` | Corridor: ${safeText(p.corridor, 'Mainline')}`));
+      container.appendChild(meta);
+
+      const altitude = safeFiniteNumber(p.altitude_m, 0);
+      if (altitude !== 0) {
+        const altMeta = document.createElement('div');
+        altMeta.className = 'meta';
+        altMeta.textContent = `Altitude: ${altitude}m`;
+        container.appendChild(altMeta);
+      }
+
+      const link = document.createElement('a');
+      link.href = 'https://railway.gov.gr/departures/' + encodeURIComponent(safeText(p.code, ''));
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = 'View Live Departures \u2192';
+      container.appendChild(link);
+
+      return container;
+    }
+
     function loadGeoLayers() {
       // Tracks Corridors
       fetch('/api/tracks')
@@ -904,7 +969,7 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
         .then(data => {
           tracksLayer = L.geoJSON(data, {
             style: function(f) {
-              const id = ((f.properties && f.properties.id) || '').toLowerCase();
+              const id = safeText(f.properties && f.properties.id, '').toLowerCase();
               let color = '#38bdf8'; // PATHE default
               if (id.includes('airport') || id.includes('kiato')) color = '#34d399';
               else if (id.includes('chalkida')) color = '#fbbf24';
@@ -921,7 +986,7 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
         .then(data => {
           stationsLayer = L.geoJSON(data, {
             pointToLayer: function(f, latlng) {
-              const isHub = f.properties && f.properties.is_hub;
+              const isHub = Boolean(f.properties && f.properties.is_hub);
               return L.circleMarker(latlng, {
                 radius: isHub ? 6 : 4,
                 fillColor: isHub ? '#38bdf8' : '#94a3b8',
@@ -932,15 +997,7 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
               });
             },
             onEachFeature: function(f, layer) {
-              const p = f.properties || {};
-              const popup = `
-                <div class="station-popup">
-                  <h4>${p.name_el || 'Station'} ${p.name_en ? '(' + p.name_en + ')' : ''}</h4>
-                  <div class="meta">Code: <strong>${p.code || '--'}</strong> | Corridor: ${p.corridor || 'Mainline'}</div>
-                  ${p.altitude_m ? '<div class="meta">Altitude: ' + p.altitude_m + 'm</div>' : ''}
-                  <a href="https://railway.gov.gr/departures/${p.code || ''}" target="_blank">View Live Departures &rarr;</a>
-                </div>`;
-              layer.bindPopup(popup);
+              layer.bindPopup(buildStationPopupElement(f.properties));
             }
           }).addTo(map);
         }).catch(err => console.warn('[RAILMON] Could not load stations:', err));
@@ -964,35 +1021,64 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
       if (name === 'trails') visible ? map.addLayer(trailsLayerGroup) : map.removeLayer(trailsLayerGroup);
     }
 
-    // 3. SVG Locomotive Marker Construction
+    // 3. SVG Locomotive Marker Construction (Pure DOM / Zero innerHTML)
     function createTrainIcon(t) {
-      const isSelected = selectedTrainId === t.id;
-      const isDelayed = (t.delay || 0) > 15;
-      const service = (t.service_type || t.train_type || 'IC').toUpperCase();
+      const tid = safeText(t.id, '');
+      const isSelected = selectedTrainId === tid;
+      const isDelayed = safeFiniteNumber(t.delay, 0) > 15;
+      const service = safeText(t.service_type || t.train_type, 'IC').toUpperCase();
       let catClass = 'cat-ic';
       if (service.includes('PRO') || service.includes('SUB')) catClass = 'cat-pro';
       else if (service.includes('REG')) catClass = 'cat-reg';
       else if (service.includes('FREIGHT')) catClass = 'cat-other';
 
-      const heading = Math.round(t.heading || 0);
-      const trainNum = t.train_number || t.id;
-      const speed = Math.round(t.speed || 0);
+      const heading = Math.round(safeFiniteNumber(t.heading, 0));
+      const trainNum = safeText(t.train_number || tid, 'Unknown');
+      const speed = Math.round(safeFiniteNumber(t.speed, 0));
 
-      const html = `
-        <div class="train-marker-body ${catClass} ${isSelected ? 'marker-selected' : ''} ${isDelayed ? 'marker-delayed' : ''}">
-          <div class="loco-glyph-wrap" style="transform: rotate(${heading}deg);">
-            <svg class="loco-svg" viewBox="0 0 24 24">
-              <!-- Directional Locomotive Body (Arrow heading forward) -->
-              <path class="loco-body" d="M12 2L4 19L12 15L20 19L12 2Z" />
-              <circle cx="12" cy="11" r="2.5" fill="#0a0e17" />
-            </svg>
-          </div>
-          <div class="marker-label">${trainNum}</div>
-          ${speed > 0 ? `<div class="marker-speed">${speed}k</div>` : ''}
-        </div>`;
+      const bodyEl = document.createElement('div');
+      bodyEl.className = `train-marker-body ${catClass}` +
+        (isSelected ? ' marker-selected' : '') +
+        (isDelayed ? ' marker-delayed' : '');
+
+      const glyphWrap = document.createElement('div');
+      glyphWrap.className = 'loco-glyph-wrap';
+      glyphWrap.setAttribute('style', `transform: rotate(${heading}deg);`);
+
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('class', 'loco-svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+
+      // Directional Locomotive Body (Arrow heading forward)
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('class', 'loco-body');
+      path.setAttribute('d', 'M12 2L4 19L12 15L20 19L12 2Z');
+      svg.appendChild(path);
+
+      const dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('cx', '12');
+      dot.setAttribute('cy', '11');
+      dot.setAttribute('r', '2.5');
+      dot.setAttribute('fill', '#0a0e17');
+      svg.appendChild(dot);
+
+      glyphWrap.appendChild(svg);
+      bodyEl.appendChild(glyphWrap);
+
+      const labelEl = document.createElement('div');
+      labelEl.className = 'marker-label';
+      labelEl.textContent = trainNum;
+      bodyEl.appendChild(labelEl);
+
+      if (speed > 0) {
+        const speedEl = document.createElement('div');
+        speedEl.className = 'marker-speed';
+        speedEl.textContent = `${speed}k`;
+        bodyEl.appendChild(speedEl);
+      }
 
       return L.divIcon({
-        html: html,
+        html: bodyEl,
         className: 'custom-train-marker',
         iconSize: [40, 48],
         iconAnchor: [20, 24],
@@ -1002,39 +1088,42 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
 
     // 4. Marker & Trajectory Update Management
     function upsertTrainMarker(t) {
-      if (!t.lat || !t.lng) return;
-      const pos = [t.lat, t.lng];
+      const lat = safeFiniteNumber(t.lat, NaN);
+      const lng = safeFiniteNumber(t.lng, NaN);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) return;
+      const tid = safeText(t.id, '');
+      const pos = [lat, lng];
 
       // Update speed observation history
-      if (!speedHistories.has(t.id)) speedHistories.set(t.id, []);
-      const history = speedHistories.get(t.id);
-      history.push(t.speed || 0);
+      if (!speedHistories.has(tid)) speedHistories.set(tid, []);
+      const history = speedHistories.get(tid);
+      history.push(Math.max(0, safeFiniteNumber(t.speed, 0)));
       if (history.length > 20) history.shift();
 
       // Update breadcrumb trail
-      if (!trainTrails.has(t.id)) {
+      if (!trainTrails.has(tid)) {
         const polyline = L.polyline([pos], { color: '#0ea5e9', weight: 2, opacity: 0.6 });
-        trainTrails.set(t.id, polyline);
-        if (document.getElementById('layerTrails').checked || selectedTrainId === t.id) {
+        trainTrails.set(tid, polyline);
+        if (document.getElementById('layerTrails').checked || selectedTrainId === tid) {
           polyline.addTo(trailsLayerGroup);
         }
       } else {
-        const polyline = trainTrails.get(t.id);
+        const polyline = trainTrails.get(tid);
         const pts = polyline.getLatLngs();
         pts.push(pos);
         if (pts.length > 30) pts.shift();
         polyline.setLatLngs(pts);
       }
 
-      if (trainMarkers.has(t.id)) {
-        const marker = trainMarkers.get(t.id);
+      if (trainMarkers.has(tid)) {
+        const marker = trainMarkers.get(tid);
         marker.setLatLng(pos);
         marker.setIcon(createTrainIcon(t));
       } else {
         const marker = L.marker(pos, { icon: createTrainIcon(t) });
-        marker.on('click', () => selectTrain(t.id));
+        marker.on('click', () => selectTrain(tid));
         marker.addTo(map);
-        trainMarkers.set(t.id, marker);
+        trainMarkers.set(tid, marker);
       }
     }
 
@@ -1054,45 +1143,49 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
       });
     }
 
-    // 5. Sidebar Roster Rendering
+    // 5. Sidebar Roster Rendering (Pure DOM / Delegated Events)
     function renderRoster() {
       const roster = document.getElementById('rosterList');
       const trains = Array.from(trainsMap.values());
 
       let delayedCount = 0;
-      trains.forEach(t => { if ((t.delay || 0) > 15) delayedCount++; });
-      document.getElementById('activeCount').innerText = trains.length;
-      document.getElementById('delayCount').innerText = delayedCount;
+      trains.forEach(t => { if (safeFiniteNumber(t.delay, 0) > 15) delayedCount++; });
+      document.getElementById('activeCount').textContent = String(trains.length);
+      document.getElementById('delayCount').textContent = String(delayedCount);
 
       const filtered = trains.filter(t => {
         if (!searchFilter) return true;
         const needle = searchFilter.toLowerCase();
-        const idMatch = (t.id || '').toLowerCase().includes(needle);
-        const numMatch = (t.train_number || '').toLowerCase().includes(needle);
-        const corrMatch = (t.corridor || '').toLowerCase().includes(needle);
-        const stnMatch = (t.next_station || '').toLowerCase().includes(needle);
+        const idMatch = safeText(t.id, '').toLowerCase().includes(needle);
+        const numMatch = safeText(t.train_number, '').toLowerCase().includes(needle);
+        const corrMatch = safeText(t.corridor, '').toLowerCase().includes(needle);
+        const stnMatch = safeText(t.next_station, '').toLowerCase().includes(needle);
         return idMatch || numMatch || corrMatch || stnMatch;
       });
 
       filtered.sort((a, b) => {
         let valA = a[sortField];
         let valB = b[sortField];
-        if (typeof valA === 'string') {
-          return sortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
+        if (typeof valA === 'string' || typeof valB === 'string') {
+          const strA = safeText(valA, '');
+          const strB = safeText(valB, '');
+          return sortAsc ? strA.localeCompare(strB) : strB.localeCompare(strA);
         }
-        valA = Number(valA || 0);
-        valB = Number(valB || 0);
+        valA = safeFiniteNumber(valA, 0);
+        valB = safeFiniteNumber(valB, 0);
         return sortAsc ? (valA - valB) : (valB - valA);
       });
 
-      roster.innerHTML = filtered.map(t => {
-        const service = (t.service_type || t.train_type || 'IC').toUpperCase();
+      const fragment = document.createDocumentFragment();
+      filtered.forEach(t => {
+        const tid = safeText(t.id, '');
+        const service = safeText(t.service_type || t.train_type, 'IC').toUpperCase();
         let badgeClass = 'badge-ic';
         if (service.includes('PRO') || service.includes('SUB')) badgeClass = 'badge-pro';
         else if (service.includes('REG')) badgeClass = 'badge-reg';
         else if (service.includes('FREIGHT')) badgeClass = 'badge-other';
 
-        const delay = Number(t.delay || 0);
+        const delay = safeFiniteNumber(t.delay, 0);
         let delayClass = 'delay-ontime';
         let delayText = 'On Time';
         if (delay > 15) {
@@ -1105,26 +1198,62 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
           delayText = `+${Math.round(delay)}m`;
         }
 
-        const isSel = selectedTrainId === t.id;
-        return `
-          <li class="roster-item ${isSel ? 'selected' : ''}" onclick="selectTrain('${t.id}')">
-            <div class="roster-col-main">
-              <div class="roster-title-row">
-                <span class="train-num">${t.train_number || t.id}</span>
-                <span class="service-badge ${badgeClass}">${service}</span>
-              </div>
-              <div class="route-subtext">${t.corridor || 'PATHE'} &rarr; ${t.next_station || 'In Transit'}</div>
-            </div>
-            <div class="roster-col-stats">
-              <span class="speed-val">${Math.round(t.speed || 0)} <small>km/h</small></span>
-              <span class="delay-val ${delayClass}">${delayText}</span>
-            </div>
-          </li>`;
-      }).join('');
+        const isSel = selectedTrainId === tid;
+        const li = document.createElement('li');
+        li.className = isSel ? 'roster-item selected' : 'roster-item';
+        li.dataset.trainId = tid;
+
+        const colMain = document.createElement('div');
+        colMain.className = 'roster-col-main';
+
+        const titleRow = document.createElement('div');
+        titleRow.className = 'roster-title-row';
+
+        const numSpan = document.createElement('span');
+        numSpan.className = 'train-num';
+        numSpan.textContent = safeText(t.train_number || tid, 'Unknown');
+
+        const badgeSpan = document.createElement('span');
+        badgeSpan.className = `service-badge ${badgeClass}`;
+        badgeSpan.textContent = service;
+
+        titleRow.appendChild(numSpan);
+        titleRow.appendChild(badgeSpan);
+
+        const routeSub = document.createElement('div');
+        routeSub.className = 'route-subtext';
+        routeSub.textContent = `${safeText(t.corridor, 'PATHE')} \u2192 ${safeText(t.next_station, 'In Transit')}`;
+
+        colMain.appendChild(titleRow);
+        colMain.appendChild(routeSub);
+
+        const colStats = document.createElement('div');
+        colStats.className = 'roster-col-stats';
+
+        const speedSpan = document.createElement('span');
+        speedSpan.className = 'speed-val';
+        speedSpan.appendChild(document.createTextNode(`${Math.round(safeFiniteNumber(t.speed, 0))} `));
+        const kmhSmall = document.createElement('small');
+        kmhSmall.textContent = 'km/h';
+        speedSpan.appendChild(kmhSmall);
+
+        const delaySpan = document.createElement('span');
+        delaySpan.className = `delay-val ${delayClass}`;
+        delaySpan.textContent = delayText;
+
+        colStats.appendChild(speedSpan);
+        colStats.appendChild(delaySpan);
+
+        li.appendChild(colMain);
+        li.appendChild(colStats);
+        fragment.appendChild(li);
+      });
+
+      roster.replaceChildren(fragment);
     }
 
     function handleSearch(val) {
-      searchFilter = val.trim();
+      searchFilter = safeText(val, '').trim();
       renderRoster();
     }
 
@@ -1142,14 +1271,19 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
       renderRoster();
     }
 
-    // 6. Selected Train Inspector & SVG Sparkline
+    // 6. Selected Train Inspector & SVG Sparkline (Pure DOM / Zero innerHTML)
     function selectTrain(id) {
-      selectedTrainId = id;
-      const train = trainsMap.get(id);
+      const tid = safeText(id, '');
+      selectedTrainId = tid;
+      const train = trainsMap.get(tid);
 
       // Pan smoothly to train on map
-      if (train && train.lat && train.lng) {
-        map.panTo([train.lat, train.lng]);
+      if (train) {
+        const lat = safeFiniteNumber(train.lat, NaN);
+        const lng = safeFiniteNumber(train.lng, NaN);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          map.panTo([lat, lng]);
+        }
       }
 
       // Update markers appearance
@@ -1162,86 +1296,154 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
       renderRoster();
     }
 
+    function buildInspectorField(labelText, valueText, valueColor) {
+      const field = document.createElement('div');
+      field.className = 'inspector-field';
+
+      const lbl = document.createElement('label');
+      lbl.textContent = labelText;
+
+      const span = document.createElement('span');
+      if (valueColor) {
+        span.style.color = valueColor;
+      }
+      span.textContent = valueText;
+
+      field.appendChild(lbl);
+      field.appendChild(span);
+      return field;
+    }
+
     function renderInspector(t) {
       const card = document.getElementById('inspectorCard');
       if (!t) {
-        card.innerHTML = '<div class="inspector-empty">Select a train on the map or roster to inspect telemetry</div>';
+        const empty = document.createElement('div');
+        empty.className = 'inspector-empty';
+        empty.textContent = 'Select a train on the map or roster to inspect telemetry';
+        card.replaceChildren(empty);
         return;
       }
 
-      const history = speedHistories.get(t.id) || [t.speed || 0];
+      const tid = safeText(t.id, '');
+      const speedVal = safeFiniteNumber(t.speed, 0);
+      const delay = safeFiniteNumber(t.delay, 0);
+      const heading = Math.round(safeFiniteNumber(t.heading, 0));
+      const lat = safeFiniteNumber(t.lat, 0);
+      const lng = safeFiniteNumber(t.lng, 0);
+      const history = speedHistories.get(tid) || [speedVal];
       const sparklineSvg = generateSparkline(history, 320, 38);
-      const delay = Number(t.delay || 0);
 
-      card.innerHTML = `
-        <div class="inspector-header">
-          <h3>Train ${t.train_number || t.id}</h3>
-          <span class="metric-badge" style="color:var(--azure-ic);">${t.service_type || 'InterCity'}</span>
-        </div>
-        <div class="inspector-grid">
-          <div class="inspector-field">
-            <label>Current Speed</label>
-            <span>${(t.speed || 0).toFixed(1)} km/h</span>
-          </div>
-          <div class="inspector-field">
-            <label>Delay</label>
-            <span style="color:${delay > 15 ? 'var(--crimson-delay)' : (delay > 3 ? 'var(--amber-reg)' : 'var(--emerald-pro)')};">
-              ${delay > 0 ? '+' + Math.round(delay) + ' min' : 'On Time'}
-            </span>
-          </div>
-          <div class="inspector-field">
-            <label>Heading</label>
-            <span>${Math.round(t.heading || 0)}&deg;</span>
-          </div>
-          <div class="inspector-field">
-            <label>Next Station</label>
-            <span>${t.next_station || 'In Transit'}</span>
-          </div>
-          <div class="inspector-field">
-            <label>Corridor</label>
-            <span>${t.corridor || 'PATHE Mainline'}</span>
-          </div>
-          <div class="inspector-field">
-            <label>Coordinates</label>
-            <span>${Number(t.lat).toFixed(4)}, ${Number(t.lng).toFixed(4)}</span>
-          </div>
-        </div>
-        <div class="sparkline-box">
-          <label>Speed Trend (Last 20 Samples)</label>
-          ${sparklineSvg}
-        </div>
-        <div class="inspector-actions">
-          <button class="btn-action" onclick="centerOnTrain('${t.id}')">Center</button>
-          <button class="btn-action" onclick="toggleSingleTrail('${t.id}')">Trail</button>
-          <a class="btn-action btn-cab" href="/cab?train=${t.id}" target="_blank">Cab Stream &rarr;</a>
-        </div>`;
+      const fragment = document.createDocumentFragment();
+
+      const header = document.createElement('div');
+      header.className = 'inspector-header';
+      const title = document.createElement('h3');
+      title.textContent = `Train ${safeText(t.train_number || tid, 'Unknown')}`;
+      const badge = document.createElement('span');
+      badge.className = 'metric-badge';
+      badge.style.color = 'var(--azure-ic)';
+      badge.textContent = safeText(t.service_type, 'InterCity');
+      header.appendChild(title);
+      header.appendChild(badge);
+      fragment.appendChild(header);
+
+      const grid = document.createElement('div');
+      grid.className = 'inspector-grid';
+      const delayColor = delay > 15
+        ? 'var(--crimson-delay)'
+        : (delay > 3 ? 'var(--amber-reg)' : 'var(--emerald-pro)');
+      const delayDisplay = delay > 0 ? `+${Math.round(delay)} min` : 'On Time';
+
+      grid.appendChild(buildInspectorField('Current Speed', `${speedVal.toFixed(1)} km/h`, null));
+      grid.appendChild(buildInspectorField('Delay', delayDisplay, delayColor));
+      grid.appendChild(buildInspectorField('Heading', `${heading}\u00b0`, null));
+      grid.appendChild(buildInspectorField('Next Station', safeText(t.next_station, 'In Transit'), null));
+      grid.appendChild(buildInspectorField('Corridor', safeText(t.corridor, 'PATHE Mainline'), null));
+      grid.appendChild(buildInspectorField('Coordinates', `${lat.toFixed(4)}, ${lng.toFixed(4)}`, null));
+      fragment.appendChild(grid);
+
+      const sparkBox = document.createElement('div');
+      sparkBox.className = 'sparkline-box';
+      const sparkLabel = document.createElement('label');
+      sparkLabel.textContent = 'Speed Trend (Last 20 Samples)';
+      sparkBox.appendChild(sparkLabel);
+      sparkBox.appendChild(sparklineSvg);
+      fragment.appendChild(sparkBox);
+
+      const actions = document.createElement('div');
+      actions.className = 'inspector-actions';
+
+      const centerBtn = document.createElement('button');
+      centerBtn.type = 'button';
+      centerBtn.className = 'btn-action';
+      centerBtn.dataset.action = 'center';
+      centerBtn.dataset.trainId = tid;
+      centerBtn.textContent = 'Center';
+
+      const trailBtn = document.createElement('button');
+      trailBtn.type = 'button';
+      trailBtn.className = 'btn-action';
+      trailBtn.dataset.action = 'trail';
+      trailBtn.dataset.trainId = tid;
+      trailBtn.textContent = 'Trail';
+
+      const cabLink = document.createElement('a');
+      cabLink.className = 'btn-action btn-cab';
+      cabLink.href = '/cab?train=' + encodeURIComponent(tid);
+      cabLink.target = '_blank';
+      cabLink.rel = 'noopener noreferrer';
+      cabLink.textContent = 'Cab Stream \u2192';
+
+      actions.appendChild(centerBtn);
+      actions.appendChild(trailBtn);
+      actions.appendChild(cabLink);
+      fragment.appendChild(actions);
+
+      card.replaceChildren(fragment);
     }
 
     function generateSparkline(points, width, height) {
-      if (!points || points.length < 2) {
-        return `<svg class="sparkline-svg" viewBox="0 0 ${width} ${height}"></svg>`;
+      const safeWidth = safeFiniteNumber(width, 320);
+      const safeHeight = safeFiniteNumber(height, 38);
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('class', 'sparkline-svg');
+      svg.setAttribute('viewBox', `0 0 ${safeWidth} ${safeHeight}`);
+
+      if (!Array.isArray(points) || points.length < 2) {
+        return svg;
       }
-      const max = Math.max(160, ...points);
+
+      const cleanPoints = points.map(p => Math.max(0, safeFiniteNumber(p, 0)));
+      const max = Math.max(160, ...cleanPoints);
       const min = 0;
-      const step = width / (points.length - 1);
-      const coords = points.map((p, i) => {
+      const step = safeWidth / (cleanPoints.length - 1);
+      const coords = cleanPoints.map((p, i) => {
         const x = i * step;
-        const y = height - ((p - min) / (max - min || 1)) * (height - 6) - 3;
+        const y = safeHeight - ((p - min) / (max - min || 1)) * (safeHeight - 6) - 3;
         return `${x.toFixed(1)},${y.toFixed(1)}`;
       });
-      return `
-        <svg class="sparkline-svg" viewBox="0 0 ${width} ${height}">
-          <polyline fill="none" stroke="#0ea5e9" stroke-width="2" points="${coords.join(' ')}" />
-        </svg>`;
+
+      const polyline = document.createElementNS(SVG_NS, 'polyline');
+      polyline.setAttribute('fill', 'none');
+      polyline.setAttribute('stroke', '#0ea5e9');
+      polyline.setAttribute('stroke-width', '2');
+      polyline.setAttribute('points', coords.join(' '));
+      svg.appendChild(polyline);
+      return svg;
     }
 
     function centerOnTrain(id) {
-      const t = trainsMap.get(id);
-      if (t && t.lat && t.lng) map.setView([t.lat, t.lng], 12);
+      const t = trainsMap.get(safeText(id, ''));
+      if (!t) return;
+      const lat = safeFiniteNumber(t.lat, NaN);
+      const lng = safeFiniteNumber(t.lng, NaN);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        map.setView([lat, lng], 12);
+      }
     }
 
     function toggleSingleTrail(id) {
-      const trail = trainTrails.get(id);
+      const trail = trainTrails.get(safeText(id, ''));
       if (!trail) return;
       if (trailsLayerGroup.hasLayer(trail)) {
         trailsLayerGroup.removeLayer(trail);
@@ -1254,7 +1456,9 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
     function showConflictBanner(alert) {
       const banner = document.getElementById('conflictBanner');
       const text = document.getElementById('conflictText');
-      text.innerText = `${alert.type || 'CONFLICT'}: Train ${alert.train_a} & ${alert.train_b} (${alert.distance_km ? alert.distance_km.toFixed(1) + 'km' : ''} on ${alert.corridor || 'Mainline'})`;
+      const dist = safeFiniteNumber(alert && alert.distance_km, NaN);
+      const distStr = Number.isFinite(dist) ? `${dist.toFixed(1)}km` : '';
+      text.textContent = `${safeText(alert && alert.type, 'CONFLICT')}: Train ${safeText(alert && alert.train_a, '?')} & ${safeText(alert && alert.train_b, '?')} (${distStr} on ${safeText(alert && alert.corridor, 'Mainline')})`;
       banner.style.display = 'flex';
     }
 
@@ -1266,13 +1470,13 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
     function connectSSE() {
       const pill = document.getElementById('connPill');
       pill.className = 'status-pill reconnecting';
-      pill.innerText = '○ CONNECTING';
+      pill.textContent = '○ CONNECTING';
 
       sseSource = new EventSource('/api/stream');
 
       sseSource.onopen = function() {
         pill.className = 'status-pill';
-        pill.innerText = '● LIVE SSE';
+        pill.textContent = '● LIVE SSE';
         reconnectDelay = 1000;
         console.log('[RAILMON] Live telemetry SSE stream connected.');
       };
@@ -1281,11 +1485,14 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
         try {
           const snapshot = JSON.parse(e.data);
           const activeIds = [];
-          if (snapshot.trains && Array.isArray(snapshot.trains)) {
+          if (snapshot && Array.isArray(snapshot.trains)) {
             snapshot.trains.forEach(t => {
-              trainsMap.set(t.id, t);
-              upsertTrainMarker(t);
-              activeIds.push(t.id);
+              if (!t || typeof t !== 'object' || t.id === null || t.id === undefined) return;
+              const tid = String(t.id);
+              const normalized = Object.assign({}, t, { id: tid });
+              trainsMap.set(tid, normalized);
+              upsertTrainMarker(normalized);
+              activeIds.push(tid);
             });
           }
           removeStaleMarkers(activeIds);
@@ -1303,9 +1510,11 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
           const updates = JSON.parse(e.data);
           if (Array.isArray(updates)) {
             updates.forEach(upd => {
-              const existing = trainsMap.get(upd.id) || {};
-              const merged = Object.assign({}, existing, upd);
-              trainsMap.set(upd.id, merged);
+              if (!upd || typeof upd !== 'object' || upd.id === null || upd.id === undefined) return;
+              const tid = String(upd.id);
+              const existing = trainsMap.get(tid) || {};
+              const merged = Object.assign({}, existing, upd, { id: tid });
+              trainsMap.set(tid, merged);
               upsertTrainMarker(merged);
             });
             renderRoster();
@@ -1329,7 +1538,7 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
 
       sseSource.onerror = function() {
         pill.className = 'status-pill reconnecting';
-        pill.innerText = '○ RECONNECTING';
+        pill.textContent = '○ RECONNECTING';
         if (sseSource) {
           sseSource.close();
           sseSource = null;
@@ -1346,9 +1555,9 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
       fetch('/api/health')
         .then(r => r.json())
         .then(data => {
-          if (data.metrics) {
-            document.getElementById('metricLatency').innerText = (data.metrics.ingestion_latency_ms || 0).toFixed(1) + 'ms';
-            document.getElementById('metricClients').innerText = data.metrics.connected_clients || 1;
+          if (data && data.metrics) {
+            document.getElementById('metricLatency').textContent = safeFiniteNumber(data.metrics.ingestion_latency_ms, 0).toFixed(1) + 'ms';
+            document.getElementById('metricClients').textContent = String(safeFiniteNumber(data.metrics.connected_clients, 1));
           }
         }).catch(() => {});
     }
@@ -1359,25 +1568,128 @@ SPA_HTML_TEMPLATE = """<!DOCTYPE html>
       const sidebar = document.getElementById('sidebar');
       sidebar.classList.toggle('open');
     }
+
+    // 10. Static & Delegated Event Wiring (Strict CSP Compatible - Zero Inline Handlers)
+    function bindStaticEventHandlers() {
+      const tileSelect = document.getElementById('tileSelect');
+      if (tileSelect) {
+        tileSelect.addEventListener('change', function(ev) {
+          switchTileProvider(ev.target.value);
+        });
+      }
+
+      document.querySelectorAll('.layer-toggles input[data-layer]').forEach(checkbox => {
+        checkbox.addEventListener('change', function(ev) {
+          toggleLayer(ev.target.dataset.layer, Boolean(ev.target.checked));
+        });
+      });
+
+      const dismissBtn = document.getElementById('dismissConflictBtn');
+      if (dismissBtn) {
+        dismissBtn.addEventListener('click', dismissConflictBanner);
+      }
+
+      const sidebarToggle = document.getElementById('sidebarToggle');
+      if (sidebarToggle) {
+        sidebarToggle.addEventListener('click', toggleSidebar);
+      }
+
+      const searchInput = document.getElementById('searchInput');
+      if (searchInput) {
+        searchInput.addEventListener('input', function(ev) {
+          handleSearch(ev.target.value);
+        });
+      }
+
+      document.querySelectorAll('.sort-btn[data-sort]').forEach(btn => {
+        btn.addEventListener('click', function(ev) {
+          setSort(ev.currentTarget.dataset.sort);
+        });
+      });
+
+      const rosterList = document.getElementById('rosterList');
+      if (rosterList) {
+        rosterList.addEventListener('click', function(ev) {
+          const item = ev.target.closest('li.roster-item');
+          if (item && item.dataset.trainId !== undefined) {
+            selectTrain(item.dataset.trainId);
+          }
+        });
+      }
+
+      const inspectorCard = document.getElementById('inspectorCard');
+      if (inspectorCard) {
+        inspectorCard.addEventListener('click', function(ev) {
+          const btn = ev.target.closest('button[data-action]');
+          if (!btn || btn.dataset.trainId === undefined) return;
+          if (btn.dataset.action === 'center') {
+            centerOnTrain(btn.dataset.trainId);
+          } else if (btn.dataset.action === 'trail') {
+            toggleSingleTrail(btn.dataset.trainId);
+          }
+        });
+      }
+    }
+    bindStaticEventHandlers();
   </script>
 </body>
 </html>"""
 
+_CSP_NONCE_ALPHABET: FrozenSet[str] = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_+/="
+)
+_CSP_NONCE_MIN_LEN: int = 16
+_CSP_NONCE_MAX_LEN: int = 128
 
-def get_spa_html(config: Optional[ServerConfig] = None) -> str:
+
+def _validate_csp_nonce(csp_nonce: str) -> str:
+    """Validate CSP nonce characters and length to prevent header/attribute injection."""
+    if not isinstance(csp_nonce, str):
+        raise ValueError("CSP nonce must be a string")
+    if not (_CSP_NONCE_MIN_LEN <= len(csp_nonce) <= _CSP_NONCE_MAX_LEN):
+        raise ValueError(
+            f"CSP nonce length must be between {_CSP_NONCE_MIN_LEN} and {_CSP_NONCE_MAX_LEN}"
+        )
+    if not all(ch in _CSP_NONCE_ALPHABET for ch in csp_nonce):
+        raise ValueError("CSP nonce contains disallowed characters")
+    return csp_nonce
+
+
+def _serialize_spa_config(cfg: ServerConfig) -> str:
+    """Serialize tile provider configuration as HTML-safe JSON for inline data block."""
+    payload = {
+        "tileUrl": cfg.tile_provider.tile_url,
+        "attribution": cfg.tile_provider.attribution,
+        "tileProvider": cfg.tile_provider.value,
+    }
+    raw_json = json.dumps(payload, ensure_ascii=False)
+    return (
+        raw_json.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def get_spa_html(
+    config: Optional[ServerConfig] = None,
+    csp_nonce: Optional[str] = None,
+) -> str:
     """Generate complete standalone HTML5 single-page application.
 
-    Injects cartographic tile configuration, Leaflet map bootstrap, SVG locomotive
-    marker glyphs, real-time SSE listener, HUD roster table, and conflict banner.
+    Injects cartographic tile configuration via a non-executable JSON block,
+    optional per-request CSP script nonce, Leaflet map bootstrap, DOM-built SVG
+    locomotive marker glyphs, real-time SSE listener, HUD roster, and conflict banner.
     """
     cfg = config or ServerConfig()
-    tile_url = cfg.tile_provider.tile_url
-    attribution = cfg.tile_provider.attribution
-    tile_provider_str = cfg.tile_provider.value
+    nonce_attr = ""
+    if csp_nonce is not None:
+        validated_nonce = _validate_csp_nonce(csp_nonce)
+        nonce_attr = f' nonce="{validated_nonce}"'
 
-    # Injected replacement tokens
-    html = SPA_HTML_TEMPLATE.replace("__TILE_URL__", tile_url)
-    html = html.replace("__ATTRIBUTION__", attribution)
-    html = html.replace("__TILE_PROVIDER__", tile_provider_str)
-
+    html = SPA_HTML_TEMPLATE.replace(
+        "__RAILMON_CONFIG_JSON__", _serialize_spa_config(cfg)
+    )
+    html = html.replace("__SCRIPT_NONCE_ATTR__", nonce_attr)
     return html

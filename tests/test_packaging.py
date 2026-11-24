@@ -108,6 +108,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "os",
             "pathlib",
             "queue",
+            "secrets",
             "signal",
             "socket",
             "socketserver",

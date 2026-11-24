@@ -3,6 +3,7 @@
 import http.client
 import json
 import math
+import re
 import socket
 import struct
 import time
@@ -492,6 +493,102 @@ class TestWebMapServerDaemon(unittest.TestCase):
         self.assertEqual(data[0]["id"], "ic-emoji-🚂")
         self.assertEqual(data[0]["train_number"], "IC 54 🚂")
         self.assertEqual(data[0]["origin"], "Αθήνα (Σ.Σ. Λαρίσης)")
+
+    def test_root_html_strict_csp_per_request_nonce_and_security_headers(self) -> None:
+        """P0-15: GET/HEAD / emit strict per-request nonce CSP and baseline security headers."""
+        server = self._start_server()
+        seen_nonces = set()
+
+        for path in ("/", "/index.html"):
+            req = Request(f"{server.server_url}{path.lstrip('/')}")
+            with self._open(req) as resp:
+                self.assertEqual(resp.status, 200)
+                csp = resp.headers.get("Content-Security-Policy", "")
+                self.assertIn("default-src 'none'", csp)
+                self.assertIn("object-src 'none'", csp)
+                self.assertIn("base-uri 'none'", csp)
+                self.assertIn("form-action 'none'", csp)
+                self.assertIn("frame-ancestors 'none'", csp)
+                self.assertIn("https://unpkg.com/leaflet@1.9.4/dist/leaflet.js", csp)
+
+                # Extract script-src directive and confirm 'unsafe-inline' is forbidden
+                script_src_match = re.search(r"script-src\s+([^;]+)", csp)
+                self.assertIsNotNone(script_src_match)
+                assert script_src_match is not None
+                script_src = script_src_match.group(1)
+                self.assertNotIn("'unsafe-inline'", script_src)
+                self.assertNotIn("'unsafe-eval'", script_src)
+
+                nonce_match = re.search(r"'nonce-([A-Za-z0-9\-_+/=]+)'", script_src)
+                self.assertIsNotNone(nonce_match)
+                assert nonce_match is not None
+                nonce = nonce_match.group(1)
+                seen_nonces.add(nonce)
+
+                self.assertEqual(resp.headers.get("Cache-Control"), "no-store")
+                self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
+                self.assertEqual(resp.headers.get("Referrer-Policy"), "no-referrer")
+
+                body = resp.read().decode("utf-8")
+                self.assertIn(f'<script nonce="{nonce}">', body)
+
+        # Each HTTP response must receive a unique cryptographic nonce
+        self.assertEqual(len(seen_nonces), 2)
+
+        # HEAD / must also emit matching headers with zero body
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request("HEAD", "/")
+        head_resp = conn.getresponse()
+        self.assertEqual(head_resp.status, 200)
+        self.assertIn("script-src 'nonce-", head_resp.getheader("Content-Security-Policy", ""))
+        self.assertEqual(head_resp.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(head_resp.getheader("X-Frame-Options"), "DENY")
+        self.assertEqual(head_resp.getheader("Cache-Control"), "no-store")
+        self.assertEqual(head_resp.read(), b"")
+        conn.close()
+
+    def test_api_and_error_responses_include_security_headers_and_xss_payload_safety(
+        self,
+    ) -> None:
+        """P0-15: JSON API, SSE, and 404 responses enforce nosniff/CSP and serialize XSS payloads safely."""
+        xss_train = _create_sample_train(
+            train_id="');alert(1);//",
+            train_number="<img src=x onerror=alert(1)>",
+            corridor="<svg onload=alert(2)>",
+        )
+        self.store.update_positions([xss_train])
+        server = self._start_server()
+
+        # 1. /api/trains with adversarial XSS telemetry strings
+        req = Request(f"{server.server_url}api/trains")
+        with self._open(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
+            self.assertEqual(resp.headers.get("Referrer-Policy"), "no-referrer")
+            self.assertEqual(
+                resp.headers.get("Content-Security-Policy"),
+                "default-src 'none'; frame-ancestors 'none'",
+            )
+            data = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(data[0]["id"], "');alert(1);//")
+            self.assertEqual(data[0]["train_number"], "<img src=x onerror=alert(1)>")
+
+        # 2. 404 JSON error endpoint reflecting path must still emit nosniff & strict API CSP
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request("GET", "/api/%3Cscript%3Ealert(1)%3C/script%3E")
+        err_resp = conn.getresponse()
+        self.assertEqual(err_resp.status, 404)
+        self.assertEqual(err_resp.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(err_resp.getheader("X-Frame-Options"), "DENY")
+        self.assertEqual(err_resp.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(
+            err_resp.getheader("Content-Security-Policy"),
+            "default-src 'none'; frame-ancestors 'none'",
+        )
+        err_resp.read()
+        conn.close()
 
 
 if __name__ == "__main__":

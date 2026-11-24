@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from tui.geo import GeoPoint
 from watchdog import (
+    _DARWIN_NOTIFICATION_SCRIPT,
+    _MAX_NOTIFICATION_BODY_LEN,
+    _MAX_NOTIFICATION_TITLE_LEN,
+    _WINDOWS_TOAST_PS_SCRIPT,
     NotificationChannel,
     WatchAlertEvent,
     WatchConfig,
@@ -15,6 +25,7 @@ from watchdog import (
     WatchTriggerType,
     WatchdogEvaluator,
     WebhookFormat,
+    _sanitize_notification_text,
     dispatch_all_channels,
     dispatch_desktop_notification,
     dispatch_terminal_bell,
@@ -226,8 +237,31 @@ class TestNotificationDispatchers(TestCase):
             self.assertTrue(ok)
             mock_popen.assert_called()
             args = mock_popen.call_args[0][0]
+            kwargs = mock_popen.call_args[1]
             self.assertEqual(args[0], "notify-send")
-            self.assertIn("Train Alert", args)
+            self.assertIn("--", args)
+            sep_idx = args.index("--")
+            self.assertEqual(args[sep_idx + 1 :], ["Train Alert", "IC 52 Departed"])
+            self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
+
+    @patch("subprocess.Popen")
+    def test_desktop_notification_linux_option_injection_blocked(
+        self, mock_popen: MagicMock
+    ) -> None:
+        """Leading hyphens in untrusted telemetry cannot inject notify-send flags."""
+        for plat in ("linux", "freebsd14"):
+            mock_popen.reset_mock()
+            with patch("sys.platform", plat):
+                ok = dispatch_desktop_notification(
+                    "--icon=/etc/passwd", "-u critical --app-name=evil"
+                )
+                self.assertTrue(ok)
+                args = mock_popen.call_args[0][0]
+                sep_idx = args.index("--")
+                self.assertEqual(
+                    args[sep_idx + 1 :],
+                    ["--icon=/etc/passwd", "-u critical --app-name=evil"],
+                )
 
     @patch("subprocess.Popen")
     def test_desktop_notification_darwin(self, mock_popen: MagicMock) -> None:
@@ -236,7 +270,36 @@ class TestNotificationDispatchers(TestCase):
             self.assertTrue(ok)
             mock_popen.assert_called()
             args = mock_popen.call_args[0][0]
+            kwargs = mock_popen.call_args[1]
             self.assertEqual(args[0], "osascript")
+            self.assertIn("--", args)
+            sep_idx = args.index("--")
+            self.assertEqual(args[sep_idx + 1 :], ["Train Alert", "IC 52 Departed"])
+            self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
+
+    @patch("subprocess.Popen")
+    def test_desktop_notification_darwin_applescript_rce_blocked(
+        self, mock_popen: MagicMock
+    ) -> None:
+        """Backslash-quote breakouts, newlines, and -e/-l flags never enter AppleScript code."""
+        payload_title = r'\" & (do shell script "id > /tmp/pwned") & \"'
+        payload_msg = '-e "do shell script \\"whoami\\""\n-l JavaScript\rline3'
+        with patch("sys.platform", "darwin"):
+            ok = dispatch_desktop_notification(payload_title, payload_msg)
+            self.assertTrue(ok)
+            args = mock_popen.call_args[0][0]
+            sep_idx = args.index("--")
+            script_args = args[:sep_idx]
+            expected_prefix = ["osascript"]
+            for stmt in _DARWIN_NOTIFICATION_SCRIPT:
+                expected_prefix.extend(["-e", stmt])
+            self.assertEqual(script_args, expected_prefix)
+            # Payload never appears in any script expression before '--'
+            joined_prefix = " ".join(script_args)
+            self.assertNotIn("do shell script", joined_prefix)
+            self.assertNotIn("JavaScript", joined_prefix)
+            self.assertEqual(args[sep_idx + 1], payload_title)
+            self.assertIn("JavaScript", args[sep_idx + 2])
 
     @patch("subprocess.Popen")
     def test_desktop_notification_win32(self, mock_popen: MagicMock) -> None:
@@ -245,7 +308,130 @@ class TestNotificationDispatchers(TestCase):
             self.assertTrue(ok)
             mock_popen.assert_called()
             args = mock_popen.call_args[0][0]
+            kwargs = mock_popen.call_args[1]
             self.assertEqual(args[0], "powershell")
+            self.assertEqual(args[-1], _WINDOWS_TOAST_PS_SCRIPT)
+            self.assertNotIn("Train Alert", args[-1])
+            self.assertNotIn("IC 52 Departed", args[-1])
+            self.assertEqual(kwargs["env"]["RAILMON_NOTIFY_TITLE"], "Train Alert")
+            self.assertEqual(kwargs["env"]["RAILMON_NOTIFY_MSG"], "IC 52 Departed")
+            self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
+
+    @patch("subprocess.Popen")
+    def test_desktop_notification_win32_smart_quote_rce_blocked(
+        self, mock_popen: MagicMock
+    ) -> None:
+        """PowerShell smart quotes, subexpressions, and quotes stay strictly in child env."""
+        adversarial_titles = [
+            "IC52\u2019)); calc.exe; #",
+            "IC52\u2018)); Write-Output PWNED; #",
+            "IC52\u201a)); $(whoami); #",
+            "IC52\u201b)); `whoami`; #",
+            "'; Start-Process calc.exe; # \"$(id)\"",
+            "IC\x0052\x07\x1b[31m\nInjected",
+            "",
+        ]
+        env_before = os.environ.copy()
+        with patch("sys.platform", "win32"):
+            for raw_title in adversarial_titles:
+                mock_popen.reset_mock()
+                raw_msg = f"<script>alert(1)</script> & Θεσσαλονίκη {raw_title}"
+                ok = dispatch_desktop_notification(raw_title, raw_msg)
+                self.assertTrue(ok)
+                args = mock_popen.call_args[0][0]
+                kwargs = mock_popen.call_args[1]
+                self.assertEqual(args[-1], _WINDOWS_TOAST_PS_SCRIPT)
+                self.assertNotIn("\x00", kwargs["env"]["RAILMON_NOTIFY_TITLE"])
+                self.assertNotIn("\x00", kwargs["env"]["RAILMON_NOTIFY_MSG"])
+        # Process-global os.environ must never be mutated
+        self.assertEqual(os.environ, env_before)
+        self.assertNotIn("RAILMON_NOTIFY_TITLE", os.environ)
+        self.assertNotIn("RAILMON_NOTIFY_MSG", os.environ)
+
+    @unittest.skipUnless(
+        sys.platform == "win32", "Live PowerShell WinRT verification runs on Windows"
+    )
+    def test_windows_powershell_env_blocks_smart_quote_rce_live(self) -> None:
+        """Real PowerShell execution with smart-quote payload creates no sentinel file."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sentinel = Path(tmp_dir) / "pwned.txt"
+            payload_title = (
+                f"IC52\u2019)); New-Item -Path '{sentinel}' -ItemType File -Force; #"
+            )
+            payload_msg = "<script>alert(1)</script> & Θεσσαλονίκη $(whoami)"
+            # Mirror production WinRT XML creation without popping a desktop toast UI
+            verify_script = (
+                "[Windows.UI.Notifications.ToastNotificationManager, "
+                "Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
+                "$template = [Windows.UI.Notifications.ToastNotificationManager]::"
+                "GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
+                "$textNodes = $template.GetElementsByTagName('text'); "
+                "$textNodes.Item(0).AppendChild("
+                "$template.CreateTextNode([string]$env:RAILMON_NOTIFY_TITLE)) > $null; "
+                "$textNodes.Item(1).AppendChild("
+                "$template.CreateTextNode([string]$env:RAILMON_NOTIFY_MSG)) > $null; "
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                "Write-Output $template.GetXml();"
+            )
+            child_env = os.environ.copy()
+            child_env["RAILMON_NOTIFY_TITLE"] = _sanitize_notification_text(
+                payload_title, _MAX_NOTIFICATION_TITLE_LEN, allow_newlines=False
+            )
+            child_env["RAILMON_NOTIFY_MSG"] = _sanitize_notification_text(
+                payload_msg, _MAX_NOTIFICATION_BODY_LEN, allow_newlines=True
+            )
+            res = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    verify_script,
+                ],
+                env=child_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=20,
+            )
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            self.assertFalse(
+                sentinel.exists(),
+                "Smart-quote payload executed arbitrary PowerShell command!",
+            )
+            self.assertIn("IC52\u2019)); New-Item", res.stdout)
+            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", res.stdout)
+            self.assertIn("Θεσσαλονίκη", res.stdout)
+
+    def test_sanitize_notification_text_strips_controls_and_bounds_length(self) -> None:
+        """Sanitizer strips NUL/C0/C1 controls, preserves UTF-8, and truncates safely."""
+        dirty = "IC\x0052\x07\x1b\x7f\x85\x9f Αθήνα\r\nΘεσσαλονίκη"
+        title_clean = _sanitize_notification_text(dirty, 256, allow_newlines=False)
+        self.assertEqual(title_clean, "IC52 Αθήνα Θεσσαλονίκη")
+
+        body_clean = _sanitize_notification_text(dirty, 1024, allow_newlines=True)
+        self.assertEqual(body_clean, "IC52 Αθήνα\nΘεσσαλονίκη")
+
+        long_str = "A" * 5000
+        truncated_title = _sanitize_notification_text(
+            long_str, _MAX_NOTIFICATION_TITLE_LEN, allow_newlines=False
+        )
+        self.assertEqual(len(truncated_title), _MAX_NOTIFICATION_TITLE_LEN)
+        self.assertTrue(truncated_title.endswith("..."))
+
+        truncated_body = _sanitize_notification_text(
+            long_str, _MAX_NOTIFICATION_BODY_LEN, allow_newlines=True
+        )
+        self.assertEqual(len(truncated_body), _MAX_NOTIFICATION_BODY_LEN)
+        self.assertTrue(truncated_body.endswith("..."))
+
+    @patch("subprocess.Popen", side_effect=FileNotFoundError("notify-send missing"))
+    def test_desktop_notification_missing_binary_returns_false(
+        self, mock_popen: MagicMock
+    ) -> None:
+        with patch("sys.platform", "linux"):
+            self.assertFalse(dispatch_desktop_notification("Alert", "Body"))
+            mock_popen.assert_called_once()
 
     @patch("urllib.request.urlopen")
     def test_webhook_telegram(self, mock_urlopen: MagicMock) -> None:

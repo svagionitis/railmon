@@ -1,23 +1,23 @@
 # Senior Software Engineering & Architecture Review: `railmon`
 
 > **Date:** 2026-11-25  
-> **Commit Reviewed:** `531c446` (`master`)  
-> **Scope:** Full codebase audit (37 production Python files / 31,887 LOC, 68 test files / 24,515 LOC, 4 GIS JSON datasets, packaging manifests, benchmarks, and static safety tooling)  
+> **Baseline Commit Reviewed:** `531c446` (`master`) — **Last Updated:** post-`8635eae` (`P0-1` / `P0-14` & `P0-2` / `P0-15` resolved)  
+> **Scope:** Full codebase audit (37 production Python files / 32,358 LOC, 68 test files / 25,209 LOC, 4 GIS JSON datasets, packaging manifests, benchmarks, and static safety tooling)  
 > **Prior Baseline:** [`production-readiness-review.md`](./production-readiness-review.md) (2026-11-18, 362 tests, pre-F-6/F-7/F-8/F-9/F-10)  
-> **Overall Verdict:** **Strong zero-dependency engineering foundation, but NOT production-ready for unattended daemon, rail-safety, or external-feed operation.** Rapid feature expansion (F-6 through F-10) outpaced architectural boundaries, static gates, and integration tests, introducing shipping CLI crashes, silent data loss, RCE/XSS vulnerabilities, broken safety watchdogs, and OpenMetrics/GTFS-RT spec violations.
+> **Overall Verdict:** **Strong zero-dependency engineering foundation, but NOT production-ready for unattended daemon, rail-safety, or external-feed operation.** Rapid feature expansion (F-6 through F-10) outpaced architectural boundaries, static gates, and integration tests. While `P0-1` (shipping CLI crashes and silent `--from-db --out-dir` export loss) and `P0-2` (desktop notification RCE and Web SPA DOM XSS / missing CSP) have been remediated, **4 P0 blockers remain open** (broken packaging & headless `curses` import crash, broken safety watchdogs, storage durability/analytics defects, and OpenMetrics spec violations).
 
 ---
 
 ## 1. Executive Summary & Empirical Baseline
 
-### Automated Verification Baseline (`HEAD = 531c446`)
+### Automated Verification Baseline (Current Working Tree, updated from `531c446`)
 
-| Verification Gate | Result on `HEAD` | Key Observation |
+| Verification Gate | Current Result | Key Observation |
 |---|---|---|
-| Full `unittest` suite (`python -m unittest discover -s tests`) | **FAILED** (`929` tests, `9` errors, `4` skipped in `76.6s`) | `railmon history bottlenecks` crashes with `NameError`; 8 `PermissionError [WinError 32]` SQLite `tearDown` leaks in [`tests/test_bottlenecks.py`](../../tests/test_bottlenecks.py#L34-L35) |
-| Symbol-table undefined-global check (`symtable`) | **FAILED** (`2` shipping `NameError` bugs) | [`_handle_history_segments_action`](../../train_tracker.py#L3171-L3200) and [`_handle_history_bottlenecks_action`](../../train_tracker.py#L3202-L3229) call unimported formatters |
+| Full `unittest` suite (`python -m unittest discover -s tests`) | **PASSED** (`944` tests, `0` failures, `0` errors, `4` skipped) | `P0-14` fixed `history` `NameError` and all 8 `WinError 32` SQLite `tearDown` leaks; `P0-15` added 10 adversarial RCE/XSS/CSP regression tests (incl. live Windows PowerShell verification) |
+| Symbol-table undefined-global check (`symtable`) | **PASSED** (`0` undefined globals across all production files) | `2` shipping `NameError` bugs in [`_handle_history_segments_action`](../../train_tracker.py#L3171-L3201) and [`_handle_history_bottlenecks_action`](../../train_tracker.py#L3203-L3231) fixed in `8635eae` (`P0-14`) |
 | Default `safety_ast_audit.py --strict` | **FALSE PASS** (`86` files) | Hardcoded target list skips `watchdog.py`, `server/`, `exporter/`, and `gtfs_rt/` (`18` production files unaudited) |
-| Full-repo `safety_ast_audit.py --strict` (all 7 packages) | **FAILED** (`3` `PY-MISRA-03` violations) | Silent `except Exception: pass` in [`exporter/collector.py`](../../exporter/collector.py#L539) and [`watchdog.py`](../../watchdog.py#L661-L670) |
+| Full-repo `safety_ast_audit.py --strict` (all 7 packages) | **FAILED** (`1` `PY-MISRA-03` warning remaining) | `watchdog.py` + `server/` now pass with `0` errors / `0` warnings (`P0-15`); silent `except Exception: pass` in [`exporter/collector.py`](../../exporter/collector.py#L539) remains |
 | Packaging completeness ([`pyproject.toml`](../../pyproject.toml)) | **BROKEN** | [`watchdog.py`](../../watchdog.py) omitted from `py-modules`, `tool.ruff.src`, and `tool.coverage.run.source` |
 
 ### Architectural & Engineering Scorecard
@@ -25,14 +25,14 @@
 | Dimension | Score | Primary Assessment |
 |---|---|---|
 | Zero-Dependency Craft & Domain Modeling | **8.5 / 10** | Impressive stdlib-only Proto2 wire codec, Braille GIS renderer, WAL SQLite setup, and frozen DTOs |
-| Architecture & Modularity | **4.0 / 10** | 5,194-LOC root monolith, `tui/` acting as a shadow core library with eager `import curses`, `storage <-> tui` cycle, 3× duplicated HTTP servers |
-| Functional Correctness (CLI & Analytics) | **4.5 / 10** | 3 shipping CLI crashes, silent empty `--from-db --out-dir` export, broken F-9.2 transit SQL, broken `StorageMetricsCollector` |
+| Architecture & Modularity | **4.0 / 10** | 5,207-LOC root monolith, `tui/` acting as a shadow core library with eager `import curses`, `storage <-> tui` cycle, 3× duplicated HTTP servers |
+| Functional Correctness (CLI & Analytics) | **6.0 / 10** | `P0-1` (`P0-14`) resolved (`history` crashes & `--from-db --out-dir` fixed); broken F-9.2 transit SQL, broken `StorageMetricsCollector`, and mock-only `sensor-health`/`conflicts` remain |
 | Rail Safety Watchdogs | **3.5 / 10** | 90s prune kills 180s/300s+ drop/tunnel watchdogs; single-track corridors misclassified as double-track; dead stale-ghost preemption; GIS drift up to 3.2 km |
-| Security & Hardening | **4.0 / 10** | PowerShell/AppleScript RCE in `watchdog.py`, DOM XSS in web SPA, CSV formula injection, Slowloris/unbounded threads, webhook secret log leakage |
+| Security & Hardening | **6.5 / 10** | `P0-2` (`P0-15`) resolved (desktop notification RCE eliminated; SPA DOM XSS, inline handlers & strict per-request nonce CSP fixed); CSV formula injection, Slowloris/unbounded threads, and webhook secret log leakage remain |
 | Concurrency & Resource Lifecycle | **4.5 / 10** | Heavy `get_snapshot()` lock contention + mutation on read, inverted SSE stale eviction, SQLite thread-local 64 MB connection leak, shutdown deadlocks |
 | Storage Durability & Query Performance | **5.0 / 10** | Archival TOCTOU + PK-collision data loss, unnormalized ISO timestamps, infinite archive retry loop, systemic full table scans |
 | Protocol Compliance (SSE / HTTP / OpenMetrics / GTFS-RT) | **5.5 / 10** | Real Prometheus rejects OpenMetrics output; WHATWG SSE framing & clean-EOF spin; HTTP/1.1 keep-alive & ETag/`Vary` defects; Windows EEST DST drift |
-| Test Suite & Static Gates | **6.0 / 10** | High volume (929 tests, real socket/SQLite integration), but broken on Windows `HEAD`, over-mocked contracts, missing `protoc` golden vectors, blind AST gate |
+| Test Suite & Static Gates | **7.0 / 10** | `944` passing tests (`P0-14` fixed teardown leaks; `P0-15` added live PowerShell RCE, AppleScript/Linux flag injection, DOM-XSS & CSP nonce tests); over-mocked contracts, missing `protoc`/`promtool` golden vectors, and blind AST gate remain |
 
 ---
 
@@ -42,14 +42,14 @@
 
 Static import-graph analysis across all 37 production files exposes two structural anti-patterns that directly caused multiple P0/P1 defects in this review:
 
-1. **Dual-Role Root Monolith ([`train_tracker.py`](../../train_tracker.py), 5,194 LOC):** Simultaneously acts as the lowest-level domain/client module (imported at top-level by `storage`, `tui`, `server`, `exporter`, and `gtfs_rt`) **and** the highest-level CLI presentation/composition root (lazily importing all 6 packages inside functions to break circular imports). Refactoring helper functions out of lazy-import scopes directly caused the shipping `NameError` crashes in `history bottlenecks` and `history segments`.
+1. **Dual-Role Root Monolith ([`train_tracker.py`](../../train_tracker.py), 5,207 LOC):** Simultaneously acts as the lowest-level domain/client module (imported at top-level by `storage`, `tui`, `server`, `exporter`, and `gtfs_rt`) **and** the highest-level CLI presentation/composition root (lazily importing all 6 packages inside functions to break circular imports). Refactoring helper functions out of lazy-import scopes directly caused the shipping `NameError` crashes in `history bottlenecks` and `history segments` (remediated in `P0-14`).
 2. **`tui/` as a Shadow Core Library with Eager `curses` Coupling:** Every headless package (`server`, `exporter`, `gtfs_rt`, `watchdog`, `storage`) imports from `tui/` (`TrainStateStore`, `StreamWorker`, GIS data loaders in `tui/mock_engine.py`, safety watchdogs in `tui/geo.py`). Because [`tui/__init__.py`](../../tui/__init__.py#L3-L89) eagerly imports [`tui/app.py`](../../tui/app.py#L9) and [`tui/renderer.py`](../../tui/renderer.py#L12) (both executing unconditional top-level `import curses`), **every headless daemon crashes at import time when `_curses` is absent**.
 
 #### A. Current Dependency Graph (ASCII)
 
 ```text
   +------------------------------------------------------------------------+
-  |                  train_tracker.py (5,194 LOC Monolith)                 |
+  |                  train_tracker.py (5,207 LOC Monolith)                 |
   |       Domain DTOs + HTTP/SSE Client + CLI Root (40+ lazy imports)      |
   +------------------------------------------------------------------------+
         ^      ^          ^            ^             ^           |
@@ -75,7 +75,7 @@ Static import-graph analysis across all 37 production files exposes two structur
 
 ```mermaid
 flowchart TD
-    TT["train_tracker.py (5,194 LOC) - Domain DTOs + HTTP/SSE + CLI Root"]
+    TT["train_tracker.py (5,207 LOC) - Domain DTOs + HTTP/SSE + CLI Root"]
     TUI["tui/ (12,000+ LOC) - Curses UI + StateStore + StreamWorker + GIS + Watchdogs + Mock"]
     STO["storage/ (5,600+ LOC) - SQLite WAL + Analytics + CLI Tables"]
     SRV["server/ - Web Map HTTP + SSE Hub + SPA"]
@@ -110,7 +110,7 @@ flowchart TD
 
 | Module | LOC | Key Coupling / SRP Violations |
 |---|---:|---|
-| [`train_tracker.py`](../../train_tracker.py) | 5,194 | 9 responsibilities (`build_parser` = 849 lines, 16 CLI commands, HTTP/SSE client, DTOs, media launcher, logging, signals); monkey-patches `TrainStateStore` methods at [`L4254-L4282`](../../train_tracker.py#L4254-L4282) |
+| [`train_tracker.py`](../../train_tracker.py) | 5,207 | 9 responsibilities (`build_parser` = 849 lines, 16 CLI commands, HTTP/SSE client, DTOs, media launcher, logging, signals); monkey-patches `TrainStateStore` methods at [`L4257-L4285`](../../train_tracker.py#L4257-L4285) |
 | [`tui/renderer.py`](../../tui/renderer.py) | 3,255 | Rendering + station board computation + ETA math + duplicated `Europe/Athens` tz logic (`render_inspector` CC=38) |
 | [`tui/geo.py`](../../tui/geo.py) | 2,958 | 5 unrelated domains: Braille canvas, Equirectangular projection, GeoJSON parsing, speed enforcement (with hardcoded curses pair ints `1, 8, 9`), conflict & sensor-health watchdogs |
 | [`storage/repository.py`](../../storage/repository.py) | 2,270 | 11 responsibilities: path security, in-memory TUI exports, DVR replay, GTFS bridge, F-9.1/F-9.2 analytics, CSV/GeoJSON export, retention archival |
@@ -202,30 +202,31 @@ flowchart TD
 > [!CAUTION]
 > Every finding in this section causes a verified production crash, silent data loss, arbitrary code execution / XSS, complete safety-watchdog failure, or hard external-consumer scrape rejection.
 
-### P0-1. Four Shipping CLI Bugs: Guaranteed Crashes & Silent Total Data Loss
+### P0-1. Four Shipping CLI Bugs: Guaranteed Crashes & Silent Total Data Loss [RESOLVED]
+- **Status:** Resolved in commit `8635eae` | **Plan:** [`../plans/fixes/p0/p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md`](../plans/fixes/p0/p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md)
 - **Category:** Functional Bug / Data Loss
 - **Locations:**
-  - [`train_tracker.py`](../../train_tracker.py#L3171-L3229) vs [`train_tracker.py`](../../train_tracker.py#L3240-L3249) (`_handle_history_segments_action`, `_handle_history_bottlenecks_action`)
-  - [`train_tracker.py`](../../train_tracker.py#L3277-L3279) vs [`storage/repository.py`](../../storage/repository.py#L827) (`run_history_mode` -> `get_active_trips`)
-  - [`train_tracker.py`](../../train_tracker.py#L4813-L4831) -> [`train_tracker.py`](../../train_tracker.py#L4718-L4750) (`_export_db_mode` -> `_emit_feed_output`)
-- **Failure Modes (All Verified):**
-  1. `railmon history bottlenecks` crashes with `NameError: name 'format_bottlenecks_table' is not defined` (imported locally in `run_history_mode`, not in the extracted helper).
-  2. `railmon history segments` crashes with `NameError: name 'format_segment_transit_table' is not defined` (identical scope bug).
-  3. `railmon history trips` crashes with `TypeError: HistoricalRepository.get_active_trips() got an unexpected keyword argument 'date'` (parameter is `service_date`).
-  4. `railmon export --gtfs-rt --from-db <db> --out-dir <dir>` calls `_emit_feed_output(msg, mapper, args)` with `snapshot=None, positions=None, schedules=None`, causing `export_feed_dir()` to build 4 **completely empty** `.pb`/`.json` feeds (0 entities) while printing `[OK]` and exiting `0`.
-- **Fix:** Import formatters inside each helper (or pass explicitly); pass `service_date=args.date`; return `(positions, schedules, ref_ts)` from DB loader and forward them into `_emit_feed_output()`; add CLI integration tests exercising non-JSON paths and `--from-db --out-dir`.
+  - [`train_tracker.py`](../../train_tracker.py#L3171-L3231) (`_handle_history_segments_action`, `_handle_history_bottlenecks_action`) & [`train_tracker.py`](../../train_tracker.py#L3233-L3282) (`run_history_mode`)
+  - [`train_tracker.py`](../../train_tracker.py#L4816-L4845) (`_export_db_mode`) -> [`train_tracker.py`](../../train_tracker.py#L4721-L4753) (`_emit_feed_output`)
+  - [`gtfs_rt/exporter.py`](../../gtfs_rt/exporter.py#L80-L152) (`export_feed_dir`, `load_db_snapshot`, `export_from_db`)
+- **Failure Modes (All Remediated in `8635eae`):**
+  1. `railmon history bottlenecks` crashed with `NameError: name 'format_bottlenecks_table' is not defined` -> fixed by importing `format_bottlenecks_table` inside `_handle_history_bottlenecks_action()` with `ensure_ascii=False` JSON output.
+  2. `railmon history segments` crashed with `NameError: name 'format_segment_transit_table' is not defined` -> fixed by importing `format_segment_transit_table` inside `_handle_history_segments_action()` with `ensure_ascii=False` JSON output.
+  3. `railmon history trips` crashed with `TypeError` (`date` vs `service_date`) -> fixed by passing `service_date=args.date` to `HistoricalRepository.get_active_trips()`.
+  4. `railmon export --gtfs-rt --from-db <db> --out-dir <dir>` silently wrote 4 empty feeds -> fixed by extracting and exporting `gtfs_rt.load_db_snapshot()`, forwarding `(positions, schedules)` through `_export_db_mode()` -> `_emit_feed_output()`, failing loud in `export_feed_dir()` when both `snapshot` and `positions` are `None`, and pinning a single bundle timestamp across all 4 files; added CLI/DB export regression tests and closed SQLite handles in `test_bottlenecks.py` and `test_eta_engine.py` `tearDown()`.
 
-### P0-2. Arbitrary Command/Code Execution (RCE) in Desktop Notifications & DOM-Based XSS in Web SPA
+### P0-2. Arbitrary Command/Code Execution (RCE) in Desktop Notifications & DOM-Based XSS in Web SPA [RESOLVED]
+- **Status:** Resolved (`P0-15`, `944` tests passing) | **Plan:** [`../plans/fixes/p0/p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md`](../plans/fixes/p0/p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md)
 - **Category:** Security (RCE / XSS)
 - **Locations:**
-  - [`watchdog.py`](../../watchdog.py#L674-L722) (`dispatch_desktop_notification`)
-  - [`server/assets.py`](../../server/assets.py#L934-L944), [`#L968-L1001`](../../server/assets.py#L968-L1001), [`#L1088-L1124`](../../server/assets.py#L1088-L1124), [`#L1165-L1218`](../../server/assets.py#L1165-L1218); [`server/handler.py`](../../server/handler.py#L115-L126)
-- **Failure Modes:**
-  1. **Windows PowerShell RCE ([`watchdog.py`](../../watchdog.py#L700-L718)):** Escapes only ASCII `'` (`replace("'", "''")`). PowerShell parses Unicode smart quotes (`‘` `U+2018`, `’` `U+2019`, `‚` `U+201A`, `‛` `U+201B`) as string delimiters. Untrusted upstream telemetry (`train_number`, `destination`) containing `\u2019); <cmd>; #` breaks out of `CreateTextNode('...')` and executes arbitrary PowerShell (empirically verified on host).
-  2. **macOS AppleScript RCE ([`watchdog.py`](../../watchdog.py#L689-L698)):** Escapes `"` without first escaping `\` (or `\r`/`\n`); payload `\"` becomes `\\"`, closing the string literal and enabling `do shell script`.
-  3. **Linux `notify-send` option injection ([`watchdog.py`](../../watchdog.py#L682-L686)):** Omits `--` before `title, message`.
-  4. **Web SPA DOM XSS ([`server/assets.py`](../../server/assets.py)):** Upstream telemetry fields (`id`, `train_number`, `service_type`, `corridor`, `next_station`, station popup metadata) are interpolated raw into `innerHTML`, Leaflet `L.divIcon({html})`, `bindPopup()`, and inline `onclick="selectTrain('${t.id}')"` with zero escaping and no `Content-Security-Policy` header.
-- **Fix:** Pass notification text out-of-band (Windows: `env` vars read via `$env:RAILMON_TITLE` / `$env:RAILMON_MSG` in a constant PowerShell script; macOS: `osascript -e 'on run argv' ... -- title msg`; Linux: add `"--"`). In the SPA, use `textContent` / strict HTML escaping, eliminate inline `onclick` in favor of delegated `addEventListener` + `dataset.trainId`, `encodeURIComponent()` URL params, and emit a strict CSP header.
+  - [`watchdog.py`](../../watchdog.py#L656-L809) (`_sanitize_notification_text`, `dispatch_terminal_bell`, `dispatch_desktop_notification`)
+  - [`server/assets.py`](../../server/assets.py#L747-L1694) (`SPA_HTML_TEMPLATE`, `_validate_csp_nonce`, `_serialize_spa_config`, `get_spa_html`)
+  - [`server/handler.py`](../../server/handler.py#L25-L42), [`#L135-L148`](../../server/handler.py#L135-L148), [`#L535-L580`](../../server/handler.py#L535-L580); [`server/models.py`](../../server/models.py#L36-L42)
+- **Failure Modes (All Remediated in `P0-15`):**
+  1. **Windows PowerShell RCE (`watchdog.py`):** Replaced inline PowerShell string interpolation with compile-time constant `_WINDOWS_TOAST_PS_SCRIPT` reading `[string]$env:RAILMON_NOTIFY_TITLE` / `$env:RAILMON_NOTIFY_MSG` from a copied child environment (`os.environ.copy()`), plus `_sanitize_notification_text()` NUL/C0/C1 stripping and length bounds; verified live against PowerShell 5.1 with smart-quote `\u2019` breakout payloads.
+  2. **macOS AppleScript RCE (`watchdog.py`):** Replaced interpolated AppleScript strings with constant `_DARWIN_NOTIFICATION_SCRIPT` (`on run argv`) and `"--"` option terminator before `[safe_title, safe_msg]`.
+  3. **Linux `notify-send` option injection & `PY-MISRA-03` (`watchdog.py`):** Inserted `"--"` before `[safe_title, safe_msg]`, attached `stdin=subprocess.DEVNULL`, narrowed exception catches in `dispatch_desktop_notification()` and `dispatch_terminal_bell()` (`safety_ast_audit.py --strict watchdog.py server` passes with `0` errors / `0` warnings).
+  4. **Web SPA DOM XSS & Missing CSP (`server/assets.py`, `server/handler.py`, `server/models.py`):** Isolated server config in HTML-escaped `<script id="railmonConfig" type="application/json">`, removed all `.innerHTML` writes and all 11 static + dynamic inline `on*` handlers in favor of `createElement`/`createElementNS`/`textContent`, `L.divIcon({html: Element})`, `layer.bindPopup(Element)`, delegated `addEventListener` + `dataset.trainId`, `encodeURIComponent()` URLs, and `rel="noopener noreferrer"`; added per-request 128-bit CSPRNG nonce `Content-Security-Policy` (`Cache-Control: no-store`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer` across HTML and API/error routes (verified with `node --check`, adversarial DOM XSS harness, and live HTTP tests).
 
 ### P0-3. Broken Packaging (`watchdog.py` Omitted + PyPI Collision) & Headless `curses` Import Crash
 - **Category:** Packaging / Architecture / Portability
@@ -346,24 +347,24 @@ flowchart TD
 | Area | Finding & Location |
 |---|---|
 | CLI validation & UX | Unused `--no-filter-deadband` on `metrics` ([`train_tracker.py#L2409`](../../train_tracker.py#L2409)); `stop_event.wait(1.0)` throttles live plain/watch streams to 1 Hz ([`#L3028`](../../train_tracker.py#L3028), [`#L4139`](../../train_tracker.py#L4139)); `run_history_mode` opens DB with `auto_migrate=True` ([`#L3273`](../../train_tracker.py#L3273)); `is_tty_supported()` omits `stdin.isatty()`; `--interval 0` busy-loops; hardcoded `•` bullets in `--ascii` mode; [`format_watch_ticker`](../../watchdog.py#L885-L895) border alignment mismatch; `--archive-path` help falsely claims "gzipped JSONL". |
-| HTTP & Security Headers | Missing `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `rel="noopener noreferrer"`; hardcoded `railmon v0.1.0` in SPA ([`server/assets.py#L819`](../../server/assets.py#L819)); unescaped `server_address[0]` in [`exporter/server.py#L199`](../../exporter/server.py#L199); `/api/history/train/<id>` lacks `unquote()` and matches nested slashes; `NaN` bypasses `<= 0.0` config checks. |
+| HTTP & Security Headers | Missing `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` on `exporter/` and `gtfs_rt/` (`server/` & `rel="noopener noreferrer"` resolved in [`P0-15`](../plans/fixes/p0/p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md)); hardcoded `railmon v0.1.0` in SPA ([`server/assets.py#L819`](../../server/assets.py#L819)); unescaped `server_address[0]` in [`exporter/server.py#L199`](../../exporter/server.py#L199); `/api/history/train/<id>` lacks `unquote()` and matches nested slashes; `NaN` bypasses `<= 0.0` config checks. |
 | Storage & GTFS-RT Nits | [`storage/__init__.py`](../../storage/__init__.py) omits F-9.1/F-9.2 exports; `LIKE` wildcards (`%`/`_`) unescaped; `scheduled_trips(train_number)` lacks leading index for `ON DELETE CASCADE`; `gtfs_rt` `from_proto()` leaks raw `ValueError` instead of `WireDecodeError` and `_resolve_bearing()` drops due-North `0.0°` `track_heading`. |
-| Config & Docs Drift | [`pyproject.toml#L100`](../../pyproject.toml#L100) global `ignore_missing_imports = true` hides broken imports; [`README.md`](../../README.md) omits `server/` and states `380+ tests` (actual: `929`); [`.agents/rules/testing.md`](../../.agents/rules/testing.md) lists obsolete test filenames. |
+| Config & Docs Drift | [`pyproject.toml#L100`](../../pyproject.toml#L100) global `ignore_missing_imports = true` hides broken imports; [`README.md`](../../README.md) omits `server/` and states `380+ tests` (actual: `944`); [`.agents/rules/testing.md`](../../.agents/rules/testing.md) lists obsolete test filenames. |
 
 ---
 
 ## 7. Test Suite & Verification Engineering Assessment
 
-Despite having **929 automated tests** (24,515 LOC) with strong end-to-end socket and SQLite integration coverage, five systemic testing weaknesses explain why critical defects shipped to `master`:
+Despite having **944 automated tests** (25,209 LOC) with strong end-to-end socket and SQLite integration coverage, five systemic testing weaknesses explain why critical defects shipped to `master`:
 
-1. **Broken Mainline Suite on Windows (`HEAD` fails):** [`tests/test_bottlenecks.py`](../../tests/test_bottlenecks.py) fails 1 test with production `NameError` and 8 `tearDown`s with `PermissionError [WinError 32]` because `self.db.close()` is never called (same leak exists in [`tests/test_eta_engine.py`](../../tests/test_eta_engine.py)).
+1. **Windows Teardown Leaks Resolved (`8635eae` / `P0-14`), Intermittent HTTP 405 Flake Remains:** [`tests/test_bottlenecks.py`](../../tests/test_bottlenecks.py) and [`tests/test_eta_engine.py`](../../tests/test_eta_engine.py) now close SQLite handles cleanly in `tearDown()` (eliminating the `NameError` and 8 `WinError 32` errors present on `531c446`). However, [`tests/test_gtfs_server.py`](../../tests/test_gtfs_server.py) intermittently hits `ConnectionAbortedError [WinError 10053]` on `POST` `405` due to unread keep-alive request bodies (`P1-6`).
 2. **Contract-Masking Mocks:**
    - [`tests/test_exporter_collector.py`](../../tests/test_exporter_collector.py) mocks `recorder.get_stats()` and `StateSnapshot` with `MagicMock`, completely hiding that `HistoricalRepository.get_stats()` does not exist.
    - [`tests/test_tui_conflict_watchdog_geo.py`](../../tests/test_tui_conflict_watchdog_geo.py) passes mock objects carrying `.last_updated` directly to `evaluate_train_conflicts()`, hiding that `TrainStateStore` passes `TrainPosition` without `.last_updated`.
    - [`tests/test_eta_engine.py`](../../tests/test_eta_engine.py) seeds only 2 rows per train, hiding that F-9.2 measures ~2s polling intervals on real multi-breadcrumb data.
-   - [`tests/test_watchdog.py`](../../tests/test_watchdog.py) uses a custom `DummyPosition` and never tests quote/backslash/smart-quote injection payloads.
+   - [`tests/test_watchdog.py`](../../tests/test_watchdog.py) still uses a custom `DummyPosition` for evaluator tests (quote/backslash/smart-quote/flag injection payloads are now tested in `P0-15`, including a live Windows PowerShell regression test).
 3. **Self-Referential Protobuf Testing:** [`tests/test_gtfs_models.py`](../../tests/test_gtfs_models.py) only round-trips its own `to_proto()` -> `from_proto()` without `protoc` / `gtfs-realtime-bindings` golden binary fixtures or an OpenMetrics grammar validator (`promtool`) for `exporter/`.
-4. **Missing High-Risk Matrix Tests:** Zero tests for `--from-db --out-dir`, EEST summer DST (`UTC+3`) without `tzdata`, overnight midnight trips, sub-second SQLite timestamps (`.500Z`), `railmon` built-wheel installation in an isolated venv, or GIS polyline-to-track geometric alignment.
+4. **Missing High-Risk Matrix Tests:** `--from-db --out-dir` is now covered (`P0-14`), but zero tests exist for EEST summer DST (`UTC+3`) without `tzdata`, overnight midnight trips, sub-second SQLite timestamps (`.500Z`), `railmon` built-wheel installation in an isolated venv, or GIS polyline-to-track geometric alignment.
 5. **Test Execution Hygiene:** [`tests/test_cli_metrics.py`](../../tests/test_cli_metrics.py) binds hardcoded ports (`9199`, `9197`), leaves HTTP responses unclosed, and (along with [`tests/test_cli_serve.py`](../../tests/test_cli_serve.py)) pre-sets `stop_event` before `start(background=True)` risking `BaseServer.shutdown()` deadlocks; [`tests/test_gtfs_server.py`](../../tests/test_gtfs_server.py) lacks `ProxyHandler({})` isolation.
 
 ---
@@ -381,12 +382,12 @@ Despite having **929 automated tests** (24,515 LOC) with strong end-to-end socke
 ## 9. Prioritized Remediation Roadmap
 
 ### Phase 0 — Immediate Hotfixes (1–2 Days, Unblock `master` & Packaging)
-1. Fix shipping CLI crashes: missing imports in `_handle_history_bottlenecks_action` & `_handle_history_segments_action`, `service_date=args.date` in `run_history_mode`, `total_suppressed` key in `run_record_mode`, and pass `(positions, schedules)` through `_export_db_mode` -> `_emit_feed_output`.
-2. Fix `StorageMetricsCollector` (`repo.get_database_stats()`), `test_bottlenecks.py` / `test_eta_engine.py` `db.close()` in `tearDown()`, and `DEFAULT_PRODUCTION_TARGETS` in `safety_ast_audit.py` (+ its 3 `PY-MISRA-03` violations).
+1. ~~Fix shipping CLI crashes: missing imports in `_handle_history_bottlenecks_action` & `_handle_history_segments_action`, `service_date=args.date` in `run_history_mode`, and pass `(positions, schedules)` through `_export_db_mode` -> `_emit_feed_output`~~ **([RESOLVED in `8635eae` / `P0-14`](../plans/fixes/p0/p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md))**; remaining in this item: fix `total_suppressed` key in `run_record_mode`.
+2. Fix `StorageMetricsCollector` (`repo.get_database_stats()`), ~~`test_bottlenecks.py` / `test_eta_engine.py` `db.close()` in `tearDown()`~~ **(RESOLVED in `8635eae`)**, and `DEFAULT_PRODUCTION_TARGETS` in `safety_ast_audit.py` (+ remaining `PY-MISRA-03` violations).
 3. Relocate/package `watchdog.py` in `pyproject.toml`, add `.gitattributes`, and switch `tui/__init__.py` to PEP 562 lazy exports so headless daemons do not import `curses`.
 
 ### Phase 1 — Security & Data Durability Hardening (3–5 Days)
-1. Eliminate RCE in `watchdog.py` (`dispatch_desktop_notification` out-of-band args/env), DOM XSS in `server/assets.py` (DOM APIs/escaping + CSP), CSV formula injection in `storage/repository.py`, webhook secret logging/SSRF, and URL path encoding/redirect validation in `RailwayGovClient`.
+1. ~~Eliminate RCE in `watchdog.py` (`dispatch_desktop_notification` out-of-band args/env) and DOM XSS + missing CSP in `server/assets.py` / `server/handler.py`~~ (**[RESOLVED in `P0-15`](../plans/fixes/p0/p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md)**); remaining in this item: CSV formula injection in `storage/repository.py`, webhook secret logging/SSRF, and URL path encoding/redirect validation in `RailwayGovClient`.
 2. Fix `archive_before()` TOCTOU delete & PK collision, canonicalize all ISO-8601 UTC timestamps to fixed-width microseconds (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), fix `TelemetryRecorder` archival retry storm + post-commit deadband state update, and fix `Database` connection leak, `transaction()` `SAVEPOINT` semantics, `uri=True`, `os.umask()` race, and per-open integrity check.
 3. Rewrite F-9.2 segment transit SQL using contiguous station-run islands and fix F-9.1 bottleneck population/percentile math + sargable `WHERE` clauses.
 
@@ -396,5 +397,5 @@ Despite having **929 automated tests** (24,515 LOC) with strong end-to-end socke
 3. Consolidate `server/`, `exporter/`, and `gtfs_rt/server.py` onto one hardened bounded HTTP base (connection semaphore, socket timeouts, `Host` validation, RFC 9110 `Vary`/ETag/`405`/`HEAD`, deadlock-free `stop()`/signals), fix OpenMetrics 1.0.0 formatter/collectors (verified against `promtool`), fix `SSEBroadcaster` staleness/shutdown, fix SSE clean-EOF backoff/`IncompleteRead`/WHATWG framing, and add EU EET/EEST fallback + overnight `start_date` fix + Windows atomic-replace retry in `gtfs_rt/`.
 
 ### Phase 3 — Architectural Decomposition & CI Governance (2–3 Weeks)
-1. Decompose `train_tracker.py` (5,194 LOC), `tui/geo.py` (2,958 LOC), `tui/state.py` (2,004 LOC), `storage/repository.py` (2,270 LOC), and `storage/cli_formatters.py` (1,405 LOC) into the acyclic layered `railmon/` package architecture (Section 2.3), replacing runtime store monkey-patching with an explicit listener interface.
+1. Decompose `train_tracker.py` (5,207 LOC), `tui/geo.py` (2,958 LOC), `tui/state.py` (2,004 LOC), `storage/repository.py` (2,270 LOC), and `storage/cli_formatters.py` (1,405 LOC) into the acyclic layered `railmon/` package architecture (Section 2.3), replacing runtime store monkey-patching with an explicit listener interface.
 2. Enforce full CI quality gate on every commit (`unittest`/`pytest` on Linux + Windows, `mypy --strict`, `ruff`, `bandit`, full-repo `safety_ast_audit.py --strict`, wheel install smoke test, `protoc` golden GTFS-RT tests, and `promtool` OpenMetrics validation).

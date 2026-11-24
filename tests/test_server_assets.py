@@ -1,7 +1,9 @@
 """Unit tests for embedded web assets and GeoJSON caching subsystem."""
 
 import ast
+from html.parser import HTMLParser
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -143,12 +145,13 @@ class TestServerAssets(unittest.TestCase):
         self.assertIn("fetch('/api/health')", html)
 
     def test_sparkline_generator_tc_ast_13(self) -> None:
-        """TC-AST-13: Speed sparkline SVG generator logic is embedded."""
+        """TC-AST-13: Speed sparkline SVG generator uses safe DOM createElementNS construction."""
         html = get_spa_html()
         self.assertIn("generateSparkline", html)
         self.assertIn("sparkline-svg", html)
-        self.assertIn("<polyline", html)
-        self.assertIn('stroke="#0ea5e9"', html)
+        self.assertIn("createElementNS", html)
+        self.assertIn("'polyline'", html)
+        self.assertIn("#0ea5e9", html)
 
     def test_delay_styling_classes_tc_ast_14(self) -> None:
         """TC-AST-14: Delay threshold badges and animated CSS pulse classes are defined."""
@@ -229,6 +232,75 @@ class TestServerAssets(unittest.TestCase):
 
             res_corrupt = json.loads(cache.get_asset_json_string("corrupt.json"))
             self.assertEqual(res_corrupt, {"type": "FeatureCollection", "features": []})
+
+    def test_spa_contains_zero_inline_event_handlers_and_zero_innerhtml(self) -> None:
+        """P0-15: SPA HTML contains zero inline on* attributes and zero innerHTML sinks."""
+        html = get_spa_html(csp_nonce="AbCdEf0123456789-_")
+
+        # 1. Parse all HTML elements and reject any inline on* event handler attributes
+        found_inline_attrs: list[tuple[str, str]] = []
+
+        class _InlineHandlerAuditParser(HTMLParser):
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                for attr_name, _ in attrs:
+                    if attr_name.lower().startswith("on"):
+                        found_inline_attrs.append((tag, attr_name))
+
+        parser = _InlineHandlerAuditParser()
+        parser.feed(html)
+        self.assertEqual(
+            found_inline_attrs,
+            [],
+            f"Disallowed inline HTML event handlers found: {found_inline_attrs}",
+        )
+
+        # 2. Verify zero HTML template inline handlers or .innerHTML sinks in JS
+        js_inline_tag_handlers = re.findall(
+            r"""<[a-zA-Z][^>]*\bon[a-z]+\s*=""", html, flags=re.IGNORECASE
+        )
+        self.assertEqual(js_inline_tag_handlers, [])
+        self.assertNotIn(".innerHTML", html)
+        self.assertIn("dataset.trainId", html)
+        self.assertIn("encodeURIComponent", html)
+        self.assertIn("noopener noreferrer", html)
+        self.assertIn("bindStaticEventHandlers", html)
+
+    def test_spa_json_config_block_and_csp_nonce_validation(self) -> None:
+        """P0-15: Runtime tile config is isolated in JSON script block and nonce is validated."""
+        nonce = "ValidNonceValue_012345"
+        html = get_spa_html(
+            ServerConfig(tile_provider=TileProvider.OSM), csp_nonce=nonce
+        )
+        self.assertIn(f'<script nonce="{nonce}">', html)
+
+        match = re.search(
+            r'<script id="railmonConfig" type="application/json">(.*?)</script>',
+            html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        raw_cfg_json = match.group(1)
+        # Ensure angle brackets are escaped inside the JSON data block
+        self.assertNotIn("<", raw_cfg_json)
+        self.assertNotIn(">", raw_cfg_json)
+        parsed = json.loads(raw_cfg_json)
+        self.assertEqual(parsed["tileProvider"], "osm")
+        self.assertIn("tile.openstreetmap.org", parsed["tileUrl"])
+        self.assertIn("OpenStreetMap", parsed["attribution"])
+        self.assertIn('rel="noopener noreferrer"', parsed["attribution"])
+
+        # Reject malformed / injectable CSP nonces
+        for bad_nonce in (
+            "",
+            "short",
+            'abc" onload="alert(1)" data-x="123456',
+            "nonce; script-src 'unsafe-inline'",
+            "contains spaces 12345678",
+            "a" * 200,
+        ):
+            with self.assertRaises(ValueError, msg=f"Accepted bad nonce: {bad_nonce!r}"):
+                get_spa_html(csp_nonce=bad_nonce)
 
 
 if __name__ == "__main__":
