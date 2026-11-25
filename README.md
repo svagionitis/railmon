@@ -268,7 +268,7 @@ curl http://127.0.0.1:8085/gtfs-rt/feed.json
 - [`railmon`](./railmon): Executable wrapper script.
 - [`pyproject.toml`](./pyproject.toml): PEP 517 / PEP 518 / PEP 621 packaging specification, dynamic versioning, and unified tool configuration.
 - [`train_tracker.py`](./train_tracker.py): Core HTTP/SSE API client, data models, and CLI argument parsing.
-- [`watchdog.py`](./watchdog.py): Train trip watchdog evaluator, proximity calculations, and multimodal push alert dispatchers.
+- [`railmon_watchdog.py`](./railmon_watchdog.py): Train trip watchdog evaluator, proximity calculations, and multimodal push alert dispatchers.
 - [`tui/`](./tui): Modular curses terminal user interface:
   - [`tui/geo.py`](./tui/geo.py): EPSG:4326 to Braille canvas (2x4 dot matrix) projection engine.
   - [`tui/state.py`](./tui/state.py): Thread-safe telemetry state store and snapshot generation.

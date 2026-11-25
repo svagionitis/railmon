@@ -1,0 +1,17 @@
+# Enforce consistent cross-platform line endings for railmon
+* text=auto eol=lf
+
+# POSIX executable wrapper & source files must always use LF (prevents python3\r on WSL/Docker)
+railmon text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows batch scripts require CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

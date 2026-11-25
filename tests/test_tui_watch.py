@@ -119,8 +119,8 @@ class TestTUIAppWatchIntegration(TestCase):
         self.assertFalse(is_err2)
         self.assertIn("Watch Alert OFF: IC 52", str(msg2))
 
-    @patch("watchdog.dispatch_desktop_notification")
-    @patch("watchdog.dispatch_terminal_bell")
+    @patch("railmon_watchdog.dispatch_desktop_notification")
+    @patch("railmon_watchdog.dispatch_terminal_bell")
     def test_in_tui_watch_alert_evaluation(
         self,
         mock_bell: MagicMock,

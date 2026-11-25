@@ -67,7 +67,7 @@ Issues = "https://github.com/svagionitis/railmon/issues"
 version = { attr = "train_tracker.__version__" }
 
 [tool.setuptools]
-py-modules = ["train_tracker"]
+py-modules = ["train_tracker", "railmon_watchdog"]
 packages = ["storage", "tui", "tui.data", "server", "exporter", "gtfs_rt"]
 
 [tool.setuptools.package-data]
@@ -107,7 +107,7 @@ disallow_incomplete_defs = false
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-src = ["train_tracker.py", "storage", "tui", "server", "exporter", "gtfs_rt", "tests"]
+src = ["train_tracker.py", "railmon_watchdog.py", "storage", "tui", "server", "exporter", "gtfs_rt", "tests"]
 
 [tool.ruff.lint]
 # Enforces MISRA / AUTOSAR / NASA JPL style static safety rules:
@@ -128,7 +128,7 @@ exclude_dirs = ["tests"]
 skips = ["B311"]
 
 [tool.coverage.run]
-source = ["train_tracker", "storage", "tui", "server", "exporter", "gtfs_rt"]
+source = ["train_tracker", "railmon_watchdog", "storage", "tui", "server", "exporter", "gtfs_rt"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

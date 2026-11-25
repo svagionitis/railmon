@@ -2,12 +2,36 @@
 
 Provides strongly-typed color pairs, 256-color / 16-color / 8-color degradation
 tables, and theme specifications for custom visual profiles (F-7.3).
+Headless-safe: guards the curses import so non-interactive daemons importing
+tui.state / ThemeProfile never crash when _curses is unavailable.
 """
 
 from dataclasses import dataclass
 from enum import Enum, unique
 from typing import Dict, Optional, Tuple
-import curses
+
+try:
+    import curses as _curses
+except (ImportError, ModuleNotFoundError):
+    _curses = None  # type: ignore[assignment]
+
+# Standard ANSI 16-color indices and curses attribute bitmasks.
+# Uses exact host ncurses/PDCurses constants when curses is installed,
+# and portable integer fallbacks when imported in headless environments.
+_COLOR_BLACK: int = int(getattr(_curses, "COLOR_BLACK", 0))
+_COLOR_RED: int = int(getattr(_curses, "COLOR_RED", 1))
+_COLOR_GREEN: int = int(getattr(_curses, "COLOR_GREEN", 2))
+_COLOR_YELLOW: int = int(getattr(_curses, "COLOR_YELLOW", 3))
+_COLOR_BLUE: int = int(getattr(_curses, "COLOR_BLUE", 4))
+_COLOR_MAGENTA: int = int(getattr(_curses, "COLOR_MAGENTA", 5))
+_COLOR_CYAN: int = int(getattr(_curses, "COLOR_CYAN", 6))
+_COLOR_WHITE: int = int(getattr(_curses, "COLOR_WHITE", 7))
+
+_A_NORMAL: int = int(getattr(_curses, "A_NORMAL", 0))
+_A_UNDERLINE: int = int(getattr(_curses, "A_UNDERLINE", 1 << 17))
+_A_REVERSE: int = int(getattr(_curses, "A_REVERSE", 1 << 18))
+_A_DIM: int = int(getattr(_curses, "A_DIM", 1 << 20))
+_A_BOLD: int = int(getattr(_curses, "A_BOLD", 1 << 21))
 
 # Curses color pair indices
 PAIR_DEFAULT = 1
@@ -68,22 +92,22 @@ def build_azure_theme() -> ThemeSpec:
     """Construct Hellenic Azure default theme."""
     bg_def = -1
     pairs = {
-        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 255, bg_def, curses.COLOR_WHITE, bg_def),
-        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 39, bg_def, curses.COLOR_CYAN, bg_def),
-        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 32, bg_def, curses.COLOR_BLUE, bg_def),
-        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 45, bg_def, curses.COLOR_WHITE, bg_def),
-        PAIR_STATION: ColorPairDef(PAIR_STATION, 220, bg_def, curses.COLOR_YELLOW, bg_def),
-        PAIR_STATION_DIM: ColorPairDef(PAIR_STATION_DIM, 178, bg_def, curses.COLOR_YELLOW, bg_def),
-        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 42, bg_def, curses.COLOR_GREEN, bg_def),
-        PAIR_TRAIN_WARN: ColorPairDef(PAIR_TRAIN_WARN, 214, bg_def, curses.COLOR_YELLOW, bg_def),
-        PAIR_TRAIN_ALERT: ColorPairDef(PAIR_TRAIN_ALERT, 196, bg_def, curses.COLOR_RED, bg_def),
-        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 51, bg_def, curses.COLOR_CYAN, bg_def),
-        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 177, bg_def, curses.COLOR_MAGENTA, bg_def),
-        PAIR_TRAIN_HALTED: ColorPairDef(PAIR_TRAIN_HALTED, 245, bg_def, curses.COLOR_WHITE, bg_def),
-        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 16, 39, curses.COLOR_BLACK, curses.COLOR_CYAN),
-        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 38, bg_def, curses.COLOR_GREEN, bg_def),
-        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 234, 252, curses.COLOR_BLACK, curses.COLOR_WHITE),
-        PAIR_CONNECTED: ColorPairDef(PAIR_CONNECTED, 42, bg_def, curses.COLOR_GREEN, bg_def),
+        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 255, bg_def, _COLOR_WHITE, bg_def),
+        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 39, bg_def, _COLOR_CYAN, bg_def),
+        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 32, bg_def, _COLOR_BLUE, bg_def),
+        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 45, bg_def, _COLOR_WHITE, bg_def),
+        PAIR_STATION: ColorPairDef(PAIR_STATION, 220, bg_def, _COLOR_YELLOW, bg_def),
+        PAIR_STATION_DIM: ColorPairDef(PAIR_STATION_DIM, 178, bg_def, _COLOR_YELLOW, bg_def),
+        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 42, bg_def, _COLOR_GREEN, bg_def),
+        PAIR_TRAIN_WARN: ColorPairDef(PAIR_TRAIN_WARN, 214, bg_def, _COLOR_YELLOW, bg_def),
+        PAIR_TRAIN_ALERT: ColorPairDef(PAIR_TRAIN_ALERT, 196, bg_def, _COLOR_RED, bg_def),
+        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 51, bg_def, _COLOR_CYAN, bg_def),
+        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 177, bg_def, _COLOR_MAGENTA, bg_def),
+        PAIR_TRAIN_HALTED: ColorPairDef(PAIR_TRAIN_HALTED, 245, bg_def, _COLOR_WHITE, bg_def),
+        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 16, 39, _COLOR_BLACK, _COLOR_CYAN),
+        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 38, bg_def, _COLOR_GREEN, bg_def),
+        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 234, 252, _COLOR_BLACK, _COLOR_WHITE),
+        PAIR_CONNECTED: ColorPairDef(PAIR_CONNECTED, 42, bg_def, _COLOR_GREEN, bg_def),
     }
     return ThemeSpec(
         profile=ThemeProfile.AZURE,
@@ -97,33 +121,33 @@ def build_azure_theme() -> ThemeSpec:
 def build_amber_theme() -> ThemeSpec:
     """Construct Retro Amber CRT phosphor theme."""
     bg_256 = 232  # Obsidian Black
-    bg_16 = curses.COLOR_BLACK
+    bg_16 = _COLOR_BLACK
     pairs = {
-        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 214, bg_256, curses.COLOR_YELLOW, bg_16),
-        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 220, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_BOLD),
-        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 130, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_DIM),
-        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 178, bg_256, curses.COLOR_YELLOW, bg_16),
-        PAIR_STATION: ColorPairDef(PAIR_STATION, 220, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_BOLD),
+        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 214, bg_256, _COLOR_YELLOW, bg_16),
+        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 220, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_BOLD),
+        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 130, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_DIM),
+        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 178, bg_256, _COLOR_YELLOW, bg_16),
+        PAIR_STATION: ColorPairDef(PAIR_STATION, 220, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_BOLD),
         PAIR_STATION_DIM: ColorPairDef(
-            PAIR_STATION_DIM, 94, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_DIM
+            PAIR_STATION_DIM, 94, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_DIM
         ),
-        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 214, bg_256, curses.COLOR_YELLOW, bg_16),
+        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 214, bg_256, _COLOR_YELLOW, bg_16),
         PAIR_TRAIN_WARN: ColorPairDef(
-            PAIR_TRAIN_WARN, 208, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_BOLD
+            PAIR_TRAIN_WARN, 208, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_BOLD
         ),
         PAIR_TRAIN_ALERT: ColorPairDef(
-            PAIR_TRAIN_ALERT, 196, bg_256, curses.COLOR_RED, bg_16, attr_override=curses.A_BOLD
+            PAIR_TRAIN_ALERT, 196, bg_256, _COLOR_RED, bg_16, attr_override=_A_BOLD
         ),
-        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 215, bg_256, curses.COLOR_YELLOW, bg_16),
-        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 172, bg_256, curses.COLOR_YELLOW, bg_16),
+        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 215, bg_256, _COLOR_YELLOW, bg_16),
+        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 172, bg_256, _COLOR_YELLOW, bg_16),
         PAIR_TRAIN_HALTED: ColorPairDef(
-            PAIR_TRAIN_HALTED, 130, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_DIM
+            PAIR_TRAIN_HALTED, 130, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_DIM
         ),
-        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 232, 214, curses.COLOR_BLACK, curses.COLOR_YELLOW),
-        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 94, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_DIM),
-        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 232, 214, curses.COLOR_BLACK, curses.COLOR_YELLOW),
+        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 232, 214, _COLOR_BLACK, _COLOR_YELLOW),
+        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 94, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_DIM),
+        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 232, 214, _COLOR_BLACK, _COLOR_YELLOW),
         PAIR_CONNECTED: ColorPairDef(
-            PAIR_CONNECTED, 220, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_BOLD
+            PAIR_CONNECTED, 220, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_BOLD
         ),
     }
     return ThemeSpec(
@@ -140,33 +164,33 @@ def build_amber_theme() -> ThemeSpec:
 def build_matrix_theme() -> ThemeSpec:
     """Construct Matrix phosphor green theme."""
     bg_256 = 232  # Obsidian Black
-    bg_16 = curses.COLOR_BLACK
+    bg_16 = _COLOR_BLACK
     pairs = {
-        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 46, bg_256, curses.COLOR_GREEN, bg_16),
-        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 82, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_BOLD),
-        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 22, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_DIM),
-        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 34, bg_256, curses.COLOR_GREEN, bg_16),
-        PAIR_STATION: ColorPairDef(PAIR_STATION, 46, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_BOLD),
+        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 46, bg_256, _COLOR_GREEN, bg_16),
+        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 82, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_BOLD),
+        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 22, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_DIM),
+        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 34, bg_256, _COLOR_GREEN, bg_16),
+        PAIR_STATION: ColorPairDef(PAIR_STATION, 46, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_BOLD),
         PAIR_STATION_DIM: ColorPairDef(
-            PAIR_STATION_DIM, 28, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_DIM
+            PAIR_STATION_DIM, 28, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_DIM
         ),
-        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 46, bg_256, curses.COLOR_GREEN, bg_16),
+        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 46, bg_256, _COLOR_GREEN, bg_16),
         PAIR_TRAIN_WARN: ColorPairDef(
-            PAIR_TRAIN_WARN, 118, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_BOLD
+            PAIR_TRAIN_WARN, 118, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_BOLD
         ),
         PAIR_TRAIN_ALERT: ColorPairDef(
-            PAIR_TRAIN_ALERT, 232, 46, curses.COLOR_BLACK, curses.COLOR_GREEN, attr_override=curses.A_BOLD
+            PAIR_TRAIN_ALERT, 232, 46, _COLOR_BLACK, _COLOR_GREEN, attr_override=_A_BOLD
         ),
-        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 48, bg_256, curses.COLOR_GREEN, bg_16),
-        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 65, bg_256, curses.COLOR_GREEN, bg_16),
+        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 48, bg_256, _COLOR_GREEN, bg_16),
+        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 65, bg_256, _COLOR_GREEN, bg_16),
         PAIR_TRAIN_HALTED: ColorPairDef(
-            PAIR_TRAIN_HALTED, 22, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_DIM
+            PAIR_TRAIN_HALTED, 22, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_DIM
         ),
-        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 232, 46, curses.COLOR_BLACK, curses.COLOR_GREEN),
-        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 28, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_DIM),
-        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 232, 46, curses.COLOR_BLACK, curses.COLOR_GREEN),
+        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 232, 46, _COLOR_BLACK, _COLOR_GREEN),
+        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 28, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_DIM),
+        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 232, 46, _COLOR_BLACK, _COLOR_GREEN),
         PAIR_CONNECTED: ColorPairDef(
-            PAIR_CONNECTED, 82, bg_256, curses.COLOR_GREEN, bg_16, attr_override=curses.A_BOLD
+            PAIR_CONNECTED, 82, bg_256, _COLOR_GREEN, bg_16, attr_override=_A_BOLD
         ),
     }
     return ThemeSpec(
@@ -183,28 +207,28 @@ def build_matrix_theme() -> ThemeSpec:
 def build_solarized_theme() -> ThemeSpec:
     """Construct Solarized Dark low-fatigue theme."""
     bg_256 = 234  # Base03 (#002b36)
-    bg_16 = curses.COLOR_BLACK
+    bg_16 = _COLOR_BLACK
     pairs = {
-        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 244, bg_256, curses.COLOR_WHITE, bg_16),
-        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 37, bg_256, curses.COLOR_CYAN, bg_16),
-        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 240, bg_256, curses.COLOR_BLUE, bg_16),
-        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 33, bg_256, curses.COLOR_CYAN, bg_16),
-        PAIR_STATION: ColorPairDef(PAIR_STATION, 136, bg_256, curses.COLOR_YELLOW, bg_16),
+        PAIR_DEFAULT: ColorPairDef(PAIR_DEFAULT, 244, bg_256, _COLOR_WHITE, bg_16),
+        PAIR_HEADER: ColorPairDef(PAIR_HEADER, 37, bg_256, _COLOR_CYAN, bg_16),
+        PAIR_BORDER: ColorPairDef(PAIR_BORDER, 240, bg_256, _COLOR_BLUE, bg_16),
+        PAIR_TRACK: ColorPairDef(PAIR_TRACK, 33, bg_256, _COLOR_CYAN, bg_16),
+        PAIR_STATION: ColorPairDef(PAIR_STATION, 136, bg_256, _COLOR_YELLOW, bg_16),
         PAIR_STATION_DIM: ColorPairDef(
-            PAIR_STATION_DIM, 240, bg_256, curses.COLOR_YELLOW, bg_16, attr_override=curses.A_DIM
+            PAIR_STATION_DIM, 240, bg_256, _COLOR_YELLOW, bg_16, attr_override=_A_DIM
         ),
-        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 64, bg_256, curses.COLOR_GREEN, bg_16),
-        PAIR_TRAIN_WARN: ColorPairDef(PAIR_TRAIN_WARN, 166, bg_256, curses.COLOR_YELLOW, bg_16),
-        PAIR_TRAIN_ALERT: ColorPairDef(PAIR_TRAIN_ALERT, 160, bg_256, curses.COLOR_RED, bg_16),
-        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 61, bg_256, curses.COLOR_MAGENTA, bg_16),
-        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 125, bg_256, curses.COLOR_MAGENTA, bg_16),
+        PAIR_TRAIN_ON_TIME: ColorPairDef(PAIR_TRAIN_ON_TIME, 64, bg_256, _COLOR_GREEN, bg_16),
+        PAIR_TRAIN_WARN: ColorPairDef(PAIR_TRAIN_WARN, 166, bg_256, _COLOR_YELLOW, bg_16),
+        PAIR_TRAIN_ALERT: ColorPairDef(PAIR_TRAIN_ALERT, 160, bg_256, _COLOR_RED, bg_16),
+        PAIR_TRAIN_PROAST: ColorPairDef(PAIR_TRAIN_PROAST, 61, bg_256, _COLOR_MAGENTA, bg_16),
+        PAIR_TRAIN_FREIGHT: ColorPairDef(PAIR_TRAIN_FREIGHT, 125, bg_256, _COLOR_MAGENTA, bg_16),
         PAIR_TRAIN_HALTED: ColorPairDef(
-            PAIR_TRAIN_HALTED, 240, bg_256, curses.COLOR_WHITE, bg_16, attr_override=curses.A_DIM
+            PAIR_TRAIN_HALTED, 240, bg_256, _COLOR_WHITE, bg_16, attr_override=_A_DIM
         ),
-        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 234, 244, curses.COLOR_BLACK, curses.COLOR_WHITE),
-        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 240, bg_256, curses.COLOR_BLUE, bg_16, attr_override=curses.A_DIM),
-        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 234, 245, curses.COLOR_BLACK, curses.COLOR_WHITE),
-        PAIR_CONNECTED: ColorPairDef(PAIR_CONNECTED, 64, bg_256, curses.COLOR_GREEN, bg_16),
+        PAIR_ROSTER_SELECT: ColorPairDef(PAIR_ROSTER_SELECT, 234, 244, _COLOR_BLACK, _COLOR_WHITE),
+        PAIR_TRAIL: ColorPairDef(PAIR_TRAIL, 240, bg_256, _COLOR_BLUE, bg_16, attr_override=_A_DIM),
+        PAIR_STATUS_BAR: ColorPairDef(PAIR_STATUS_BAR, 234, 245, _COLOR_BLACK, _COLOR_WHITE),
+        PAIR_CONNECTED: ColorPairDef(PAIR_CONNECTED, 64, bg_256, _COLOR_GREEN, bg_16),
     }
     return ThemeSpec(
         profile=ThemeProfile.SOLARIZED,
@@ -220,57 +244,57 @@ def build_solarized_theme() -> ThemeSpec:
 def build_monochrome_theme() -> ThemeSpec:
     """Construct High-Contrast Monochrome theme (WCAG AAA / e-ink)."""
     bg_256 = 16  # Black
-    bg_16 = curses.COLOR_BLACK
-    fg_white = curses.COLOR_WHITE
-    fg_black = curses.COLOR_BLACK
+    bg_16 = _COLOR_BLACK
+    fg_white = _COLOR_WHITE
+    fg_black = _COLOR_BLACK
     pairs = {
         PAIR_DEFAULT: ColorPairDef(
-            PAIR_DEFAULT, 255, bg_256, fg_white, bg_16, attr_override=curses.A_NORMAL
+            PAIR_DEFAULT, 255, bg_256, fg_white, bg_16, attr_override=_A_NORMAL
         ),
         PAIR_HEADER: ColorPairDef(
-            PAIR_HEADER, 255, bg_256, fg_white, bg_16, attr_override=curses.A_BOLD
+            PAIR_HEADER, 255, bg_256, fg_white, bg_16, attr_override=_A_BOLD
         ),
         PAIR_BORDER: ColorPairDef(
-            PAIR_BORDER, 255, bg_256, fg_white, bg_16, attr_override=curses.A_DIM
+            PAIR_BORDER, 255, bg_256, fg_white, bg_16, attr_override=_A_DIM
         ),
         PAIR_TRACK: ColorPairDef(
-            PAIR_TRACK, 255, bg_256, fg_white, bg_16, attr_override=curses.A_NORMAL
+            PAIR_TRACK, 255, bg_256, fg_white, bg_16, attr_override=_A_NORMAL
         ),
         PAIR_STATION: ColorPairDef(
-            PAIR_STATION, 255, bg_256, fg_white, bg_16, attr_override=curses.A_BOLD
+            PAIR_STATION, 255, bg_256, fg_white, bg_16, attr_override=_A_BOLD
         ),
         PAIR_STATION_DIM: ColorPairDef(
-            PAIR_STATION_DIM, 255, bg_256, fg_white, bg_16, attr_override=curses.A_DIM
+            PAIR_STATION_DIM, 255, bg_256, fg_white, bg_16, attr_override=_A_DIM
         ),
         PAIR_TRAIN_ON_TIME: ColorPairDef(
-            PAIR_TRAIN_ON_TIME, 255, bg_256, fg_white, bg_16, attr_override=curses.A_NORMAL
+            PAIR_TRAIN_ON_TIME, 255, bg_256, fg_white, bg_16, attr_override=_A_NORMAL
         ),
         PAIR_TRAIN_WARN: ColorPairDef(
-            PAIR_TRAIN_WARN, 255, bg_256, fg_white, bg_16, attr_override=curses.A_UNDERLINE | curses.A_BOLD
+            PAIR_TRAIN_WARN, 255, bg_256, fg_white, bg_16, attr_override=_A_UNDERLINE | _A_BOLD
         ),
         PAIR_TRAIN_ALERT: ColorPairDef(
-            PAIR_TRAIN_ALERT, 16, 255, fg_black, fg_white, attr_override=curses.A_REVERSE | curses.A_BOLD
+            PAIR_TRAIN_ALERT, 16, 255, fg_black, fg_white, attr_override=_A_REVERSE | _A_BOLD
         ),
         PAIR_TRAIN_PROAST: ColorPairDef(
-            PAIR_TRAIN_PROAST, 255, bg_256, fg_white, bg_16, attr_override=curses.A_NORMAL
+            PAIR_TRAIN_PROAST, 255, bg_256, fg_white, bg_16, attr_override=_A_NORMAL
         ),
         PAIR_TRAIN_FREIGHT: ColorPairDef(
-            PAIR_TRAIN_FREIGHT, 255, bg_256, fg_white, bg_16, attr_override=curses.A_DIM
+            PAIR_TRAIN_FREIGHT, 255, bg_256, fg_white, bg_16, attr_override=_A_DIM
         ),
         PAIR_TRAIN_HALTED: ColorPairDef(
-            PAIR_TRAIN_HALTED, 255, bg_256, fg_white, bg_16, attr_override=curses.A_DIM
+            PAIR_TRAIN_HALTED, 255, bg_256, fg_white, bg_16, attr_override=_A_DIM
         ),
         PAIR_ROSTER_SELECT: ColorPairDef(
-            PAIR_ROSTER_SELECT, 16, 255, fg_black, fg_white, attr_override=curses.A_REVERSE | curses.A_BOLD
+            PAIR_ROSTER_SELECT, 16, 255, fg_black, fg_white, attr_override=_A_REVERSE | _A_BOLD
         ),
         PAIR_TRAIL: ColorPairDef(
-            PAIR_TRAIL, 255, bg_256, fg_white, bg_16, attr_override=curses.A_DIM
+            PAIR_TRAIL, 255, bg_256, fg_white, bg_16, attr_override=_A_DIM
         ),
         PAIR_STATUS_BAR: ColorPairDef(
-            PAIR_STATUS_BAR, 16, 255, fg_black, fg_white, attr_override=curses.A_REVERSE
+            PAIR_STATUS_BAR, 16, 255, fg_black, fg_white, attr_override=_A_REVERSE
         ),
         PAIR_CONNECTED: ColorPairDef(
-            PAIR_CONNECTED, 255, bg_256, fg_white, bg_16, attr_override=curses.A_BOLD
+            PAIR_CONNECTED, 255, bg_256, fg_white, bg_16, attr_override=_A_BOLD
         ),
     }
     return ThemeSpec(

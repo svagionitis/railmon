@@ -112,6 +112,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p0-13-duplicate-train-numbers-disambiguation-fix-plan.md`](./plans/fixes/p0/p0-13-duplicate-train-numbers-disambiguation-fix-plan.md) | Duplicate train numbers disambiguation, multi-unit consist detection & stable roster ordering |
 | [`p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md`](./plans/fixes/p0/p0-14-shipping-cli-crashes-and-gtfs-from-db-out-dir-fix-plan.md) | Four shipping CLI bugs (`history bottlenecks`/`segments`/`trips` crashes & silent GTFS-RT `--from-db --out-dir` data loss) |
 | [`p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md`](./plans/fixes/p0/p0-15-desktop-notification-rce-and-web-spa-xss-fix-plan.md) | Arbitrary command/code execution (RCE) in desktop notifications (`watchdog.py`) & DOM-based XSS + strict CSP in Web SPA (`server/`) |
+| [`p0-16-packaging-watchdog-namespace-and-headless-curses-fix-plan.md`](./plans/fixes/p0/p0-16-packaging-watchdog-namespace-and-headless-curses-fix-plan.md) | Broken packaging (`watchdog.py` -> `railmon_watchdog.py` relocation, `pyproject.toml`, `.gitattributes`) & two-layer headless `curses` import crash (`tui/__init__.py`, `tui/theme.py`, `run_tui_mode`) |
 
 #### P1 — High-Priority Plans (`plans/fixes/p1/`)
 

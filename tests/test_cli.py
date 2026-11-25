@@ -208,6 +208,51 @@ class TestCLIDispatchAndLifecycle(unittest.TestCase):
                     archive_path=None,
                 )
 
+    @patch("train_tracker.is_tty_supported", return_value=True)
+    @patch("train_tracker.run_plain_stream_mode")
+    @patch("sys.platform", "linux")
+    def test_run_tui_mode_linux_missing_curses(self, mock_plain, mock_is_tty):
+        """Verify graceful plain-text fallback on Linux when _curses is unavailable."""
+        orig_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if "tui.app" in name or name in ("curses", "_curses"):
+                raise ModuleNotFoundError("No module named '_curses'", name="_curses")
+            return orig_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                train_tracker.run_tui_mode(demo=True)
+                err_out = mock_stderr.getvalue()
+                self.assertIn("curses", err_out.lower())
+                self.assertIn("python3-curses", err_out)
+                mock_plain.assert_called_once_with(
+                    source=TelemetrySource.DEMO,
+                    reconnect_delay=3.0,
+                    recording=RecordingMode.DISABLED,
+                    db_path="railway_history.db",
+                    deadband=DeadbandFilterMode.ENABLED,
+                    retention_days=None,
+                    archive_path=None,
+                )
+
+    @patch("train_tracker.is_tty_supported", return_value=True)
+    @patch("train_tracker.run_plain_stream_mode")
+    @patch("sys.platform", "linux")
+    def test_run_tui_mode_reraises_unrelated_import_error(self, mock_plain, mock_is_tty):
+        """Verify unrelated ImportError/ModuleNotFoundError is not masked as missing curses."""
+        orig_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tui.app":
+                raise ModuleNotFoundError("No module named 'nonexistent_dep'", name="nonexistent_dep")
+            return orig_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            with self.assertRaises(ModuleNotFoundError):
+                train_tracker.run_tui_mode(demo=True)
+            mock_plain.assert_not_called()
+
 
 class TestCLISchedulesResilience(unittest.TestCase):
     """Test suite for railmon schedules CLI resilience and error handling."""

@@ -1,4 +1,4 @@
-"""Unit tests for watchdog.py (F-6.3 Proximity & Delay Push Alerting Engine)."""
+"""Unit tests for railmon_watchdog.py (F-6.3 Proximity & Delay Push Alerting Engine)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from tui.geo import GeoPoint
-from watchdog import (
+from railmon_watchdog import (
     _DARWIN_NOTIFICATION_SCRIPT,
     _MAX_NOTIFICATION_BODY_LEN,
     _MAX_NOTIFICATION_TITLE_LEN,
@@ -492,9 +492,9 @@ class TestNotificationDispatchers(TestCase):
         data = json.loads(req.data.decode("utf-8"))
         self.assertIn("embeds", data)
 
-    @patch("watchdog.dispatch_terminal_bell")
-    @patch("watchdog.dispatch_desktop_notification")
-    @patch("watchdog.dispatch_webhook")
+    @patch("railmon_watchdog.dispatch_terminal_bell")
+    @patch("railmon_watchdog.dispatch_desktop_notification")
+    @patch("railmon_watchdog.dispatch_webhook")
     def test_dispatch_all_channels(
         self,
         mock_webhook: MagicMock,

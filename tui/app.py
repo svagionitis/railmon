@@ -1338,7 +1338,7 @@ class TUIApp:
                 is_error=False,
             )
             try:
-                from watchdog import dispatch_terminal_bell
+                from railmon_watchdog import dispatch_terminal_bell
 
                 dispatch_terminal_bell()
             except Exception as exc:
@@ -1349,7 +1349,7 @@ class TUIApp:
 
     def _evaluate_in_tui_watch_alerts(self, snapshot: StateSnapshot) -> None:
         """Evaluate active watchdog rules for watched trains and trigger in-TUI toasts/alerts."""
-        from watchdog import (
+        from railmon_watchdog import (
             WatchConfig,
             WatchdogEvaluator,
             dispatch_desktop_notification,
@@ -1750,7 +1750,7 @@ class TUIApp:
 
         if has_sensor_alert or has_conflict_alert:
             try:
-                from watchdog import dispatch_terminal_bell
+                from railmon_watchdog import dispatch_terminal_bell
 
                 dispatch_terminal_bell()
             except (OSError, RuntimeError, ImportError) as exc:

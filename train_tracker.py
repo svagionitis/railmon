@@ -2810,14 +2810,22 @@ def run_tui_mode(
         from tui.mock_engine import load_stations, load_tracks
         from tui.state import TrainStateStore
     except (ImportError, ModuleNotFoundError) as err:
-        if sys.platform == "win32" and "curses" in str(err).lower():
+        err_name = getattr(err, "name", None)
+        is_curses_missing = err_name in ("curses", "_curses") or "curses" in str(err).lower()
+        if is_curses_missing:
+            if sys.platform == "win32":
+                dep_label = "'windows-curses' on Windows"
+                install_hint = "run: pip install windows-curses"
+            else:
+                dep_label = "Python 'curses' (_curses)"
+                install_hint = "install your system python3-curses / ncurses package"
             logger.warning(
-                "windows-curses is not installed on Windows (%s). Falling back to headless mode.",
+                "Curses runtime is unavailable (%s). Falling back to headless mode.",
                 err,
             )
             print(
-                "\n[WARN] The interactive terminal dashboard (--tui) requires 'windows-curses' on Windows.\n"
-                "Falling back to plain-text stream mode. To enable TUI, run: pip install windows-curses\n",
+                f"\n[WARN] The interactive terminal dashboard (--tui) requires {dep_label}.\n"
+                f"Falling back to plain-text stream mode. To enable TUI, {install_hint}\n",
                 file=sys.stderr,
             )
             run_plain_stream_mode(
@@ -4002,7 +4010,11 @@ def _emit_watch_events(
     Returns:
         True if an arrival event fired and exit_on_arrival is requested, False otherwise.
     """
-    from watchdog import WatchTriggerType, dispatch_all_channels, format_watch_event_line
+    from railmon_watchdog import (
+        WatchTriggerType,
+        dispatch_all_channels,
+        format_watch_event_line,
+    )
 
     for event in events:
         if output_json:
@@ -4028,7 +4040,7 @@ def run_watch_mode(args: argparse.Namespace) -> int:
     Returns:
         Exit code: 0 on clean exit, 1 on error.
     """
-    from watchdog import (
+    from railmon_watchdog import (
         WatchConfig,
         WatchTriggerType,
         WatchdogEvaluator,

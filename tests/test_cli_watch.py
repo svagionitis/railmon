@@ -8,7 +8,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from train_tracker import TrainPosition, build_parser, run_watch_mode
-from watchdog import WatchTriggerType
+from railmon_watchdog import WatchTriggerType
 
 
 class TestCLIWatchParser(TestCase):
@@ -79,7 +79,7 @@ class TestCLIWatchExecution(TestCase):
             self.assertEqual(ret, 1)
             self.assertIn("Missing required argument", mock_err.getvalue())
 
-    @patch("watchdog.dispatch_all_channels")
+    @patch("railmon_watchdog.dispatch_all_channels")
     def test_run_watch_mode_json_output(self, mock_dispatch: MagicMock) -> None:
         pos = TrainPosition(
             id="t-52",
@@ -140,7 +140,7 @@ class TestCLIWatchExecution(TestCase):
                 self.assertEqual(record["train_number"], "IC 52")
                 self.assertEqual(record["trigger_type"], WatchTriggerType.DEPARTURE.value)
 
-    @patch("watchdog.dispatch_all_channels")
+    @patch("railmon_watchdog.dispatch_all_channels")
     def test_run_watch_mode_arrival_exit_once(self, mock_dispatch: MagicMock) -> None:
         # Train arrived at Thessaloniki station
         pos = TrainPosition(
