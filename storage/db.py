@@ -3,13 +3,13 @@ Database connection factory and transaction manager.
 """
 
 import contextlib
-from datetime import datetime
 import logging
 import os
 import sqlite3
 import threading
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
+from storage.models import parse_iso_utc_datetime
 from storage.schema import SchemaManager
 
 logger = logging.getLogger("railmon." + __name__)
@@ -23,16 +23,12 @@ _WAL_CHECKPOINT_SQL: Dict[str, str] = {
 
 
 def _convert_timestamp(val: bytes) -> Any:
-    """Safely convert SQLite TIMESTAMP bytes to datetime or string."""
+    """Safely convert SQLite TIMESTAMP bytes to UTC datetime or raw string."""
     s = val.decode("utf-8")
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        pass
-    try:
-        return datetime.fromisoformat(s.replace(" ", "T"))
-    except (ValueError, TypeError):
-        return s
+    parsed = parse_iso_utc_datetime(s)
+    if parsed is not None:
+        return parsed
+    return s
 
 
 sqlite3.register_converter("TIMESTAMP", _convert_timestamp)

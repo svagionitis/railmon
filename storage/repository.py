@@ -4,15 +4,18 @@ Historical data repository and analytical query engine for Hellenic Railways tel
 
 import csv
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import PurePath
-from typing import Any, Dict, Generator, List, Optional, TextIO, Tuple, Union
+import sqlite3
+import statistics
+import threading
+from typing import Any, Dict, Generator, List, Optional, Sequence, TextIO, Tuple, Union
 
 from storage.db import Database
-
-logger = logging.getLogger("railmon." + __name__)
 from storage.models import (
     BottleneckNode,
     BottleneckReport,
@@ -28,8 +31,23 @@ from storage.models import (
     StationDwellRecord,
     TelemetryHistoryRow,
     TripSummary,
+    canonicalize_iso_utc,
+    format_utc_iso,
+    iso_utc_now,
+    normalize_end_bound,
+    normalize_start_bound,
+    parse_iso_utc_datetime,
 )
 from train_tracker import TrainPosition
+
+logger = logging.getLogger("railmon." + __name__)
+
+MIN_SEGMENT_TRANSIT_SEC: float = 60.0       # Discard ~2s flip ticks, trailing flips, and GPS bounces
+MAX_SEGMENT_TRANSIT_SEC: float = 21600.0    # 6h upper sanity ceiling for inter-station transit
+NULL_SCHEDULE_TRIP_GAP_SEC: float = 3600.0  # 1h silence splits separate trips when schedule_id IS NULL
+SEGMENT_CRUISE_MIN_SPEED_KMH: float = 2.0   # Exclude stationary dwell rows from segment cruise speed
+DEFAULT_ARCHIVE_CHUNK_SIZE: int = 5000      # Bounded rows per archival transaction chunk
+SQLITE_IN_CLAUSE_CHUNK_SIZE: int = 500      # Strictly below SQLITE_MAX_VARIABLE_NUMBER (999)
 
 
 def validate_export_path(
@@ -125,45 +143,109 @@ def sanitize_train_identifier(raw_identifier: Optional[str]) -> str:
 
 
 def _epoch_to_iso_utc(epoch_sec: float) -> str:
-    """Convert a POSIX epoch timestamp in seconds to an ISO-8601 UTC string with 'Z' suffix."""
+    """Convert a POSIX epoch timestamp in seconds to canonical 27-char UTC ISO-8601 (.ffffffZ)."""
     try:
-        return datetime.fromtimestamp(float(epoch_sec), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        fval = float(epoch_sec)
+        if not math.isfinite(fval):
+            return iso_utc_now()
+        return format_utc_iso(datetime.fromtimestamp(fval, tz=timezone.utc))
     except (ValueError, TypeError, OSError, OverflowError):
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return iso_utc_now()
 
 
 def parse_iso_to_epoch(val: Any) -> float:
-    """Convert an ISO-8601 timestamp string or datetime object to a UTC POSIX epoch float."""
-    if val is None:
+    """Convert an ISO-8601 timestamp string, datetime, or epoch number to UTC POSIX epoch float."""
+    if val is None or isinstance(val, bool):
         return 0.0
     if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, datetime):
-        dt = val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    s = str(val).strip()
-    if not s:
+        fval = float(val)
+        return fval if math.isfinite(fval) else 0.0
+    parsed = parse_iso_utc_datetime(val)
+    if parsed is None:
         return 0.0
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    elif " " in s and "T" not in s:
-        s = s.replace(" ", "T")
-    try:
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except (ValueError, TypeError):
+    return parsed.timestamp()
+
+
+def _canon_ts_sql(col: str) -> str:
+    """Return a SQLite expression normalizing legacy/canonical UTC ISO-8601 TEXT to 27-char .ffffffZ."""
+    return (
+        f"CASE "
+        f"WHEN LENGTH({col}) = 27 AND SUBSTR({col}, 20, 1) = '.' AND SUBSTR({col}, 27, 1) = 'Z' "
+        f"  THEN {col} "
+        f"WHEN LENGTH({col}) = 20 AND SUBSTR({col}, 20, 1) = 'Z' "
+        f"  THEN SUBSTR({col}, 1, 19) || '.000000Z' "
+        f"WHEN SUBSTR({col}, 20, 1) = '.' AND SUBSTR({col}, -1, 1) = 'Z' AND LENGTH({col}) BETWEEN 22 AND 26 "
+        f"  THEN SUBSTR(SUBSTR({col}, 1, LENGTH({col}) - 1) || '000000', 1, 26) || 'Z' "
+        f"ELSE COALESCE(STRFTIME('%Y-%m-%dT%H:%M:%f', {col}) || '000Z', {col}) "
+        f"END"
+    )
+
+
+def _append_recorded_at_filters(
+    clauses: List[str],
+    params: List[Any],
+    col: str,
+    start_bound: Optional[str],
+    end_bound: Optional[str],
+    include_start: bool = True,
+    include_end: bool = True,
+) -> None:
+    """Append sargable coarse B-tree envelope + exact canonical timestamp predicates."""
+    canon_expr = _canon_ts_sql(col)
+    if start_bound is not None:
+        start_canon = normalize_start_bound(start_bound)
+        if start_canon:
+            clauses.append(f"{col} >= ?")
+            params.append(start_canon[:19])
+            op = ">=" if include_start else ">"
+            clauses.append(f"({canon_expr}) {op} ?")
+            params.append(start_canon)
+    if end_bound is not None:
+        end_canon = normalize_end_bound(end_bound)
+        if end_canon:
+            clauses.append(f"{col} <= ?")
+            params.append(f"{end_canon[:19]}Z")
+            op = "<=" if include_end else "<"
+            clauses.append(f"({canon_expr}) {op} ?")
+            params.append(end_canon)
+
+
+def _iter_chunks(
+    items: Sequence[Any],
+    chunk_size: int = SQLITE_IN_CLAUSE_CHUNK_SIZE,
+) -> Generator[Sequence[Any], None, None]:
+    """Yield bounded contiguous slices of items to stay under SQLITE_MAX_VARIABLE_NUMBER."""
+    step = max(1, int(chunk_size))
+    for idx in range(0, len(items), step):
+        yield items[idx : idx + step]
+
+
+def _compute_percentile(sorted_values: Sequence[float], fraction: float) -> float:
+    """Compute linear-interpolated percentile on a non-empty sorted numeric sequence."""
+    n = len(sorted_values)
+    if n == 0:
         return 0.0
+    if n == 1:
+        return float(sorted_values[0])
+    pos = max(0.0, min(float(n - 1), float(fraction) * float(n - 1)))
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(sorted_values[lo])
+    weight = pos - float(lo)
+    return float(sorted_values[lo]) + weight * (float(sorted_values[hi]) - float(sorted_values[lo]))
+
+
+def _compute_archive_row_digest(payload_16: Tuple[Any, ...]) -> str:
+    """Compute deterministic SHA-256 content digest for a 16-column archived telemetry payload."""
+    serialized = json.dumps(payload_16, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _build_replay_observation(row: Any) -> ReplayObservation:
     """Construct a ReplayObservation and enriched TrainPosition from a joined SQLite row."""
     rec_raw = row["recorded_at"]
-    if hasattr(rec_raw, "isoformat"):
-        rec_iso = rec_raw.isoformat().replace("+00:00", "Z")
-    else:
-        rec_iso = str(rec_raw).replace("+00:00", "Z")
+    rec_iso = canonicalize_iso_utc(rec_raw)
     rec_epoch = parse_iso_to_epoch(rec_raw)
 
     train_no = str(row["train_number"]).strip() or "Unknown"
@@ -523,24 +605,27 @@ class HistoricalRepository:
         if order_upper not in ("ASC", "DESC"):
             raise ValueError(f"Invalid order '{order}': must be 'ASC' or 'DESC'")
 
+        canon_expr = _canon_ts_sql("recorded_at")
+        where_clauses: List[str] = ["train_number = ?"]
+        params: List[Any] = [train_number]
+        _append_recorded_at_filters(
+            where_clauses,
+            params,
+            col="recorded_at",
+            start_bound=start_time,
+            end_bound=end_time,
+            include_start=True,
+            include_end=True,
+        )
+
         query_parts = [
             "SELECT id, train_number, schedule_id, recorded_at, lat, lng, speed, course,",
             "       track_heading, altitude, delay_min, status, progress, chainage_m,",
             "       dist_to_dest_m, next_station, corridor",
             "FROM telemetry_history",
-            "WHERE train_number = ?",
+            "WHERE " + " AND ".join(where_clauses),
+            f"ORDER BY ({canon_expr}) {order_upper}, id {order_upper}",
         ]
-        params: List[Any] = [train_number]
-
-        if start_time is not None:
-            query_parts.append("AND recorded_at >= ?")
-            params.append(start_time)
-
-        if end_time is not None:
-            query_parts.append("AND recorded_at <= ?")
-            params.append(end_time)
-
-        query_parts.append(f"ORDER BY recorded_at {order_upper}")
 
         if limit is not None:
             if limit < 0:
@@ -571,25 +656,27 @@ class HistoricalRepository:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
 
-        query_parts = [
-            "SELECT id, train_number, schedule_id, recorded_at, lat, lng, speed, course,",
-            "       track_heading, altitude, delay_min, status, progress, chainage_m,",
-            "       dist_to_dest_m, next_station, corridor",
-            "FROM telemetry_history",
-            "WHERE train_number = ?",
-        ]
+        canon_expr = _canon_ts_sql("recorded_at")
+        where_clauses: List[str] = ["train_number = ?"]
         params: List[Any] = [train_number]
+        _append_recorded_at_filters(
+            where_clauses,
+            params,
+            col="recorded_at",
+            start_bound=start_time,
+            end_bound=end_time,
+            include_start=True,
+            include_end=True,
+        )
 
-        if start_time is not None:
-            query_parts.append("AND recorded_at >= ?")
-            params.append(start_time)
-
-        if end_time is not None:
-            query_parts.append("AND recorded_at <= ?")
-            params.append(end_time)
-
-        query_parts.append("ORDER BY recorded_at ASC;")
-        sql = " ".join(query_parts)
+        sql = (
+            "SELECT id, train_number, schedule_id, recorded_at, lat, lng, speed, course, "
+            "       track_heading, altitude, delay_min, status, progress, chainage_m, "
+            "       dist_to_dest_m, next_station, corridor "
+            "FROM telemetry_history "
+            f"WHERE {' AND '.join(where_clauses)} "
+            f"ORDER BY ({canon_expr}) ASC, id ASC;"
+        )
 
         with self.db.connection() as conn:
             cur = conn.cursor()
@@ -619,20 +706,32 @@ class HistoricalRepository:
         Returns:
             ReplayBounds if the database contains matching telemetry rows, else None.
         """
-        sql = """
-        SELECT
-            MIN(recorded_at) AS min_ts,
-            MAX(recorded_at) AS max_ts,
-            COUNT(*) AS total_rows,
-            COUNT(DISTINCT train_number) AS total_trains
-        FROM telemetry_history
-        WHERE (? IS NULL OR recorded_at >= ?)
-          AND (? IS NULL OR recorded_at <= ?);
-        """
+        canon_expr = _canon_ts_sql("recorded_at")
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        _append_recorded_at_filters(
+            where_clauses,
+            params,
+            col="recorded_at",
+            start_bound=start_time,
+            end_bound=end_time,
+            include_start=True,
+            include_end=True,
+        )
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql = (
+            "SELECT "
+            f"MIN({canon_expr}) AS min_ts, "
+            f"MAX({canon_expr}) AS max_ts, "
+            "COUNT(*) AS total_rows, "
+            "COUNT(DISTINCT train_number) AS total_trains "
+            "FROM telemetry_history "
+            f"{where_sql};"
+        )
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
-                cur.execute(sql, (start_time, start_time, end_time, end_time))
+                cur.execute(sql, params)
                 row = cur.fetchone()
             finally:
                 cur.close()
@@ -642,8 +741,8 @@ class HistoricalRepository:
 
         min_iso = self._iso_or_str(row["min_ts"])
         max_iso = self._iso_or_str(row["max_ts"])
-        min_ep = parse_iso_to_epoch(row["min_ts"])
-        max_ep = max(min_ep, parse_iso_to_epoch(row["max_ts"]))
+        min_ep = parse_iso_to_epoch(min_iso)
+        max_ep = max(min_ep, parse_iso_to_epoch(max_iso))
 
         return ReplayBounds(
             min_recorded_at=min_iso,
@@ -670,9 +769,21 @@ class HistoricalRepository:
             include_start: If True, uses `recorded_at >= start_time`; else `recorded_at > start_time`.
 
         Returns:
-            List of ReplayObservation objects ordered by (recorded_at ASC, id ASC).
+            List of ReplayObservation objects ordered by (canonical recorded_at ASC, id ASC).
         """
-        op = ">=" if include_start else ">"
+        canon_expr = _canon_ts_sql("th.recorded_at")
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        _append_recorded_at_filters(
+            where_clauses,
+            params,
+            col="th.recorded_at",
+            start_bound=start_time,
+            end_bound=end_time,
+            include_start=include_start,
+            include_end=True,
+        )
+        where_sql = " AND ".join(where_clauses)
         sql = (
             "SELECT "
             "th.id, th.train_number, th.schedule_id, th.recorded_at, th.lat, th.lng, "
@@ -684,13 +795,13 @@ class HistoricalRepository:
             "FROM telemetry_history th "
             "LEFT JOIN trains t ON th.train_number = t.train_number "
             "LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id "
-            f"WHERE th.recorded_at {op} ? AND th.recorded_at <= ? "
-            "ORDER BY th.recorded_at ASC, th.id ASC;"
+            f"WHERE {where_sql} "
+            f"ORDER BY ({canon_expr}) ASC, th.id ASC;"
         )
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
-                cur.execute(sql, (start_time, end_time))
+                cur.execute(sql, params)
                 return [_build_replay_observation(r) for r in cur.fetchall()]
             finally:
                 cur.close()
@@ -723,56 +834,57 @@ class HistoricalRepository:
         """Load scheduled_trips and schedule_stops metadata for GTFS-RT TripUpdates."""
         if not schedule_ids:
             return {}
-        placeholders = ",".join("?" for _ in schedule_ids)
         schedules: Dict[str, Dict[str, Any]] = {}
 
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
-                cur.execute(
-                    f"SELECT schedule_id, train_number, origin, destination, corridor, "
-                    f"scheduled_departure, scheduled_arrival "
-                    f"FROM scheduled_trips WHERE schedule_id IN ({placeholders});",
-                    schedule_ids,
-                )
-                for r in cur.fetchall():
-                    sid = str(r["schedule_id"])
-                    schedules[sid] = {
-                        "scheduleId": sid,
-                        "trainNumber": str(r["train_number"]),
-                        "origin": r["origin"],
-                        "destination": r["destination"],
-                        "corridor": r["corridor"],
-                        "scheduledDeparture": self._iso_or_raw(r["scheduled_departure"]),
-                        "scheduledArrival": self._iso_or_raw(r["scheduled_arrival"]),
-                        "stops": [],
-                    }
-
-                cur.execute(
-                    f"SELECT schedule_id, stop_sequence, station_id, station_name, "
-                    f"scheduled_arrival, scheduled_departure, actual_arrival, "
-                    f"actual_departure, platform, delay_sec "
-                    f"FROM schedule_stops WHERE schedule_id IN ({placeholders}) "
-                    f"ORDER BY schedule_id ASC, stop_sequence ASC;",
-                    schedule_ids,
-                )
-                for s in cur.fetchall():
-                    sid = str(s["schedule_id"])
-                    if sid not in schedules:
-                        schedules[sid] = {"scheduleId": sid, "stops": []}
-                    schedules[sid]["stops"].append(
-                        {
-                            "stop_sequence": int(s["stop_sequence"]),
-                            "station_id": s["station_id"],
-                            "station_name": str(s["station_name"]),
-                            "scheduled_arrival": self._iso_or_raw(s["scheduled_arrival"]),
-                            "scheduled_departure": self._iso_or_raw(s["scheduled_departure"]),
-                            "actual_arrival": self._iso_or_raw(s["actual_arrival"]),
-                            "actual_departure": self._iso_or_raw(s["actual_departure"]),
-                            "platform": s["platform"],
-                            "delay_sec": int(s["delay_sec"] or 0),
-                        }
+                for id_chunk in _iter_chunks(schedule_ids, SQLITE_IN_CLAUSE_CHUNK_SIZE):
+                    placeholders = ",".join("?" for _ in id_chunk)
+                    cur.execute(
+                        f"SELECT schedule_id, train_number, origin, destination, corridor, "
+                        f"scheduled_departure, scheduled_arrival "
+                        f"FROM scheduled_trips WHERE schedule_id IN ({placeholders});",
+                        tuple(id_chunk),
                     )
+                    for r in cur.fetchall():
+                        sid = str(r["schedule_id"])
+                        schedules[sid] = {
+                            "scheduleId": sid,
+                            "trainNumber": str(r["train_number"]),
+                            "origin": r["origin"],
+                            "destination": r["destination"],
+                            "corridor": r["corridor"],
+                            "scheduledDeparture": self._iso_or_raw(r["scheduled_departure"]),
+                            "scheduledArrival": self._iso_or_raw(r["scheduled_arrival"]),
+                            "stops": [],
+                        }
+
+                    cur.execute(
+                        f"SELECT schedule_id, stop_sequence, station_id, station_name, "
+                        f"scheduled_arrival, scheduled_departure, actual_arrival, "
+                        f"actual_departure, platform, delay_sec "
+                        f"FROM schedule_stops WHERE schedule_id IN ({placeholders}) "
+                        f"ORDER BY schedule_id ASC, stop_sequence ASC;",
+                        tuple(id_chunk),
+                    )
+                    for s in cur.fetchall():
+                        sid = str(s["schedule_id"])
+                        if sid not in schedules:
+                            schedules[sid] = {"scheduleId": sid, "stops": []}
+                        schedules[sid]["stops"].append(
+                            {
+                                "stop_sequence": int(s["stop_sequence"]),
+                                "station_id": s["station_id"],
+                                "station_name": str(s["station_name"]),
+                                "scheduled_arrival": self._iso_or_raw(s["scheduled_arrival"]),
+                                "scheduled_departure": self._iso_or_raw(s["scheduled_departure"]),
+                                "actual_arrival": self._iso_or_raw(s["actual_arrival"]),
+                                "actual_departure": self._iso_or_raw(s["actual_departure"]),
+                                "platform": s["platform"],
+                                "delay_sec": int(s["delay_sec"] or 0),
+                            }
+                        )
             finally:
                 cur.close()
         return schedules
@@ -889,43 +1001,50 @@ class HistoricalRepository:
 
         Args:
             corridor: Filter by corridor (None returns all corridors).
-            start_date: ISO date 'YYYY-MM-DD' or timestamp lower bound.
-            end_date: ISO date 'YYYY-MM-DD' or timestamp upper bound.
+            start_date: ISO date 'YYYY-MM-DD' or timestamp lower bound (inclusive).
+            end_date: ISO date 'YYYY-MM-DD' or timestamp upper bound (inclusive through 23:59:59.999999Z).
             on_time_threshold_min: Max minutes of delay considered 'on-time' (default: 5).
 
         Returns:
             List of CorridorPunctualitySummary records sorted by punctuality percentage.
         """
-        query = """
-        SELECT 
-            corridor,
-            COUNT(DISTINCT train_number) AS total_trips,
-            COUNT(*) AS total_observations,
-            ROUND(AVG(delay_min), 1) AS avg_delay_min,
-            MAX(delay_min) AS max_delay_min,
-            SUM(CASE WHEN delay_min <= ? THEN 1 ELSE 0 END) AS on_time_count,
-            SUM(CASE WHEN delay_min > ? THEN 1 ELSE 0 END) AS delayed_count,
-            SUM(CASE WHEN delay_min >= 30 THEN 1 ELSE 0 END) AS severe_delay_count,
-            ROUND(100.0 * SUM(CASE WHEN delay_min <= ? THEN 1 ELSE 0 END) / COUNT(*), 1) AS punctuality_rate_pct
-        FROM telemetry_history
-        WHERE corridor IS NOT NULL
-          AND (? IS NULL OR corridor = ?)
-          AND (? IS NULL OR recorded_at >= ?)
-          AND (? IS NULL OR recorded_at <= ?)
-        GROUP BY corridor
-        ORDER BY punctuality_rate_pct DESC, avg_delay_min ASC;
-        """
-        params = (
-            on_time_threshold_min,
-            on_time_threshold_min,
-            on_time_threshold_min,
-            corridor,
-            corridor,
-            start_date,
-            start_date,
-            end_date,
-            end_date,
+        where_clauses: List[str] = ["corridor IS NOT NULL"]
+        where_params: List[Any] = []
+        if corridor is not None:
+            where_clauses.append("corridor = ?")
+            where_params.append(corridor)
+        _append_recorded_at_filters(
+            where_clauses,
+            where_params,
+            col="recorded_at",
+            start_bound=start_date,
+            end_bound=end_date,
+            include_start=True,
+            include_end=True,
         )
+
+        query = (
+            "SELECT "
+            "corridor, "
+            "COUNT(DISTINCT train_number) AS total_trips, "
+            "COUNT(*) AS total_observations, "
+            "ROUND(AVG(delay_min), 1) AS avg_delay_min, "
+            "MAX(delay_min) AS max_delay_min, "
+            "SUM(CASE WHEN delay_min <= ? THEN 1 ELSE 0 END) AS on_time_count, "
+            "SUM(CASE WHEN delay_min > ? THEN 1 ELSE 0 END) AS delayed_count, "
+            "SUM(CASE WHEN delay_min >= 30 THEN 1 ELSE 0 END) AS severe_delay_count, "
+            "ROUND(100.0 * SUM(CASE WHEN delay_min <= ? THEN 1 ELSE 0 END) / COUNT(*), 1) AS punctuality_rate_pct "
+            "FROM telemetry_history "
+            f"WHERE {' AND '.join(where_clauses)} "
+            "GROUP BY corridor "
+            "ORDER BY punctuality_rate_pct DESC, avg_delay_min ASC;"
+        )
+        params: List[Any] = [
+            on_time_threshold_min,
+            on_time_threshold_min,
+            on_time_threshold_min,
+            *where_params,
+        ]
 
         with self.db.connection() as conn:
             cur = conn.cursor()
@@ -953,23 +1072,25 @@ class HistoricalRepository:
         """
         Extract speed, elevation, and chainage profile along track distance.
         """
-        query_parts = [
-            "SELECT recorded_at, speed, lat, lng, chainage_m, dist_to_dest_m, altitude",
-            "FROM telemetry_history",
-            "WHERE train_number = ?",
-        ]
+        canon_expr = _canon_ts_sql("recorded_at")
+        where_clauses: List[str] = ["train_number = ?"]
         params: List[Any] = [train_number]
+        _append_recorded_at_filters(
+            where_clauses,
+            params,
+            col="recorded_at",
+            start_bound=start_time,
+            end_bound=end_time,
+            include_start=True,
+            include_end=True,
+        )
 
-        if start_time is not None:
-            query_parts.append("AND recorded_at >= ?")
-            params.append(start_time)
-
-        if end_time is not None:
-            query_parts.append("AND recorded_at <= ?")
-            params.append(end_time)
-
-        query_parts.append("ORDER BY recorded_at ASC;")
-        sql = " ".join(query_parts)
+        sql = (
+            "SELECT recorded_at, speed, lat, lng, chainage_m, dist_to_dest_m, altitude "
+            "FROM telemetry_history "
+            f"WHERE {' AND '.join(where_clauses)} "
+            f"ORDER BY ({canon_expr}) ASC, id ASC;"
+        )
 
         with self.db.connection() as conn:
             cur = conn.cursor()
@@ -991,25 +1112,47 @@ class HistoricalRepository:
         Detect station dwell events by identifying contiguous stationary intervals
         grouped by reported next_station name.
         """
-        query = """
-        WITH annotated AS (
+        canon_expr = _canon_ts_sql("recorded_at")
+        where_clauses: List[str] = ["train_number = ?"]
+        where_params: List[Any] = [train_number]
+        _append_recorded_at_filters(
+            where_clauses,
+            where_params,
+            col="recorded_at",
+            start_bound=start_time,
+            end_bound=end_time,
+            include_start=True,
+            include_end=True,
+        )
+        where_sql = " AND ".join(where_clauses)
+        query = f"""
+        WITH base AS (
             SELECT
                 id,
                 train_number,
                 schedule_id,
                 next_station AS station_name,
-                recorded_at,
-                COALESCE(delay_min, 0) AS delay_min,
-                CASE WHEN speed <= ? AND next_station IS NOT NULL THEN 1 ELSE 0 END AS is_stopped,
-                LAG(CASE WHEN speed <= ? AND next_station IS NOT NULL THEN 1 ELSE 0 END, 1, 0)
-                    OVER (ORDER BY recorded_at ASC, id ASC) AS prev_stopped,
-                LAG(next_station) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_station,
-                LAG(schedule_id) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_schedule,
-                LAG(recorded_at) OVER (ORDER BY recorded_at ASC, id ASC) AS prev_recorded_at
+                ({canon_expr}) AS canon_ts,
+                speed,
+                COALESCE(delay_min, 0) AS delay_min
             FROM telemetry_history
-            WHERE train_number = ?
-              AND (? IS NULL OR recorded_at >= ?)
-              AND (? IS NULL OR recorded_at <= ?)
+            WHERE {where_sql}
+        ),
+        annotated AS (
+            SELECT
+                id,
+                train_number,
+                schedule_id,
+                station_name,
+                canon_ts AS recorded_at,
+                delay_min,
+                CASE WHEN speed <= ? AND station_name IS NOT NULL THEN 1 ELSE 0 END AS is_stopped,
+                LAG(CASE WHEN speed <= ? AND station_name IS NOT NULL THEN 1 ELSE 0 END, 1, 0)
+                    OVER (ORDER BY canon_ts ASC, id ASC) AS prev_stopped,
+                LAG(station_name) OVER (ORDER BY canon_ts ASC, id ASC) AS prev_station,
+                LAG(schedule_id) OVER (ORDER BY canon_ts ASC, id ASC) AS prev_schedule,
+                LAG(canon_ts) OVER (ORDER BY canon_ts ASC, id ASC) AS prev_recorded_at
+            FROM base
         ),
         islands AS (
             SELECT
@@ -1058,16 +1201,12 @@ class HistoricalRepository:
         HAVING dwell_seconds >= ?
         ORDER BY arrival_time ASC;
         """
-        params = (
+        params: List[Any] = [
+            *where_params,
             speed_threshold_kmh,
             speed_threshold_kmh,
-            train_number,
-            start_time,
-            start_time,
-            end_time,
-            end_time,
             min_dwell_sec,
-        )
+        ]
 
         with self.db.connection() as conn:
             cur = conn.cursor()
@@ -1076,6 +1215,35 @@ class HistoricalRepository:
                 return [StationDwellRecord.from_db_row(row) for row in cur.fetchall()]
             finally:
                 cur.close()
+
+    @staticmethod
+    def _build_analytics_filters(
+        corridor: Optional[str],
+        start_ts: Optional[str],
+        end_ts: Optional[str],
+        train_type: Optional[str],
+    ) -> Tuple[str, List[Any]]:
+        """Build dynamic sargable WHERE clause and bound params for corridor analytics queries."""
+        clauses: List[str] = ["1 = 1"]
+        params: List[Any] = []
+        if corridor:
+            corr_like = f"%{corridor}%"
+            clauses.append("(st.corridor LIKE ? OR th.corridor LIKE ?)")
+            params.extend([corr_like, corr_like])
+        _append_recorded_at_filters(
+            clauses,
+            params,
+            col="th.recorded_at",
+            start_bound=start_ts,
+            end_bound=end_ts,
+            include_start=True,
+            include_end=True,
+        )
+        if train_type:
+            type_like = f"%{train_type}%"
+            clauses.append("(t.train_type LIKE ? OR t.service_type LIKE ?)")
+            params.extend([type_like, type_like])
+        return " AND ".join(clauses), params
 
     def get_corridor_bottlenecks(
         self,
@@ -1103,36 +1271,30 @@ class HistoricalRepository:
         Returns:
             BottleneckReport containing metadata and ranked BottleneckNode entries.
         """
-        start_ts = f"{start_date}T00:00:00Z" if start_date and len(start_date) == 10 else start_date
-        end_ts = f"{end_date}T23:59:59Z" if end_date and len(end_date) == 10 else end_date
+        start_ts = normalize_start_bound(start_date)
+        end_ts = normalize_end_bound(end_date)
+        where_sql, base_params = self._build_analytics_filters(
+            corridor=corridor,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            train_type=train_type,
+        )
+        canon_expr = _canon_ts_sql("th.recorded_at")
 
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
                 # 1. Total trips and observations analyzed
-                count_query = """
+                count_query = f"""
                 SELECT
                     COUNT(DISTINCT th.train_number || '_' || COALESCE(th.schedule_id, '')) AS total_trips,
                     COUNT(th.id) AS total_obs
                 FROM telemetry_history th
                 LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
                 LEFT JOIN trains t ON th.train_number = t.train_number
-                WHERE (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
-                  AND (? IS NULL OR th.recorded_at >= ?)
-                  AND (? IS NULL OR th.recorded_at <= ?)
-                  AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                WHERE {where_sql};
                 """
-                corridor_param = f"%{corridor}%" if corridor else None
-                type_param = f"%{train_type}%" if train_type else None
-                cur.execute(
-                    count_query,
-                    (
-                        corridor_param, corridor_param, corridor_param,
-                        start_ts, start_ts,
-                        end_ts, end_ts,
-                        type_param, type_param, type_param,
-                    ),
-                )
+                cur.execute(count_query, base_params)
                 cnt_row = cur.fetchone()
                 total_trips = cnt_row[0] if cnt_row else 0
                 total_obs = cnt_row[1] if cnt_row else 0
@@ -1149,27 +1311,35 @@ class HistoricalRepository:
 
                 # 2. Extract dwell events and delay deltas per station node
                 # Island clustering on stopped intervals (speed <= 2.0 km/h)
-                dwell_query = """
-                WITH annotated AS (
+                dwell_query = f"""
+                WITH base_rows AS (
                     SELECT
                         th.id,
                         th.train_number,
                         th.schedule_id,
                         th.next_station AS station_name,
-                        th.recorded_at,
-                        COALESCE(th.delay_min, 0) AS delay_min,
-                        CASE WHEN th.speed <= 2.0 AND th.next_station IS NOT NULL AND th.next_station != '' THEN 1 ELSE 0 END AS is_stopped,
-                        LAG(CASE WHEN th.speed <= 2.0 AND th.next_station IS NOT NULL AND th.next_station != '' THEN 1 ELSE 0 END, 1, 0)
-                            OVER (PARTITION BY th.train_number, th.schedule_id ORDER BY th.recorded_at ASC, th.id ASC) AS prev_stopped,
-                        LAG(th.next_station) OVER (PARTITION BY th.train_number, th.schedule_id ORDER BY th.recorded_at ASC, th.id ASC) AS prev_station,
-                        LAG(th.recorded_at) OVER (PARTITION BY th.train_number, th.schedule_id ORDER BY th.recorded_at ASC, th.id ASC) AS prev_recorded_at
+                        ({canon_expr}) AS canon_ts,
+                        th.speed,
+                        COALESCE(th.delay_min, 0) AS delay_min
                     FROM telemetry_history th
                     LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
                     LEFT JOIN trains t ON th.train_number = t.train_number
-                    WHERE (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
-                      AND (? IS NULL OR th.recorded_at >= ?)
-                      AND (? IS NULL OR th.recorded_at <= ?)
-                      AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                    WHERE {where_sql}
+                ),
+                annotated AS (
+                    SELECT
+                        id,
+                        train_number,
+                        schedule_id,
+                        station_name,
+                        canon_ts AS recorded_at,
+                        delay_min,
+                        CASE WHEN speed <= 2.0 AND station_name IS NOT NULL AND station_name != '' THEN 1 ELSE 0 END AS is_stopped,
+                        LAG(CASE WHEN speed <= 2.0 AND station_name IS NOT NULL AND station_name != '' THEN 1 ELSE 0 END, 1, 0)
+                            OVER (PARTITION BY train_number, schedule_id ORDER BY canon_ts ASC, id ASC) AS prev_stopped,
+                        LAG(station_name) OVER (PARTITION BY train_number, schedule_id ORDER BY canon_ts ASC, id ASC) AS prev_station,
+                        LAG(canon_ts) OVER (PARTITION BY train_number, schedule_id ORDER BY canon_ts ASC, id ASC) AS prev_recorded_at
+                    FROM base_rows
                 ),
                 islands AS (
                     SELECT
@@ -1228,23 +1398,14 @@ class HistoricalRepository:
                     MAX(dep_delay) AS max_delay
                 FROM dwell_events
                 GROUP BY station_name
-                HAVING COUNT(*) >= ?
+                HAVING COUNT(*) >= ?;
                 """
-                cur.execute(
-                    dwell_query,
-                    (
-                        corridor_param, corridor_param, corridor_param,
-                        start_ts, start_ts,
-                        end_ts, end_ts,
-                        type_param, type_param, type_param,
-                        min_trips,
-                    ),
-                )
+                cur.execute(dwell_query, [*base_params, min_trips])
                 station_rows = cur.fetchall()
 
                 # Also collect delay distribution for percentiles per station
                 station_delays: Dict[str, List[float]] = {}
-                delay_sample_query = """
+                delay_sample_query = f"""
                 SELECT
                     th.next_station,
                     COALESCE(th.delay_min, 0)
@@ -1252,20 +1413,9 @@ class HistoricalRepository:
                 LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
                 LEFT JOIN trains t ON th.train_number = t.train_number
                 WHERE th.next_station IS NOT NULL AND th.next_station != ''
-                  AND (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
-                  AND (? IS NULL OR th.recorded_at >= ?)
-                  AND (? IS NULL OR th.recorded_at <= ?)
-                  AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                  AND {where_sql};
                 """
-                cur.execute(
-                    delay_sample_query,
-                    (
-                        corridor_param, corridor_param, corridor_param,
-                        start_ts, start_ts,
-                        end_ts, end_ts,
-                        type_param, type_param, type_param,
-                    ),
-                )
+                cur.execute(delay_sample_query, base_params)
                 for stn, dly in cur.fetchall():
                     if stn not in station_delays:
                         station_delays[stn] = []
@@ -1354,53 +1504,140 @@ class HistoricalRepository:
     def _extract_segment_transition_samples(
         self,
         cur: Any,
-        params: Tuple[Any, ...],
+        where_sql: str,
+        base_params: Sequence[Any],
     ) -> Dict[Tuple[str, str, str], List[Dict[str, float]]]:
-        """Helper to extract station transition records from telemetry cursor."""
-        segment_query = """
-        WITH lag_annotated AS (
+        """Extract contiguous next_station run-island transit samples from telemetry cursor."""
+        canon_expr = _canon_ts_sql("th.recorded_at")
+        segment_query = f"""
+        WITH base_rows AS (
             SELECT
+                th.id,
                 th.train_number,
                 COALESCE(th.schedule_id, '') AS sched_id,
-                COALESCE(st.corridor, th.corridor, 'PATHE') AS corr,
-                th.next_station AS current_next,
-                LAG(th.next_station) OVER (
-                    PARTITION BY th.train_number, COALESCE(th.schedule_id, '')
-                    ORDER BY th.recorded_at ASC
-                ) AS prev_next,
-                LAG(th.recorded_at) OVER (
-                    PARTITION BY th.train_number, COALESCE(th.schedule_id, '')
-                    ORDER BY th.recorded_at ASC
-                ) AS prev_recorded_at,
-                th.recorded_at,
+                COALESCE(NULLIF(st.corridor, ''), NULLIF(th.corridor, ''), 'UNKNOWN') AS corr,
+                TRIM(th.next_station) AS current_next,
+                ({canon_expr}) AS canon_ts,
                 th.speed,
                 COALESCE(th.delay_min, 0) AS delay
             FROM telemetry_history th
             LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
             LEFT JOIN trains t ON th.train_number = t.train_number
-            WHERE (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
-              AND (? IS NULL OR th.recorded_at >= ?)
-              AND (? IS NULL OR th.recorded_at <= ?)
-              AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+            WHERE {where_sql}
               AND th.next_station IS NOT NULL
-              AND trim(th.next_station) != ''
+              AND TRIM(th.next_station) != ''
         ),
-        segment_events AS (
+        lagged_rows AS (
             SELECT
+                id,
                 train_number,
                 sched_id,
                 corr,
-                prev_next AS from_stn,
-                current_next AS to_stn,
-                MIN(prev_recorded_at) AS transit_start,
-                MAX(recorded_at) AS transit_end,
-                AVG(speed) AS segment_speed,
-                MIN(delay) AS start_delay,
-                MAX(delay) AS end_delay
-            FROM lag_annotated
-            WHERE prev_next IS NOT NULL
-              AND prev_next != current_next
-            GROUP BY train_number, sched_id, corr, prev_next, current_next
+                current_next,
+                canon_ts,
+                speed,
+                delay,
+                LAG(current_next) OVER (
+                    PARTITION BY train_number, sched_id
+                    ORDER BY canon_ts ASC, id ASC
+                ) AS prev_next,
+                LAG(canon_ts) OVER (
+                    PARTITION BY train_number, sched_id
+                    ORDER BY canon_ts ASC, id ASC
+                ) AS prev_ts
+            FROM base_rows
+        ),
+        sessionized AS (
+            SELECT
+                id,
+                train_number,
+                sched_id,
+                corr,
+                current_next,
+                canon_ts,
+                speed,
+                delay,
+                SUM(
+                    CASE
+                        WHEN prev_ts IS NULL THEN 1
+                        WHEN sched_id = ''
+                          AND (JULIANDAY(canon_ts) - JULIANDAY(prev_ts)) * 86400.0 > ?
+                            THEN 1
+                        WHEN sched_id != ''
+                          AND (JULIANDAY(canon_ts) - JULIANDAY(prev_ts)) * 86400.0 > ?
+                            THEN 1
+                        ELSE 0
+                    END
+                ) OVER (
+                    PARTITION BY train_number, sched_id
+                    ORDER BY canon_ts ASC, id ASC
+                ) AS trip_session_id,
+                SUM(
+                    CASE
+                        WHEN prev_ts IS NULL
+                          OR prev_next IS NOT current_next
+                          OR (sched_id = '' AND (JULIANDAY(canon_ts) - JULIANDAY(prev_ts)) * 86400.0 > ?)
+                          OR (sched_id != '' AND (JULIANDAY(canon_ts) - JULIANDAY(prev_ts)) * 86400.0 > ?)
+                        THEN 1
+                        ELSE 0
+                    END
+                ) OVER (
+                    PARTITION BY train_number, sched_id
+                    ORDER BY canon_ts ASC, id ASC
+                ) AS run_id
+            FROM lagged_rows
+        ),
+        run_annotated AS (
+            SELECT
+                train_number,
+                sched_id,
+                trip_session_id,
+                run_id,
+                corr,
+                current_next AS station_name,
+                canon_ts,
+                speed,
+                FIRST_VALUE(delay) OVER (
+                    PARTITION BY train_number, sched_id, trip_session_id, run_id
+                    ORDER BY canon_ts DESC, id DESC
+                ) AS end_delay
+            FROM sessionized
+        ),
+        station_runs AS (
+            SELECT
+                train_number,
+                sched_id,
+                trip_session_id,
+                run_id,
+                MAX(corr) AS corr,
+                station_name,
+                MIN(canon_ts) AS run_start,
+                MAX(canon_ts) AS run_end,
+                COALESCE(AVG(CASE WHEN speed > ? THEN speed END), AVG(speed)) AS cruise_speed,
+                MIN(end_delay) AS run_end_delay
+            FROM run_annotated
+            GROUP BY train_number, sched_id, trip_session_id, run_id, station_name
+        ),
+        transitions AS (
+            SELECT
+                LAG(station_name) OVER (
+                    PARTITION BY train_number, sched_id, trip_session_id
+                    ORDER BY run_id ASC
+                ) AS from_stn,
+                station_name AS to_stn,
+                corr,
+                LAG(run_end) OVER (
+                    PARTITION BY train_number, sched_id, trip_session_id
+                    ORDER BY run_id ASC
+                ) AS transit_start,
+                run_end AS transit_end,
+                cruise_speed AS segment_speed,
+                LAG(run_end_delay) OVER (
+                    PARTITION BY train_number, sched_id, trip_session_id
+                    ORDER BY run_id ASC
+                ) AS start_delay,
+                run_end_delay AS end_delay
+            FROM station_runs
         )
         SELECT
             from_stn,
@@ -1411,10 +1648,20 @@ class HistoricalRepository:
             segment_speed,
             start_delay,
             end_delay
-        FROM segment_events
-        ORDER BY from_stn, to_stn;
+        FROM transitions
+        WHERE from_stn IS NOT NULL
+          AND from_stn != to_stn
+        ORDER BY from_stn ASC, to_stn ASC;
         """
-        cur.execute(segment_query, params)
+        query_params: List[Any] = [
+            *base_params,
+            NULL_SCHEDULE_TRIP_GAP_SEC,
+            MAX_SEGMENT_TRANSIT_SEC,
+            NULL_SCHEDULE_TRIP_GAP_SEC,
+            MAX_SEGMENT_TRANSIT_SEC,
+            SEGMENT_CRUISE_MIN_SPEED_KMH,
+        ]
+        cur.execute(segment_query, query_params)
         raw_rows = cur.fetchall()
 
         samples: Dict[Tuple[str, str, str], List[Dict[str, float]]] = {}
@@ -1422,21 +1669,22 @@ class HistoricalRepository:
             f_stn = str(row[0]).strip()
             t_stn = str(row[1]).strip()
             c_name = str(row[2])
-            t_start_str = str(row[3])
-            t_end_str = str(row[4])
+            t1 = parse_iso_utc_datetime(row[3])
+            t2 = parse_iso_utc_datetime(row[4])
+            if t1 is None or t2 is None:
+                continue
+
+            duration_sec = (t2 - t1).total_seconds()
+            if (
+                not math.isfinite(duration_sec)
+                or duration_sec < MIN_SEGMENT_TRANSIT_SEC
+                or duration_sec > MAX_SEGMENT_TRANSIT_SEC
+            ):
+                continue
+
             s_spd = float(row[5]) if row[5] is not None else 0.0
             d_start = float(row[6]) if row[6] is not None else 0.0
             d_end = float(row[7]) if row[7] is not None else 0.0
-
-            try:
-                t1 = datetime.fromisoformat(t_start_str.replace("Z", "+00:00"))
-                t2 = datetime.fromisoformat(t_end_str.replace("Z", "+00:00"))
-                duration_sec = max(0.0, (t2 - t1).total_seconds())
-            except Exception:
-                duration_sec = 0.0
-
-            if duration_sec <= 0.0:
-                duration_sec = max(60.0, (d_end - d_start) * 60.0)
 
             key = (f_stn, t_stn, c_name)
             if key not in samples:
@@ -1462,9 +1710,9 @@ class HistoricalRepository:
         """
         Aggregate and profile empirical station-to-station track segment transit durations.
 
-        Identifies directed transitions between consecutive reporting stations along train journeys,
-        computing statistical runtimes (min, median p50, 90th percentile p90, max), average speeds,
-        and delay accumulation deltas.
+        Identifies directed transitions between contiguous reporting-station run islands along
+        train journeys, computing statistical runtimes (min, median p50, 90th percentile p90,
+        max), cruise average speeds, and signed delay accumulation deltas.
 
         Args:
             corridor: Optional corridor filter (e.g. 'PATHE', 'Proastiakos').
@@ -1479,34 +1727,29 @@ class HistoricalRepository:
         Returns:
             SegmentTransitReport containing metadata and statistical SegmentTransitStats entries.
         """
-        start_ts = f"{start_date}T00:00:00Z" if start_date and len(start_date) == 10 else start_date
-        end_ts = f"{end_date}T23:59:59Z" if end_date and len(end_date) == 10 else end_date
+        start_ts = normalize_start_bound(start_date)
+        end_ts = normalize_end_bound(end_date)
+        where_sql, base_params = self._build_analytics_filters(
+            corridor=corridor,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            train_type=train_type,
+        )
 
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
                 # 1. Total trips and observations analyzed
-                count_query = """
+                count_query = f"""
                 SELECT
-                    COUNT(DISTINCT th.train_number || '_' || COALESCE(th.schedule_id, '')) AS total_trips,
+                    COUNT(DISTINCT th.train_number || '_' || COALESCE(NULLIF(th.schedule_id, ''), SUBSTR(th.recorded_at, 1, 10))) AS total_trips,
                     COUNT(th.id) AS total_obs
                 FROM telemetry_history th
                 LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
                 LEFT JOIN trains t ON th.train_number = t.train_number
-                WHERE (? IS NULL OR st.corridor LIKE ? OR th.corridor LIKE ?)
-                  AND (? IS NULL OR th.recorded_at >= ?)
-                  AND (? IS NULL OR th.recorded_at <= ?)
-                  AND (? IS NULL OR t.train_type LIKE ? OR t.service_type LIKE ?)
+                WHERE {where_sql};
                 """
-                corridor_param = f"%{corridor}%" if corridor else None
-                type_param = f"%{train_type}%" if train_type else None
-                q_params = (
-                    corridor_param, corridor_param, corridor_param,
-                    start_ts, start_ts,
-                    end_ts, end_ts,
-                    type_param, type_param, type_param,
-                )
-                cur.execute(count_query, q_params)
+                cur.execute(count_query, base_params)
                 cnt_row = cur.fetchone()
                 total_trips = cnt_row[0] if cnt_row else 0
                 total_obs = cnt_row[1] if cnt_row else 0
@@ -1521,8 +1764,10 @@ class HistoricalRepository:
                         segments=(),
                     )
 
-                # 2. Extract consecutive station transitions per trip
-                segment_samples = self._extract_segment_transition_samples(cur, q_params)
+                # 2. Extract consecutive station run-island transitions per trip
+                segment_samples = self._extract_segment_transition_samples(
+                    cur, where_sql, base_params
+                )
 
                 # 3. Filter by from_station, to_station, and min_trips
                 candidate_segments: List[SegmentTransitStats] = []
@@ -1535,14 +1780,13 @@ class HistoricalRepository:
                         continue
 
                     durations = sorted(s["duration"] for s in samples)
-                    speeds = [s["speed"] for s in samples if s["speed"] > 0]
+                    speeds = [s["speed"] for s in samples if s["speed"] > 0.0]
                     delay_deltas = [s["delay_delta"] for s in samples]
 
                     n_dur = len(durations)
                     min_dur = durations[0]
-                    p50_dur = durations[n_dur // 2]
-                    p90_idx = min(n_dur - 1, int(n_dur * 0.90))
-                    p90_dur = durations[p90_idx]
+                    p50_dur = float(statistics.median(durations))
+                    p90_dur = _compute_percentile(durations, 0.90)
                     max_dur = durations[-1]
 
                     avg_speed = sum(speeds) / len(speeds) if speeds else 80.0
@@ -1941,21 +2185,18 @@ class HistoricalRepository:
 
     def get_database_stats(self) -> DatabaseStats:
         """Calculate total rows, file size, date bounds, and storage metrics."""
+        canon_expr = _canon_ts_sql("recorded_at")
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
                 # 1. Total telemetry rows, date bounds
                 cur.execute(
-                    "SELECT COUNT(*), MIN(recorded_at), MAX(recorded_at) FROM telemetry_history;"
+                    f"SELECT COUNT(*), MIN({canon_expr}), MAX({canon_expr}) FROM telemetry_history;"
                 )
                 row = cur.fetchone()
                 total_telemetry = row[0] or 0
-                earliest = row[1]
-                if hasattr(earliest, "isoformat"):
-                    earliest = earliest.isoformat()
-                latest = row[2]
-                if hasattr(latest, "isoformat"):
-                    latest = latest.isoformat()
+                earliest = self._iso_or_raw(row[1])
+                latest = self._iso_or_raw(row[2])
 
                 # 2. Total trains
                 cur.execute("SELECT COUNT(*) FROM trains;")
@@ -2010,65 +2251,67 @@ class HistoricalRepository:
 
     @staticmethod
     def _iso_or_str(val: Any) -> str:
-        """Normalize datetime or raw value to UTC ISO-8601 string with Z suffix."""
-        return val.isoformat().replace("+00:00", "Z") if hasattr(val, "isoformat") else str(val)
+        """Normalize datetime or raw value to canonical 27-char UTC ISO-8601 string."""
+        return canonicalize_iso_utc(val)
 
     @staticmethod
     def _iso_or_raw(val: Any) -> Any:
-        """Normalize datetime to UTC ISO-8601 string or preserve raw/None value."""
-        return val.isoformat().replace("+00:00", "Z") if hasattr(val, "isoformat") else val
+        """Normalize non-None timestamp value to canonical 27-char UTC ISO-8601 string."""
+        if val is None:
+            return None
+        return canonicalize_iso_utc(val)
 
     def _collect_archive_payload(
         self,
         cutoff_clean: str,
         cutoff_date: str,
-    ) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
-        """Read aged telemetry rows and referenced parent records from hot database."""
+        chunk_size: int = DEFAULT_ARCHIVE_CHUNK_SIZE,
+    ) -> Tuple[List[Tuple[Any, ...]], List[Tuple[Any, ...]], List[Tuple[Any, ...]], List[Tuple[Any, ...]]]:
+        """Read one bounded chunk of aged telemetry rows and referenced parents from hot database."""
+        canon_expr = _canon_ts_sql("recorded_at")
+        where_clauses: List[str] = []
+        where_params: List[Any] = []
+        _append_recorded_at_filters(
+            where_clauses,
+            where_params,
+            col="recorded_at",
+            start_bound=None,
+            end_bound=cutoff_clean,
+            include_start=True,
+            include_end=False,
+        )
+        where_sql = " AND ".join(where_clauses)
+
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
                         track_heading, altitude, delay_min, status, progress, chainage_m,
                         dist_to_dest_m, next_station, corridor
                     FROM telemetry_history
-                    WHERE recorded_at < ?
-                    ORDER BY recorded_at ASC, id ASC;
+                    WHERE {where_sql}
+                    ORDER BY ({canon_expr}) ASC, id ASC
+                    LIMIT ?;
                     """,
-                    (cutoff_clean,),
+                    [*where_params, int(chunk_size)],
                 )
                 telemetry_rows = [tuple(r) for r in cur.fetchall()]
                 if not telemetry_rows:
                     return [], [], [], []
 
                 train_numbers = sorted({str(r[1]) for r in telemetry_rows if r[1] is not None})
-                schedule_ids = {str(r[2]) for r in telemetry_rows if r[2] is not None}
-
-                if len(cutoff_date) == 10:
-                    cur.execute(
-                        """
-                        SELECT schedule_id, train_number
-                        FROM scheduled_trips
-                        WHERE service_date < ?;
-                        """,
-                        (cutoff_date,),
-                    )
-                    for row in cur.fetchall():
-                        schedule_ids.add(str(row[0]))
-                        if row[1] is not None:
-                            train_numbers.append(str(row[1]))
-                    train_numbers = sorted(set(train_numbers))
-
+                schedule_ids = sorted({str(r[2]) for r in telemetry_rows if r[2] is not None})
                 train_rows = self._fetch_trains_for_archive(cur, train_numbers)
-                trip_rows, stop_rows = self._fetch_schedules_for_archive(cur, sorted(schedule_ids))
+                trip_rows, stop_rows = self._fetch_schedules_for_archive(cur, schedule_ids)
             finally:
                 cur.close()
 
-        normalized_telemetry = [
+        normalized_telemetry: List[Tuple[Any, ...]] = [
             (
-                r[0], r[1], r[2], self._iso_or_str(r[3]), r[4], r[5], r[6], r[7],
+                int(r[0]), r[1], r[2], self._iso_or_str(r[3]), r[4], r[5], r[6], r[7],
                 r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16],
             )
             for r in telemetry_rows
@@ -2079,185 +2322,208 @@ class HistoricalRepository:
         self,
         cur: Any,
         train_numbers: List[str],
-    ) -> List[Any]:
-        """Fetch referenced train records for archival."""
+    ) -> List[Tuple[Any, ...]]:
+        """Fetch referenced train records for archival in bounded IN-clause chunks."""
         if not train_numbers:
             return []
-        placeholders = ",".join("?" for _ in train_numbers)
-        cur.execute(
-            f"""
-            SELECT
-                train_number, locomotive_number, default_name, train_type,
-                service_type, first_observed_at, last_observed_at
-            FROM trains
-            WHERE train_number IN ({placeholders});
-            """,
-            train_numbers,
-        )
-        return [
-            (r[0], r[1], r[2], r[3], r[4], self._iso_or_str(r[5]), self._iso_or_str(r[6]))
-            for r in cur.fetchall()
-        ]
+        results: List[Tuple[Any, ...]] = []
+        for id_chunk in _iter_chunks(train_numbers, SQLITE_IN_CLAUSE_CHUNK_SIZE):
+            placeholders = ",".join("?" for _ in id_chunk)
+            cur.execute(
+                f"""
+                SELECT
+                    train_number, locomotive_number, default_name, train_type,
+                    service_type, first_observed_at, last_observed_at
+                FROM trains
+                WHERE train_number IN ({placeholders});
+                """,
+                tuple(id_chunk),
+            )
+            for r in cur.fetchall():
+                results.append(
+                    (r[0], r[1], r[2], r[3], r[4], self._iso_or_str(r[5]), self._iso_or_str(r[6]))
+                )
+        return results
 
     def _fetch_schedules_for_archive(
         self,
         cur: Any,
         sorted_schedule_ids: List[str],
-    ) -> Tuple[List[Any], List[Any]]:
-        """Fetch referenced scheduled_trips and schedule_stops for archival."""
+    ) -> Tuple[List[Tuple[Any, ...]], List[Tuple[Any, ...]]]:
+        """Fetch referenced scheduled_trips and schedule_stops in bounded IN-clause chunks."""
         if not sorted_schedule_ids:
             return [], []
-        sched_placeholders = ",".join("?" for _ in sorted_schedule_ids)
-        cur.execute(
-            f"""
-            SELECT
-                schedule_id, train_number, origin, destination, corridor,
-                service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
-            FROM scheduled_trips
-            WHERE schedule_id IN ({sched_placeholders});
-            """,
-            sorted_schedule_ids,
-        )
-        trip_rows = [
-            (
-                r[0], r[1], r[2], r[3], r[4], r[5],
-                self._iso_or_raw(r[6]), self._iso_or_raw(r[7]), r[8], self._iso_or_raw(r[9]),
+        trip_rows: List[Tuple[Any, ...]] = []
+        stop_rows: List[Tuple[Any, ...]] = []
+        for id_chunk in _iter_chunks(sorted_schedule_ids, SQLITE_IN_CLAUSE_CHUNK_SIZE):
+            sched_placeholders = ",".join("?" for _ in id_chunk)
+            cur.execute(
+                f"""
+                SELECT
+                    schedule_id, train_number, origin, destination, corridor,
+                    service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
+                FROM scheduled_trips
+                WHERE schedule_id IN ({sched_placeholders});
+                """,
+                tuple(id_chunk),
             )
-            for r in cur.fetchall()
-        ]
+            for r in cur.fetchall():
+                trip_rows.append(
+                    (
+                        r[0], r[1], r[2], r[3], r[4], r[5],
+                        self._iso_or_raw(r[6]), self._iso_or_raw(r[7]), r[8], self._iso_or_raw(r[9]),
+                    )
+                )
 
-        cur.execute(
-            f"""
-            SELECT
-                schedule_id, stop_sequence, station_id, station_name,
-                scheduled_arrival, scheduled_departure, actual_arrival,
-                actual_departure, platform, delay_sec
-            FROM schedule_stops
-            WHERE schedule_id IN ({sched_placeholders})
-            ORDER BY schedule_id ASC, stop_sequence ASC;
-            """,
-            sorted_schedule_ids,
-        )
-        stop_rows = [
-            (
-                r[0], r[1], r[2], r[3],
-                self._iso_or_raw(r[4]), self._iso_or_raw(r[5]),
-                self._iso_or_raw(r[6]), self._iso_or_raw(r[7]), r[8], r[9],
+            cur.execute(
+                f"""
+                SELECT
+                    schedule_id, stop_sequence, station_id, station_name,
+                    scheduled_arrival, scheduled_departure, actual_arrival,
+                    actual_departure, platform, delay_sec
+                FROM schedule_stops
+                WHERE schedule_id IN ({sched_placeholders})
+                ORDER BY schedule_id ASC, stop_sequence ASC;
+                """,
+                tuple(id_chunk),
             )
-            for r in cur.fetchall()
-        ]
+            for r in cur.fetchall():
+                stop_rows.append(
+                    (
+                        r[0], r[1], r[2], r[3],
+                        self._iso_or_raw(r[4]), self._iso_or_raw(r[5]),
+                        self._iso_or_raw(r[6]), self._iso_or_raw(r[7]), r[8], r[9],
+                    )
+                )
         return trip_rows, stop_rows
 
-    def archive_before(
+    @staticmethod
+    def _upsert_archive_parents(
+        arch_cur: Any,
+        train_rows: Sequence[Tuple[Any, ...]],
+        trip_rows: Sequence[Tuple[Any, ...]],
+        stop_rows: Sequence[Tuple[Any, ...]],
+    ) -> None:
+        """Upsert referenced trains, scheduled_trips, and schedule_stops into archive DB."""
+        if train_rows:
+            arch_cur.executemany(
+                """
+                INSERT INTO trains (
+                    train_number, locomotive_number, default_name, train_type, service_type,
+                    first_observed_at, last_observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(train_number) DO UPDATE SET
+                    locomotive_number = COALESCE(excluded.locomotive_number, trains.locomotive_number),
+                    default_name = COALESCE(excluded.default_name, trains.default_name),
+                    train_type = COALESCE(excluded.train_type, trains.train_type),
+                    service_type = COALESCE(excluded.service_type, trains.service_type),
+                    first_observed_at = MIN(trains.first_observed_at, excluded.first_observed_at),
+                    last_observed_at = MAX(trains.last_observed_at, excluded.last_observed_at);
+                """,
+                train_rows,
+            )
+
+        if trip_rows:
+            arch_cur.executemany(
+                """
+                INSERT INTO scheduled_trips (
+                    schedule_id, train_number, origin, destination, corridor,
+                    service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(schedule_id) DO UPDATE SET
+                    origin = COALESCE(scheduled_trips.origin, excluded.origin),
+                    destination = COALESCE(scheduled_trips.destination, excluded.destination),
+                    corridor = COALESCE(scheduled_trips.corridor, excluded.corridor);
+                """,
+                trip_rows,
+            )
+
+        if stop_rows:
+            arch_cur.executemany(
+                """
+                INSERT OR IGNORE INTO schedule_stops (
+                    schedule_id, stop_sequence, station_id, station_name,
+                    scheduled_arrival, scheduled_departure, actual_arrival,
+                    actual_departure, platform, delay_sec
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                stop_rows,
+            )
+
+    def _write_archive_chunk(
         self,
-        cutoff_iso: str,
-        archive_path: Optional[str] = None,
-    ) -> int:
-        """
-        Archive historical telemetry records older than cutoff_iso (exclusive)
-        along with referenced trains, scheduled_trips, and schedule_stops into
-        an archive SQLite database before evicting them from the hot database.
+        archive_db: Database,
+        normalized_telemetry: Sequence[Tuple[Any, ...]],
+        train_rows: Sequence[Tuple[Any, ...]],
+        trip_rows: Sequence[Tuple[Any, ...]],
+        stop_rows: Sequence[Tuple[Any, ...]],
+    ) -> None:
+        """Persist one chunk into archive DB using provenance deduplication and fresh archive PKs."""
+        with archive_db.transaction() as arch_cur:
+            self._upsert_archive_parents(arch_cur, train_rows, trip_rows, stop_rows)
+            arch_cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS archive_provenance (
+                    source_row_id INTEGER NOT NULL,
+                    row_digest TEXT NOT NULL,
+                    PRIMARY KEY (source_row_id, row_digest)
+                );
+                """
+            )
+            new_rows: List[Tuple[Any, ...]] = []
+            for full_row in normalized_telemetry:
+                src_id = int(full_row[0])
+                payload_16 = full_row[1:]
+                digest = _compute_archive_row_digest(payload_16)
+                arch_cur.execute(
+                    """
+                    INSERT OR IGNORE INTO archive_provenance (source_row_id, row_digest)
+                    VALUES (?, ?);
+                    """,
+                    (src_id, digest),
+                )
+                if arch_cur.rowcount == 1:
+                    new_rows.append(payload_16)
 
-        Args:
-            cutoff_iso: ISO-8601 UTC timestamp cutoff (e.g., '2026-11-01T00:00:00Z').
-            archive_path: Target archive SQLite database path (defaults to <db_stem>_archive.db).
-
-        Returns:
-            Number of telemetry_history rows archived and removed from the hot database.
-        """
-        if not cutoff_iso or not cutoff_iso.strip():
-            raise ValueError("cutoff_iso must be a non-empty ISO-8601 timestamp string")
-
-        cutoff_clean = cutoff_iso.strip()
-        cutoff_date = cutoff_clean[:10]
-        target_archive_path = self.resolve_archive_path(archive_path)
-
-        # 1. Read aged telemetry rows and referenced parent records from hot database
-        normalized_telemetry, train_rows, trip_rows, stop_rows = self._collect_archive_payload(
-            cutoff_clean, cutoff_date
-        )
-        if not normalized_telemetry:
-            return 0
-
-        # 2. Persist rows into Archive SQLite database first (Zero-Data-Loss guarantee)
-        archive_db = Database(target_archive_path)
-        try:
-            with archive_db.transaction() as arch_cur:
-                if train_rows:
-                    arch_cur.executemany(
-                        """
-                        INSERT INTO trains (
-                            train_number, locomotive_number, default_name, train_type, service_type,
-                            first_observed_at, last_observed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(train_number) DO UPDATE SET
-                            locomotive_number = COALESCE(excluded.locomotive_number, trains.locomotive_number),
-                            default_name = COALESCE(excluded.default_name, trains.default_name),
-                            train_type = COALESCE(excluded.train_type, trains.train_type),
-                            service_type = COALESCE(excluded.service_type, trains.service_type),
-                            first_observed_at = MIN(trains.first_observed_at, excluded.first_observed_at),
-                            last_observed_at = MAX(trains.last_observed_at, excluded.last_observed_at);
-                        """,
-                        train_rows,
-                    )
-
-                if trip_rows:
-                    arch_cur.executemany(
-                        """
-                        INSERT INTO scheduled_trips (
-                            schedule_id, train_number, origin, destination, corridor,
-                            service_date, scheduled_departure, scheduled_arrival, raw_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(schedule_id) DO UPDATE SET
-                            origin = COALESCE(scheduled_trips.origin, excluded.origin),
-                            destination = COALESCE(scheduled_trips.destination, excluded.destination),
-                            corridor = COALESCE(scheduled_trips.corridor, excluded.corridor);
-                        """,
-                        trip_rows,
-                    )
-
-                if stop_rows:
-                    arch_cur.executemany(
-                        """
-                        INSERT OR IGNORE INTO schedule_stops (
-                            schedule_id, stop_sequence, station_id, station_name,
-                            scheduled_arrival, scheduled_departure, actual_arrival,
-                            actual_departure, platform, delay_sec
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        stop_rows,
-                    )
-
+            if new_rows:
                 arch_cur.executemany(
                     """
-                    INSERT OR IGNORE INTO telemetry_history (
-                        id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
+                    INSERT INTO telemetry_history (
+                        train_number, schedule_id, recorded_at, lat, lng, speed, course,
                         track_heading, altitude, delay_min, status, progress, chainage_m,
                         dist_to_dest_m, next_station, corridor
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    normalized_telemetry,
+                    new_rows,
                 )
-            archive_db.checkpoint_wal("TRUNCATE")
-        finally:
-            archive_db.close()
 
-        # 3. Evict archived telemetry rows and unreferenced old trips from hot database
+    def _delete_archived_ids(self, archived_ids: Sequence[int]) -> int:
+        """Evict strictly the exact archived telemetry row IDs from the hot database."""
+        if not archived_ids:
+            return 0
+        deleted = 0
         with self.db.transaction() as hot_cur:
-            hot_cur.execute(
-                "DELETE FROM telemetry_history WHERE recorded_at < ?;",
-                (cutoff_clean,),
-            )
-            deleted_count = (
-                hot_cur.rowcount
-                if hot_cur.rowcount is not None and hot_cur.rowcount >= 0
-                else len(normalized_telemetry)
-            )
-
-            if len(cutoff_date) == 10:
+            for id_slice in _iter_chunks(archived_ids, SQLITE_IN_CLAUSE_CHUNK_SIZE):
+                placeholders = ",".join("?" for _ in id_slice)
                 hot_cur.execute(
+                    f"DELETE FROM telemetry_history WHERE id IN ({placeholders});",
+                    tuple(id_slice),
+                )
+                if hot_cur.rowcount is not None and hot_cur.rowcount > 0:
+                    deleted += hot_cur.rowcount
+        return deleted
+
+    def _archive_and_prune_old_trips(self, archive_db: Database, cutoff_date: str) -> None:
+        """Archive unreferenced old scheduled_trips and evict them safely from hot DB."""
+        if len(cutoff_date) != 10:
+            return
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
                     """
-                    DELETE FROM scheduled_trips
+                    SELECT schedule_id, train_number
+                    FROM scheduled_trips
                     WHERE service_date < ?
                       AND NOT EXISTS (
                           SELECT 1 FROM telemetry_history
@@ -2266,5 +2532,113 @@ class HistoricalRepository:
                     """,
                     (cutoff_date,),
                 )
+                old_trips = cur.fetchall()
+                if not old_trips:
+                    return
+                sched_ids = sorted({str(r[0]) for r in old_trips if r[0] is not None})
+                train_nums = sorted({str(r[1]) for r in old_trips if r[1] is not None})
+                train_rows = self._fetch_trains_for_archive(cur, train_nums)
+                trip_rows, stop_rows = self._fetch_schedules_for_archive(cur, sched_ids)
+            finally:
+                cur.close()
 
-        return deleted_count
+        with archive_db.transaction() as arch_cur:
+            self._upsert_archive_parents(arch_cur, train_rows, trip_rows, stop_rows)
+
+        with self.db.transaction() as hot_cur:
+            hot_cur.execute(
+                """
+                DELETE FROM scheduled_trips
+                WHERE service_date < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM telemetry_history
+                      WHERE telemetry_history.schedule_id = scheduled_trips.schedule_id
+                  );
+                """,
+                (cutoff_date,),
+            )
+
+    def archive_before(
+        self,
+        cutoff_iso: str,
+        archive_path: Optional[str] = None,
+        chunk_size: int = DEFAULT_ARCHIVE_CHUNK_SIZE,
+        stop_event: Optional[threading.Event] = None,
+    ) -> int:
+        """
+        Archive historical telemetry records older than cutoff_iso (exclusive)
+        along with referenced trains, scheduled_trips, and schedule_stops into
+        an archive SQLite database in bounded chunks before evicting strictly
+        the archived row IDs from the hot database.
+
+        Args:
+            cutoff_iso: ISO-8601 UTC timestamp cutoff (e.g., '2026-11-01T00:00:00Z').
+            archive_path: Target archive SQLite database path (defaults to <db_stem>_archive.db).
+            chunk_size: Maximum telemetry rows archived per transaction chunk.
+            stop_event: Optional cooperative cancellation event checked between chunks.
+
+        Returns:
+            Number of telemetry_history rows archived and removed from the hot database.
+        """
+        if not cutoff_iso or not cutoff_iso.strip():
+            raise ValueError("cutoff_iso must be a non-empty ISO-8601 timestamp string")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+
+        cutoff_dt = parse_iso_utc_datetime(cutoff_iso.strip())
+        if cutoff_dt is None:
+            raise ValueError(f"Invalid ISO-8601 timestamp for cutoff_iso: '{cutoff_iso}'")
+
+        cutoff_canon = format_utc_iso(cutoff_dt)
+        cutoff_date = cutoff_canon[:10]
+        target_archive_path = self.resolve_archive_path(archive_path)
+
+        archive_db: Optional[Database] = None
+        total_deleted = 0
+        interrupted = False
+
+        try:
+            while stop_event is None or not stop_event.is_set():
+                normalized_telemetry, train_rows, trip_rows, stop_rows = self._collect_archive_payload(
+                    cutoff_canon,
+                    cutoff_date,
+                    chunk_size=chunk_size,
+                )
+                if not normalized_telemetry:
+                    break
+
+                if archive_db is None:
+                    archive_db = Database(target_archive_path)
+
+                self._write_archive_chunk(
+                    archive_db=archive_db,
+                    normalized_telemetry=normalized_telemetry,
+                    train_rows=train_rows,
+                    trip_rows=trip_rows,
+                    stop_rows=stop_rows,
+                )
+
+                archived_ids = [int(r[0]) for r in normalized_telemetry]
+                chunk_deleted = self._delete_archived_ids(archived_ids)
+                total_deleted += chunk_deleted
+
+                if chunk_deleted == 0 or len(normalized_telemetry) < chunk_size:
+                    break
+            else:
+                interrupted = True
+
+            if archive_db is not None:
+                if not interrupted:
+                    self._archive_and_prune_old_trips(archive_db, cutoff_date)
+                archive_db.checkpoint_wal("TRUNCATE")
+        finally:
+            if archive_db is not None:
+                archive_db.close()
+
+        if total_deleted > 0:
+            try:
+                self.db.checkpoint_wal("PASSIVE")
+            except (sqlite3.Error, OSError) as exc:
+                logger.warning("Hot DB passive WAL checkpoint after archival failed: %s", exc)
+
+        return total_deleted

@@ -492,7 +492,7 @@ class TestTelemetryRecorder(unittest.TestCase):
         hot_repo = HistoricalRepository(self.db)
         hot_rows = hot_repo.get_train_history("IC50")
         self.assertEqual(len(hot_rows), 1)
-        self.assertEqual(hot_rows[0].recorded_at, "2026-11-18T12:00:00Z")
+        self.assertEqual(hot_rows[0].recorded_at, "2026-11-18T12:00:00.000000Z")
 
         # Verify archive DB received the 2 aged rows from 2020-01-01
         self.assertTrue(os.path.exists(archive_db_path))
@@ -501,8 +501,8 @@ class TestTelemetryRecorder(unittest.TestCase):
             arch_repo = HistoricalRepository(arch_db)
             arch_rows = arch_repo.get_train_history("IC50")
             self.assertEqual(len(arch_rows), 2)
-            self.assertEqual(arch_rows[0].recorded_at, "2020-01-01T08:00:00Z")
-            self.assertEqual(arch_rows[1].recorded_at, "2020-01-01T08:05:00Z")
+            self.assertEqual(arch_rows[0].recorded_at, "2020-01-01T08:00:00.000000Z")
+            self.assertEqual(arch_rows[1].recorded_at, "2020-01-01T08:05:00.000000Z")
         finally:
             arch_db.close()
 
@@ -511,7 +511,7 @@ class TestTelemetryRecorder(unittest.TestCase):
 
     def test_recorder_periodic_filter_prune(self):
         """TC-P2-10: TelemetryRecorder worker loop periodically evicts stale deadband filter states."""
-        deadband_cfg = DeadbandConfig(stale_timeout_sec=0.2, stale_prune_interval_sec=0.05)
+        deadband_cfg = DeadbandConfig(stale_timeout_sec=0.35, stale_prune_interval_sec=0.05)
         config = RecorderConfig(
             batch_size=1,
             flush_interval_sec=0.05,
@@ -521,22 +521,320 @@ class TestTelemetryRecorder(unittest.TestCase):
         self.recorder = TelemetryRecorder(self.db, config=config)
         self.recorder.start()
 
-        # Enqueue position to populate filter cache
+        # Enqueue position and wait for post-commit deadband promotion
         self.recorder.enqueue(_create_sample_position("IC50"))
-        time.sleep(0.05)
+        commit_deadline = time.monotonic() + 1.5
+        while time.monotonic() < commit_deadline:
+            if "IC50" in self.recorder.filter._states:
+                break
+            time.sleep(0.01)
 
-        # Confirm IC50 was cached
+        # Confirm IC50 was cached post-commit
         self.assertIn("IC50", self.recorder.filter._states)
 
         # Wait for periodic worker prune
-        deadline = time.time() + 1.5
-        while time.time() < deadline:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
             if "IC50" not in self.recorder.filter._states:
                 break
             time.sleep(0.02)
 
         self.assertNotIn("IC50", self.recorder.filter._states)
         self.assertGreaterEqual(self.recorder.filter.stats["total_evicted"], 1.0)
+        self.recorder.stop()
+
+    def test_retention_archive_exponential_backoff_prevents_retry_storm(self):
+        """TC-STO-14: Persistent archival failure backs off exponentially instead of spinning and resets on recovery."""
+        from unittest.mock import patch
+        from storage.repository import HistoricalRepository
+
+        call_times = []
+
+        def _flaky_archive(repo_self, *args, **kwargs):
+            call_times.append(time.monotonic())
+            if len(call_times) <= 2:
+                raise PermissionError("archive mount read-only")
+            return 0
+
+        config = RecorderConfig(
+            batch_size=10,
+            flush_interval_sec=0.05,
+            enable_deadband=False,
+            retention_days=30,
+            retention_archive_interval_sec=0.05,
+            archive_retry_base_sec=0.25,
+            archive_retry_max_sec=1.0,
+            archive_background=False,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+
+        with patch.object(HistoricalRepository, "archive_before", side_effect=_flaky_archive, autospec=True):
+            self.recorder.start()  # Attempt #1 fails -> backoff = 0.25s
+            time.sleep(0.15)
+            # Must NOT spin during backoff window (would be ~15 calls before fix!)
+            self.assertEqual(len(call_times), 1)
+            self.assertEqual(self.recorder.get_stats()["total_archive_failures"], 1)
+            self.assertEqual(self.recorder.get_stats()["archive_consecutive_failures"], 1)
+
+            # Wait past 0.25s base backoff -> Attempt #2 fails -> backoff = 0.50s
+            deadline = time.monotonic() + 1.0
+            while len(call_times) < 2 and time.monotonic() < deadline:
+                time.sleep(0.03)
+            self.assertEqual(len(call_times), 2)
+            self.assertGreaterEqual(call_times[1] - call_times[0], 0.20)
+            self.assertEqual(self.recorder.get_stats()["archive_consecutive_failures"], 2)
+
+            # Wait past 0.50s doubled backoff -> Attempt #3 succeeds -> consecutive failures reset to 0
+            deadline = time.monotonic() + 1.5
+            while len(call_times) < 3 and time.monotonic() < deadline:
+                time.sleep(0.03)
+            self.assertGreaterEqual(len(call_times), 3)
+            self.assertGreaterEqual(call_times[2] - call_times[1], 0.42)
+            self.assertEqual(self.recorder.get_stats()["archive_consecutive_failures"], 0)
+            self.assertEqual(self.recorder.get_stats()["total_archive_failures"], 2)
+            self.recorder.stop()
+
+    def test_background_archival_does_not_stall_live_ingestion(self):
+        """TC-STO-15: Slow periodic archival runs on background thread while live telemetry flushes immediately."""
+        from unittest.mock import patch
+        from storage.repository import HistoricalRepository
+
+        archive_started = threading.Event()
+        release_archive = threading.Event()
+        calls = 0
+
+        def _slow_archive(repo_self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 0  # Fast startup archive
+            archive_started.set()
+            release_archive.wait(timeout=3.0)
+            return 0
+
+        config = RecorderConfig(
+            batch_size=1,
+            flush_interval_sec=0.05,
+            enable_deadband=False,
+            retention_days=30,
+            retention_archive_interval_sec=0.05,
+            archive_background=True,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+
+        with patch.object(HistoricalRepository, "archive_before", side_effect=_slow_archive, autospec=True):
+            self.recorder.start()
+            self.assertTrue(archive_started.wait(timeout=2.0), "Background archival did not start")
+
+            # While background archival is blocked, live ingestion must still flush cleanly
+            self.recorder.enqueue(_create_sample_position("LIVE-FAST", lat=38.5))
+            deadline = time.monotonic() + 1.5
+            committed = 0
+            while time.monotonic() < deadline:
+                with self.db.connection() as conn:
+                    committed = conn.execute(
+                        "SELECT COUNT(*) FROM telemetry_history WHERE train_number = 'LIVE-FAST';"
+                    ).fetchone()[0]
+                if committed == 1:
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(committed, 1)
+            self.assertFalse(release_archive.is_set())
+            release_archive.set()
+            self.recorder.stop()
+
+    def test_stop_joins_background_archive_thread_before_wal_truncate(self):
+        """TC-STO-16: stop() cancels/joins background archive thread cleanly before checkpoint_wal('TRUNCATE')."""
+        from unittest.mock import patch
+        from storage.repository import HistoricalRepository
+
+        archive_started = threading.Event()
+        archive_exited = threading.Event()
+        calls = 0
+
+        def _cancellable_archive(repo_self, *args, stop_event=None, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 0
+            archive_started.set()
+            if stop_event is not None:
+                stop_event.wait(timeout=2.0)
+            time.sleep(0.05)
+            archive_exited.set()
+            return 0
+
+        checkpoint_saw_exited = []
+        orig_ckpt = self.db.checkpoint_wal
+
+        def _spy_checkpoint(mode="PASSIVE"):
+            if mode == "TRUNCATE":
+                checkpoint_saw_exited.append(archive_exited.is_set())
+            return orig_ckpt(mode)
+
+        config = RecorderConfig(
+            batch_size=5,
+            flush_interval_sec=0.05,
+            enable_deadband=False,
+            retention_days=30,
+            retention_archive_interval_sec=0.05,
+            archive_background=True,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+
+        with patch.object(HistoricalRepository, "archive_before", side_effect=_cancellable_archive, autospec=True):
+            with patch.object(self.db, "checkpoint_wal", side_effect=_spy_checkpoint):
+                self.recorder.start()
+                self.assertTrue(archive_started.wait(timeout=2.0))
+                self.recorder.stop(timeout_sec=3.0)
+
+        self.assertTrue(archive_exited.is_set())
+        self.assertEqual(checkpoint_saw_exited, [True])
+
+    def test_transient_sqlite_lock_in_flush_retry_recovers_zero_loss(self):
+        """TC-STO-18: Transient 'database is locked' recovers via in-flush retry with zero lost rows."""
+        import sqlite3
+        from unittest.mock import patch
+
+        config = RecorderConfig(
+            batch_size=1,
+            flush_interval_sec=0.05,
+            enable_deadband=True,
+            write_retry_max_attempts=3,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+        self.recorder.start()
+
+        orig_commit = self.recorder._commit_flush_transaction
+        attempts = {"count": 0}
+
+        def _flaky_commit(train_rows, trip_rows, history_rows):
+            attempts["count"] += 1
+            if attempts["count"] <= 2:
+                raise sqlite3.OperationalError("database is locked")
+            return orig_commit(train_rows, trip_rows, history_rows)
+
+        with patch.object(self.recorder, "_commit_flush_transaction", side_effect=_flaky_commit):
+            self.recorder.enqueue(_create_sample_position("RETRY-OK", status="Στάση", delay=7))
+            deadline = time.monotonic() + 2.0
+            rows = 0
+            while time.monotonic() < deadline:
+                with self.db.connection() as conn:
+                    rows = conn.execute(
+                        "SELECT COUNT(*) FROM telemetry_history WHERE train_number = 'RETRY-OK';"
+                    ).fetchone()[0]
+                if rows == 1:
+                    break
+                time.sleep(0.02)
+
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(rows, 1)
+        self.assertIn("RETRY-OK", self.recorder.filter._states)
+        self.assertEqual(self.recorder.filter._states["RETRY-OK"].delay, 7)
+        self.recorder.stop()
+
+    def test_sustained_sqlite_lock_retains_buffer_without_poisoning_deadband(self):
+        """TC-STO-19: Sustained lock fails Cycle 1 without poisoning DeadbandFilter and persists cleanly on Cycle 2."""
+        import sqlite3
+        from unittest.mock import patch
+
+        config = RecorderConfig(
+            batch_size=1,
+            flush_interval_sec=0.05,
+            enable_deadband=True,
+            write_retry_max_attempts=2,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+        self.recorder.start()
+
+        # Commit baseline state first
+        base_pos = _create_sample_position("IC52", status="Κανονική", next_station="Λάρισα", delay=0)
+        self.recorder.enqueue(base_pos)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            if "IC52" in self.recorder.filter._states:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.recorder.filter._states["IC52"].status, "Κανονική")
+
+        orig_commit = self.recorder._commit_flush_transaction
+        fail_remaining = {"n": 2}  # Exhaust all 2 in-flush retries on Cycle 1
+        cycle1_failed = threading.Event()
+
+        def _lock_then_unlock(train_rows, trip_rows, history_rows):
+            if fail_remaining["n"] > 0:
+                fail_remaining["n"] -= 1
+                if fail_remaining["n"] == 0:
+                    cycle1_failed.set()
+                raise sqlite3.OperationalError("database is locked")
+            return orig_commit(train_rows, trip_rows, history_rows)
+
+        transition_pos = _create_sample_position("IC52", status="Στάση", next_station="Κατερίνη", delay=15)
+        with patch.object(self.recorder, "_commit_flush_transaction", side_effect=_lock_then_unlock):
+            self.recorder.enqueue(transition_pos)
+            self.assertTrue(cycle1_failed.wait(timeout=2.0))
+
+            # Wait for Cycle 2 to flush the retained buffer cleanly once lock clears
+            deadline = time.monotonic() + 2.0
+            persisted_rows = []
+            while time.monotonic() < deadline:
+                with self.db.connection() as conn:
+                    persisted_rows = conn.execute(
+                        "SELECT status, next_station, delay_min FROM telemetry_history WHERE train_number = 'IC52' ORDER BY id ASC;"
+                    ).fetchall()
+                if len(persisted_rows) == 2:
+                    break
+                time.sleep(0.02)
+
+        self.assertEqual(len(persisted_rows), 2)
+        self.assertEqual(persisted_rows[1]["status"], "Στάση")
+        self.assertEqual(persisted_rows[1]["next_station"], "Κατερίνη")
+        self.assertEqual(persisted_rows[1]["delay_min"], 15)
+        self.assertGreaterEqual(self.recorder.get_stats()["total_flush_failures"], 1)
+        self.assertEqual(self.recorder.filter._states["IC52"].status, "Στάση")
+        self.recorder.stop()
+
+    def test_pending_buffer_cap_and_non_transient_error_do_not_poison_deadband(self):
+        """TC-STO-20: Non-transient IntegrityError leaves DeadbandFilter unpoisoned and buffer retention respects cap."""
+        import sqlite3
+        from unittest.mock import patch
+
+        config = RecorderConfig(
+            batch_size=2,
+            flush_interval_sec=0.05,
+            enable_deadband=True,
+            write_retry_max_attempts=1,
+            max_pending_buffer_size=3,
+        )
+        self.recorder = TelemetryRecorder(self.db, config=config)
+
+        # 1. Direct _flush_buffer_with_status on non-transient IntegrityError -> retryable=False, deadband clean
+        pos = _create_sample_position("ERR-1", status="Στάση", delay=9)
+        with patch.object(
+            self.recorder,
+            "_commit_flush_transaction",
+            side_effect=sqlite3.IntegrityError("FOREIGN KEY constraint failed"),
+        ):
+            written, persisted, retryable = self.recorder._flush_buffer_with_status([pos])
+
+        self.assertEqual(written, 0)
+        self.assertFalse(persisted)
+        self.assertFalse(retryable)
+        self.assertNotIn("ERR-1", self.recorder.filter._states)
+        self.assertEqual(self.recorder.filter.stats["total_admitted"], 0.0)
+
+        # 2. Sustained transient lock under > max_pending_buffer_size items trims oldest cleanly
+        self.recorder.start()
+        with patch.object(
+            self.recorder,
+            "_commit_flush_transaction",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            self.recorder.enqueue_batch([_create_sample_position(f"CAP-{i}", lat=38.0 + i * 0.01) for i in range(6)])
+            time.sleep(0.25)
+            self.assertEqual(len(self.recorder.filter._states), 0)
+            self.assertGreaterEqual(self.recorder.get_stats()["total_flush_failures"], 1)
         self.recorder.stop()
 
 

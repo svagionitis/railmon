@@ -3395,8 +3395,10 @@ def run_history_mode(args: argparse.Namespace) -> int:
                 )
                 return 1
             if not before_iso and ret_days is not None:
+                from storage.models import format_utc_iso
+
                 cutoff_dt = datetime.now(timezone.utc) - timedelta(days=ret_days)
-                before_iso = cutoff_dt.isoformat().replace("+00:00", "Z")
+                before_iso = format_utc_iso(cutoff_dt)
 
             try:
                 arch_path = repo.resolve_archive_path(getattr(args, "archive_db", None))

@@ -272,6 +272,50 @@ class TestDeadbandFilter(unittest.TestCase):
         self.assertTrue(adm2)
         self.assertEqual(r2, "initial")
 
+    def test_evaluate_batch_is_pure_with_intra_batch_staging_until_commit(self):
+        """TC-STO-17: evaluate_batch performs intra-batch staging with zero pre-commit mutation until commit_batch."""
+        p1 = _create_sample_position("IC52", lat=38.000000, lng=23.500000, status="Κανονική")
+        # +5.5m -> suppressed against p1
+        p2 = _create_sample_position("IC52", lat=38.000045, lng=23.500000, status="Κανονική")
+        # +33m -> admitted against p1
+        p3 = _create_sample_position("IC52", lat=38.000300, lng=23.500000, status="Κανονική")
+        # +5m from p3 -> suppressed against staged p3
+        p4 = _create_sample_position("IC52", lat=38.000345, lng=23.500000, status="Κανονική")
+        # Status transition -> admitted against staged p3
+        p5 = _create_sample_position("IC52", lat=38.000345, lng=23.500000, status="Στάση")
+
+        evaluation = self.filter.evaluate_batch([p1, p2, p3, p4, p5], now_epoch=1000.0)
+        self.assertEqual(evaluation.inspected_count, 5)
+        self.assertEqual(evaluation.admitted_count, 3)
+        self.assertEqual(evaluation.suppressed_count, 2)
+        self.assertEqual(len(evaluation.admitted), 3)
+        self.assertEqual(evaluation.admitted[0], p1)
+        self.assertEqual(evaluation.admitted[1], p3)
+        self.assertEqual(evaluation.admitted[2], p5)
+
+        # ZERO mutation to live filter state or stats before commit_batch()
+        self.assertEqual(len(self.filter._states), 0)
+        self.assertEqual(self.filter.stats["total_inspected"], 0.0)
+        self.assertEqual(self.filter.stats["total_admitted"], 0.0)
+        self.assertEqual(self.filter.stats["total_suppressed"], 0.0)
+
+        # Re-evaluating before commit produces identical result
+        eval_retry = self.filter.evaluate_batch([p1, p2, p3, p4, p5], now_epoch=1000.0)
+        self.assertEqual(eval_retry.admitted_count, 3)
+
+        # Promote post-commit
+        self.filter.commit_batch(evaluation, now_epoch=1000.0)
+        self.assertIn("IC52", self.filter._states)
+        self.assertEqual(self.filter._states["IC52"].status, "Στάση")
+        self.assertEqual(self.filter.stats["total_inspected"], 5.0)
+        self.assertEqual(self.filter.stats["total_admitted"], 3.0)
+        self.assertEqual(self.filter.stats["total_suppressed"], 2.0)
+
+        # Subsequent duplicate of p5 is now suppressed
+        eval_after = self.filter.evaluate_batch([p5], now_epoch=1005.0)
+        self.assertEqual(eval_after.admitted_count, 0)
+        self.assertEqual(eval_after.suppressed_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

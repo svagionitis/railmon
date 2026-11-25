@@ -121,8 +121,8 @@ class TestHistoricalRepository(unittest.TestCase):
         history = self.repo.get_train_history("1597")
         self.assertEqual(len(history), 4)
         self.assertEqual(history[0].train_number, "1597")
-        self.assertEqual(history[0].recorded_at, "2026-11-18T10:00:00Z")
-        self.assertEqual(history[-1].recorded_at, "2026-11-18T10:03:00Z")
+        self.assertEqual(history[0].recorded_at, "2026-11-18T10:00:00.000000Z")
+        self.assertEqual(history[-1].recorded_at, "2026-11-18T10:03:00.000000Z")
         self.assertEqual(history[1].speed, 60.0)
         self.assertEqual(history[1].corridor, "ATH-SKG")
 
@@ -135,15 +135,15 @@ class TestHistoricalRepository(unittest.TestCase):
             end_time="2026-11-18T10:02:00Z",
         )
         self.assertEqual(len(history), 2)
-        self.assertEqual(history[0].recorded_at, "2026-11-18T10:01:00Z")
-        self.assertEqual(history[1].recorded_at, "2026-11-18T10:02:00Z")
+        self.assertEqual(history[0].recorded_at, "2026-11-18T10:01:00.000000Z")
+        self.assertEqual(history[1].recorded_at, "2026-11-18T10:02:00.000000Z")
 
     def test_get_train_history_limit_and_order(self):
         """Verify limit and ordering parameters."""
         history_desc = self.repo.get_train_history("1597", limit=2, order="DESC")
         self.assertEqual(len(history_desc), 2)
-        self.assertEqual(history_desc[0].recorded_at, "2026-11-18T10:03:00Z")
-        self.assertEqual(history_desc[1].recorded_at, "2026-11-18T10:02:00Z")
+        self.assertEqual(history_desc[0].recorded_at, "2026-11-18T10:03:00.000000Z")
+        self.assertEqual(history_desc[1].recorded_at, "2026-11-18T10:02:00.000000Z")
 
         with self.assertRaises(ValueError):
             self.repo.get_train_history("1597", order="INVALID")
@@ -251,15 +251,15 @@ class TestHistoricalRepository(unittest.TestCase):
         )
         self.assertEqual(len(dwells), 2)
         self.assertEqual(dwells[0].station_name, "CHALKIS")
-        self.assertEqual(dwells[0].arrival_time, "2026-11-18T10:10:00Z")
-        self.assertEqual(dwells[0].departure_time, "2026-11-18T10:11:30Z")
+        self.assertEqual(dwells[0].arrival_time, "2026-11-18T10:10:00.000000Z")
+        self.assertEqual(dwells[0].departure_time, "2026-11-18T10:11:30.000000Z")
         self.assertEqual(dwells[0].dwell_seconds, 90)
         self.assertEqual(dwells[0].arrival_delay_min, 1)
         self.assertEqual(dwells[0].departure_delay_min, 3)
 
         self.assertEqual(dwells[1].station_name, "CHALKIS")
-        self.assertEqual(dwells[1].arrival_time, "2026-11-19T10:10:00Z")
-        self.assertEqual(dwells[1].departure_time, "2026-11-19T10:12:00Z")
+        self.assertEqual(dwells[1].arrival_time, "2026-11-19T10:10:00.000000Z")
+        self.assertEqual(dwells[1].departure_time, "2026-11-19T10:12:00.000000Z")
         self.assertEqual(dwells[1].dwell_seconds, 120)
         self.assertEqual(dwells[1].arrival_delay_min, 5)
         self.assertEqual(dwells[1].departure_delay_min, 6)
@@ -543,8 +543,8 @@ class TestHistoricalRepository(unittest.TestCase):
             archive_repo = HistoricalRepository(archive_db)
             arch_rows = archive_repo.get_train_history("1597")
             self.assertEqual(len(arch_rows), 2)
-            self.assertEqual(arch_rows[0].recorded_at, "2026-10-01T08:00:00Z")
-            self.assertEqual(arch_rows[1].recorded_at, "2026-10-01T08:05:00Z")
+            self.assertEqual(arch_rows[0].recorded_at, "2026-10-01T08:00:00.000000Z")
+            self.assertEqual(arch_rows[1].recorded_at, "2026-10-01T08:05:00.000000Z")
 
             arch_trips = archive_repo.get_active_trips(service_date="2026-10-01")
             self.assertEqual(len(arch_trips), 1)
@@ -826,8 +826,8 @@ class TestHistoricalRepository(unittest.TestCase):
         bounds = self.repo.get_replay_bounds()
         self.assertIsNotNone(bounds)
         self.assertIsInstance(bounds, ReplayBounds)
-        self.assertEqual(bounds.min_recorded_at, "2026-11-18T10:00:00Z")
-        self.assertEqual(bounds.max_recorded_at, "2026-11-18T10:12:00Z")
+        self.assertEqual(bounds.min_recorded_at, "2026-11-18T10:00:00.000000Z")
+        self.assertEqual(bounds.max_recorded_at, "2026-11-18T10:12:00.000000Z")
         self.assertEqual(bounds.total_rows, 8)
         self.assertEqual(bounds.total_trains, 2)
         self.assertAlmostEqual(bounds.duration_sec, 720.0, places=2)
@@ -839,8 +839,8 @@ class TestHistoricalRepository(unittest.TestCase):
             include_start=False,
         )
         self.assertEqual(len(obs_excl), 2)
-        self.assertEqual(obs_excl[0].recorded_at, "2026-11-18T10:01:00Z")
-        self.assertEqual(obs_excl[1].recorded_at, "2026-11-18T10:02:00Z")
+        self.assertEqual(obs_excl[0].recorded_at, "2026-11-18T10:01:00.000000Z")
+        self.assertEqual(obs_excl[1].recorded_at, "2026-11-18T10:02:00.000000Z")
         # Enriched from trains and scheduled_trips tables
         self.assertEqual(obs_excl[0].position.name, "Intercity 50")
         self.assertEqual(obs_excl[0].position.origin, "ATH")
@@ -853,7 +853,7 @@ class TestHistoricalRepository(unittest.TestCase):
             include_start=True,
         )
         self.assertEqual(len(obs_incl), 3)
-        self.assertEqual(obs_incl[0].recorded_at, "2026-11-18T10:00:00Z")
+        self.assertEqual(obs_incl[0].recorded_at, "2026-11-18T10:00:00.000000Z")
 
         # 4. get_replay_snapshot_at reconstructs lookback window up to target_epoch
         target_ep = parse_iso_to_epoch("2026-11-18T10:10:00Z")
@@ -862,7 +862,7 @@ class TestHistoricalRepository(unittest.TestCase):
         self.assertEqual(len(snap_obs), 6)
         self.assertIsInstance(snap_obs[0], ReplayObservation)
         self.assertEqual(snap_obs[-1].position.train_number, "2232")
-        self.assertEqual(snap_obs[-1].recorded_at, "2026-11-18T10:10:00Z")
+        self.assertEqual(snap_obs[-1].recorded_at, "2026-11-18T10:10:00.000000Z")
 
         # 5. Empty DB returns None for get_replay_bounds
         empty_db_path = os.path.join(self.temp_dir, "empty_replay.db")
@@ -872,6 +872,388 @@ class TestHistoricalRepository(unittest.TestCase):
             self.assertIsNone(empty_repo.get_replay_bounds())
         finally:
             empty_db.close()
+
+    def test_archive_before_preserves_concurrent_late_arriving_rows(self):
+        """TC-STO-05: archive_before deletes strictly archived IDs, never evicting late-arriving rows."""
+        from unittest.mock import patch
+
+        archive_db_path = os.path.join(self.temp_dir, "toctou_archive.db")
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course, corridor
+                ) VALUES (?, NULL, ?, ?, ?, 100.0, 0.0, 'ATH-SKG');
+                """,
+                [
+                    ("1597", "2026-10-01T08:00:00.000000Z", 38.01, 23.71),
+                    ("1597", "2026-10-01T08:05:00.000000Z", 38.02, 23.72),
+                ],
+            )
+
+        orig_write = self.repo._write_archive_chunk
+        injected = False
+
+        def _write_and_inject_late_row(*args, **kwargs):
+            nonlocal injected
+            orig_write(*args, **kwargs)
+            if not injected:
+                injected = True
+                # Late-arriving row with recorded_at < cutoff inserted AFTER read, BEFORE hot delete
+                with self.db.transaction() as hot_cur:
+                    hot_cur.execute(
+                        """
+                        INSERT INTO telemetry_history (
+                            train_number, schedule_id, recorded_at, lat, lng, speed, course, corridor
+                        ) VALUES ('1597', NULL, '2026-10-01T07:30:00.000000Z', 37.99, 23.70, 80.0, 0.0, 'ATH-SKG');
+                        """
+                    )
+
+        with patch.object(self.repo, "_write_archive_chunk", side_effect=_write_and_inject_late_row):
+            archived = self.repo.archive_before(
+                "2026-11-01T00:00:00Z",
+                archive_path=archive_db_path,
+            )
+
+        # Only the 2 archived rows were deleted; late-arriving 07:30 row remains safely in hot DB!
+        self.assertEqual(archived, 2)
+        hot_old = self.repo.get_train_history("1597", end_time="2026-11-01T00:00:00Z")
+        self.assertEqual(len(hot_old), 1)
+        self.assertEqual(hot_old[0].recorded_at, "2026-10-01T07:30:00.000000Z")
+
+        arch_db = Database(archive_db_path)
+        try:
+            arch_rows = HistoricalRepository(arch_db).get_train_history("1597")
+            self.assertEqual(len(arch_rows), 2)
+        finally:
+            arch_db.close()
+
+    def test_archive_before_hot_db_rotation_pk_collision_zero_loss(self):
+        """TC-STO-06: Recreating/rotating hot DB (restarting id=1) preserves 100% of rows in archive DB."""
+        hot_path = os.path.join(self.temp_dir, "rot_hot.db")
+        arch_path = os.path.join(self.temp_dir, "rot_arch.db")
+
+        # Generation 1 hot DB: 5 rows for IC50 (id=1..5)
+        db1 = Database(hot_path)
+        try:
+            with db1.transaction() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO trains (train_number, first_observed_at, last_observed_at)
+                    VALUES ('IC50', '2026-10-01T08:00:00.000000Z', '2026-10-01T08:04:00.000000Z');
+                    """
+                )
+                cur.executemany(
+                    """
+                    INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course)
+                    VALUES ('IC50', ?, ?, 23.7, 100.0, 0.0);
+                    """,
+                    [(f"2026-10-01T08:0{i}:00.000000Z", 38.0 + i * 0.01) for i in range(5)],
+                )
+            c1 = HistoricalRepository(db1).archive_before("2026-10-15T00:00:00Z", archive_path=arch_path)
+            self.assertEqual(c1, 5)
+        finally:
+            db1.close()
+
+        # Simulate hot DB deletion/rotation (AUTOINCREMENT resets to id=1..5)
+        for suffix in ("", "-wal", "-shm"):
+            p = f"{hot_path}{suffix}"
+            if os.path.exists(p):
+                os.remove(p)
+
+        db2 = Database(hot_path)
+        try:
+            with db2.transaction() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO trains (train_number, first_observed_at, last_observed_at)
+                    VALUES ('IC52', '2026-10-20T09:00:00.000000Z', '2026-10-20T09:04:00.000000Z');
+                    """
+                )
+                cur.executemany(
+                    """
+                    INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course)
+                    VALUES ('IC52', ?, ?, 22.4, 120.0, 0.0);
+                    """,
+                    [(f"2026-10-20T09:0{i}:00.000000Z", 39.0 + i * 0.01) for i in range(5)],
+                )
+            c2 = HistoricalRepository(db2).archive_before("2026-11-01T00:00:00Z", archive_path=arch_path)
+            self.assertEqual(c2, 5)
+            self.assertEqual(len(HistoricalRepository(db2).get_train_history("IC52")), 0)
+        finally:
+            db2.close()
+
+        arch_db = Database(arch_path)
+        try:
+            arch_repo = HistoricalRepository(arch_db)
+            ic50_rows = arch_repo.get_train_history("IC50")
+            ic52_rows = arch_repo.get_train_history("IC52")
+            self.assertEqual(len(ic50_rows), 5)
+            self.assertEqual(len(ic52_rows), 5)
+            all_ids = {r.id for r in ic50_rows} | {r.id for r in ic52_rows}
+            self.assertEqual(len(all_ids), 10)
+        finally:
+            arch_db.close()
+
+    def test_archive_before_crash_recovery_idempotency(self):
+        """TC-STO-07: Retrying archive_before after crash between archive commit and hot delete creates zero duplicates."""
+        from unittest.mock import patch
+
+        arch_path = os.path.join(self.temp_dir, "crash_arch.db")
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course)
+                VALUES ('1597', ?, ?, 23.7, 100.0, 0.0);
+                """,
+                [
+                    ("2026-10-01T08:00:00.000000Z", 38.01),
+                    ("2026-10-01T08:01:00.000000Z", 38.02),
+                    ("2026-10-01T08:02:00.000000Z", 38.03),
+                ],
+            )
+
+        # Simulate crash right after archive_db commits, before hot DB deletion executes
+        with patch.object(self.repo, "_delete_archived_ids", side_effect=RuntimeError("simulated power loss")):
+            with self.assertRaises(RuntimeError):
+                self.repo.archive_before("2026-11-01T00:00:00Z", archive_path=arch_path)
+
+        # Retry archival after restart -> must deduplicate via archive_provenance and evict hot rows
+        deleted = self.repo.archive_before("2026-11-01T00:00:00Z", archive_path=arch_path)
+        self.assertEqual(deleted, 3)
+
+        arch_db = Database(arch_path)
+        try:
+            arch_rows = HistoricalRepository(arch_db).get_train_history("1597")
+            self.assertEqual(len(arch_rows), 3)
+        finally:
+            arch_db.close()
+
+    def test_archive_before_large_chunked_batch_and_stop_event(self):
+        """TC-STO-08: Archival > 1,200 rows across 600 trips chunks SQL IN clauses and honors stop_event."""
+        arch_path = os.path.join(self.temp_dir, "chunked_arch.db")
+        with self.db.transaction() as cur:
+            trips = [(f"OLD-TRIP-{i:04d}", "1597", "ATH", "SKG", "ATH-SKG", "2026-10-01") for i in range(600)]
+            cur.executemany(
+                """
+                INSERT INTO scheduled_trips (schedule_id, train_number, origin, destination, corridor, service_date)
+                VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                trips,
+            )
+            rows = [
+                (
+                    "1597",
+                    f"OLD-TRIP-{i % 600:04d}",
+                    f"2026-10-01T{8 + (i // 3600):02d}:{(i // 60) % 60:02d}:{i % 60:02d}.000000Z",
+                    38.0 + (i % 100) * 0.001,
+                    23.7,
+                    110.0,
+                    0.0,
+                    "ATH-SKG",
+                )
+                for i in range(1250)
+            ]
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, schedule_id, recorded_at, lat, lng, speed, course, corridor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                rows,
+            )
+
+        # Pre-set stop_event -> archives 0 rows cleanly
+        pre_stopped = threading.Event()
+        pre_stopped.set()
+        self.assertEqual(
+            self.repo.archive_before("2026-11-01T00:00:00Z", archive_path=arch_path, chunk_size=300, stop_event=pre_stopped),
+            0,
+        )
+
+        # Cooperative mid-run stop after 1 chunk (300 rows)
+        mid_stop = threading.Event()
+        orig_del = self.repo._delete_archived_ids
+
+        def _stop_after_first_chunk(archived_ids):
+            res = orig_del(archived_ids)
+            mid_stop.set()
+            return res
+
+        from unittest.mock import patch
+
+        with patch.object(self.repo, "_delete_archived_ids", side_effect=_stop_after_first_chunk):
+            partial = self.repo.archive_before(
+                "2026-11-01T00:00:00Z",
+                archive_path=arch_path,
+                chunk_size=300,
+                stop_event=mid_stop,
+            )
+        self.assertEqual(partial, 300)
+
+        # Finish remaining 950 rows without error (> 500 IN-clause chunks cleanly batched)
+        rest = self.repo.archive_before("2026-11-01T00:00:00Z", archive_path=arch_path, chunk_size=300)
+        self.assertEqual(rest, 950)
+
+        arch_db = Database(arch_path)
+        try:
+            arch_stats = HistoricalRepository(arch_db).get_database_stats()
+            self.assertEqual(arch_stats.total_telemetry_rows, 1250)
+            self.assertEqual(arch_stats.total_trips, 600)
+        finally:
+            arch_db.close()
+
+    def test_replay_observations_subsecond_and_legacy_mixed_format_range(self):
+        """TC-STO-10: get_replay_observations returns exact subsecond rows across mixed legacy Z and .ffffffZ formats."""
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, corridor)
+                VALUES ('1597', ?, 38.0, 23.7, 100.0, 0.0, 'ATH-SKG');
+                """,
+                [
+                    ("2026-11-20T10:00:00Z",),
+                    ("2026-11-20T10:00:00.000001Z",),
+                    ("2026-11-20T10:00:00.500Z",),
+                    ("2026-11-20T10:00:00.500000Z",),
+                    ("2026-11-20T10:00:01Z",),
+                ],
+            )
+
+        # Exclusive lower bound: excludes 10:00:00Z, includes all 3 subseconds + 10:00:01Z
+        obs_excl = self.repo.get_replay_observations(
+            "2026-11-20T10:00:00Z",
+            "2026-11-20T10:00:01Z",
+            include_start=False,
+        )
+        self.assertEqual(
+            [o.recorded_at for o in obs_excl],
+            [
+                "2026-11-20T10:00:00.000001Z",
+                "2026-11-20T10:00:00.500000Z",
+                "2026-11-20T10:00:00.500000Z",
+                "2026-11-20T10:00:01.000000Z",
+            ],
+        )
+
+        # Point range [10:00:00Z, 10:00:00Z] includes ONLY exact 10:00:00Z, never .500000Z
+        obs_exact = self.repo.get_replay_observations(
+            "2026-11-20T10:00:00Z",
+            "2026-11-20T10:00:00Z",
+            include_start=True,
+        )
+        self.assertEqual([o.recorded_at for o in obs_exact], ["2026-11-20T10:00:00.000000Z"])
+
+    def test_punctuality_same_day_end_date_and_subsecond_archive_cutoff(self):
+        """TC-STO-12: get_corridor_punctuality includes entire end_date day and archive_before respects subsecond cutoff."""
+        arch_path = os.path.join(self.temp_dir, "subsec_cutoff_arch.db")
+        with self.db.transaction() as cur:
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor)
+                VALUES ('1597', ?, 38.0, 23.7, 100.0, 0.0, 2, 'DAY-CORR');
+                """,
+                [
+                    ("2026-11-20T00:00:00.000000Z",),
+                    ("2026-11-20T10:00:00Z",),
+                    ("2026-11-20T10:00:00.500000Z",),
+                    ("2026-11-20T23:59:59.999999Z",),
+                    ("2026-11-21T00:00:00.000000Z",),
+                ],
+            )
+
+        punc = self.repo.get_corridor_punctuality(
+            corridor="DAY-CORR",
+            start_date="2026-11-20",
+            end_date="2026-11-20",
+        )
+        self.assertEqual(len(punc), 1)
+        self.assertEqual(punc[0].total_observations, 4)
+
+        # Archiving strictly before 2026-11-20T10:00:00Z must NOT evict 10:00:00Z or 10:00:00.500000Z!
+        archived = self.repo.archive_before("2026-11-20T10:00:00Z", archive_path=arch_path)
+        # Seeded 8 rows from 2026-11-18 + 1 row from 2026-11-20T00:00:00Z = 9 rows
+        self.assertEqual(archived, 9)
+        remaining = self.repo.get_train_history("1597", start_time="2026-11-20T00:00:00Z")
+        self.assertEqual(
+            [r.recorded_at for r in remaining],
+            [
+                "2026-11-20T10:00:00.000000Z",
+                "2026-11-20T10:00:00.500000Z",
+                "2026-11-20T23:59:59.999999Z",
+                "2026-11-21T00:00:00.000000Z",
+            ],
+        )
+
+    def test_explain_query_plan_uses_indexes_for_canonical_range_queries(self):
+        """TC-STO-13: Core time-bounded queries use B-tree index SEARCH (zero full telemetry_history SCAN)."""
+        from storage.repository import _append_recorded_at_filters
+
+        with self.db.connection() as conn:
+            # 1. Replay observations query plan
+            replay_clauses = []
+            replay_params = []
+            _append_recorded_at_filters(
+                replay_clauses, replay_params, "th.recorded_at", "2026-11-18T10:00:00Z", "2026-11-18T10:12:00Z"
+            )
+            plan_replay = " ".join(
+                str(r[3])
+                for r in conn.execute(
+                    f"EXPLAIN QUERY PLAN SELECT th.id FROM telemetry_history th WHERE {' AND '.join(replay_clauses)};",
+                    replay_params,
+                ).fetchall()
+            )
+            self.assertIn("SEARCH", plan_replay)
+            self.assertIn("idx_telemetry_time", plan_replay)
+            self.assertNotIn("SCAN telemetry_history", plan_replay)
+
+            # 2. Train history query plan
+            hist_clauses = ["train_number = ?"]
+            hist_params = ["1597"]
+            _append_recorded_at_filters(
+                hist_clauses, hist_params, "recorded_at", "2026-11-18T10:00:00Z", "2026-11-18T10:12:00Z"
+            )
+            plan_hist = " ".join(
+                str(r[3])
+                for r in conn.execute(
+                    f"EXPLAIN QUERY PLAN SELECT id FROM telemetry_history WHERE {' AND '.join(hist_clauses)};",
+                    hist_params,
+                ).fetchall()
+            )
+            self.assertIn("SEARCH", plan_hist)
+            self.assertIn("idx_telemetry_train_time", plan_hist)
+
+            # 3. Corridor punctuality query plan
+            punc_clauses = ["corridor IS NOT NULL", "corridor = ?"]
+            punc_params = ["ATH-SKG"]
+            _append_recorded_at_filters(
+                punc_clauses, punc_params, "recorded_at", "2026-11-18", "2026-11-18"
+            )
+            plan_punc = " ".join(
+                str(r[3])
+                for r in conn.execute(
+                    f"EXPLAIN QUERY PLAN SELECT corridor, COUNT(*) FROM telemetry_history WHERE {' AND '.join(punc_clauses)} GROUP BY corridor;",
+                    punc_params,
+                ).fetchall()
+            )
+            self.assertIn("SEARCH", plan_punc)
+            self.assertIn("idx_telemetry_corridor_time", plan_punc)
+
+            # 4. Archive selection query plan
+            arch_clauses = []
+            arch_params = []
+            _append_recorded_at_filters(
+                arch_clauses, arch_params, "recorded_at", None, "2026-11-01T00:00:00Z", include_end=False
+            )
+            plan_arch = " ".join(
+                str(r[3])
+                for r in conn.execute(
+                    f"EXPLAIN QUERY PLAN SELECT id FROM telemetry_history WHERE {' AND '.join(arch_clauses)};",
+                    arch_params,
+                ).fetchall()
+            )
+            self.assertIn("SEARCH", plan_arch)
+            self.assertIn("idx_telemetry_time", plan_arch)
 
 
 if __name__ == "__main__":

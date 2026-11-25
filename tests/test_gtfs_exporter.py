@@ -244,6 +244,52 @@ class TestGtfsExporter(unittest.TestCase):
             }
             self.assertEqual(len(timestamps), 1)
 
+    def test_gtfs_snapshot_at_subsecond_boundary_precision(self):
+        """TC-STO-11: get_gtfs_snapshot(--at whole second) includes prior subseconds and excludes future subseconds."""
+        from storage.repository import HistoricalRepository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "subsec_gtfs.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO trains (train_number, default_name, first_observed_at, last_observed_at)
+                        VALUES (?, ?, ?, ?);
+                        """,
+                        [
+                            ("IC50", "IC 50", "2026-11-20T09:58:00.000000Z", "2026-11-20T10:01:00.000000Z"),
+                            ("IC52", "IC 52", "2026-11-20T09:58:00.000000Z", "2026-11-20T10:01:00.000000Z"),
+                            ("IC54", "IC 54", "2026-11-20T09:58:00.000000Z", "2026-11-20T10:01:00.000000Z"),
+                        ],
+                    )
+                    cur.executemany(
+                        """
+                        INSERT INTO telemetry_history (
+                            train_number, recorded_at, lat, lng, speed, course, delay_min, corridor
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        [
+                            # Lower boundary + 0.5s (must be INCLUDED in [09:58:00, 10:00:00])
+                            ("IC50", "2026-11-20T09:58:00.500000Z", 39.48, 22.34, 120.0, 0.0, 1, "PATHE"),
+                            # Exact upper boundary whole second (must be INCLUDED)
+                            ("IC52", "2026-11-20T10:00:00Z", 39.63, 22.42, 130.0, 0.0, 2, "PATHE"),
+                            # Future row 0.5s AFTER --at (must be EXCLUDED!)
+                            ("IC54", "2026-11-20T10:00:00.500000Z", 39.70, 22.45, 140.0, 0.0, 3, "PATHE"),
+                        ],
+                    )
+                repo = HistoricalRepository(db)
+                positions, _, _ = repo.get_gtfs_snapshot(
+                    at_time="2026-11-20T10:00:00Z",
+                    window_sec=120,
+                )
+                seen_trains = {p.train_number for p in positions}
+                self.assertEqual(seen_trains, {"IC50", "IC52"})
+                self.assertNotIn("IC54", seen_trains)
+            finally:
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

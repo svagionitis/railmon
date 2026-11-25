@@ -5,14 +5,106 @@ Domain models and dataclasses for SQLite persistence.
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import math
+import re
 from typing import Any, Dict, Optional, Tuple
 
 from train_tracker import TrainPosition
 
+_ISO_TS_PATTERN = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:[Tt ](?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?"
+    r"(?P<tz>[Zz]|[+-]\d{2}:?\d{2})?)?$"
+)
+_ISO_DATE_ONLY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def format_utc_iso(dt: datetime) -> str:
+    """Format any datetime as fixed-width 27-char UTC ISO-8601 (YYYY-MM-DDTHH:MM:SS.ffffffZ)."""
+    utc_dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
 
 def iso_utc_now() -> str:
-    """Return current UTC timestamp in ISO 8601 format with 'Z' suffix."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    """Return current UTC timestamp in canonical fixed-width microsecond ISO-8601 format."""
+    return format_utc_iso(datetime.now(timezone.utc))
+
+
+def parse_iso_utc_datetime(val: Any) -> Optional[datetime]:
+    """Parse datetime, numeric epoch, or ISO-8601 string (1-9 fractional digits, Z/z/offset) into UTC datetime."""
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=timezone.utc) if val.tzinfo is None else val.astimezone(timezone.utc)
+    if isinstance(val, (int, float)):
+        fval = float(val)
+        if not math.isfinite(fval):
+            return None
+        try:
+            return datetime.fromtimestamp(fval, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
+
+    raw = str(val).strip()
+    if not raw:
+        return None
+    match = _ISO_TS_PATTERN.match(raw)
+    if match is None:
+        return None
+
+    date_part = match.group("date")
+    time_part = match.group("time") or "00:00:00"
+    frac_raw = match.group("frac") or ""
+    frac_norm = (frac_raw + "000000")[:6]
+    tz_raw = match.group("tz") or "Z"
+    if tz_raw in ("Z", "z"):
+        tz_norm = "+00:00"
+    elif len(tz_raw) == 5:
+        tz_norm = f"{tz_raw[:3]}:{tz_raw[3:]}"
+    else:
+        tz_norm = tz_raw
+
+    try:
+        parsed = datetime.fromisoformat(f"{date_part}T{time_part}.{frac_norm}{tz_norm}")
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def canonicalize_iso_utc(val: Any, fallback: Optional[str] = None) -> str:
+    """Normalize a timestamp value to canonical 27-char UTC ISO-8601 (YYYY-MM-DDTHH:MM:SS.ffffffZ)."""
+    parsed = parse_iso_utc_datetime(val)
+    if parsed is not None:
+        return format_utc_iso(parsed)
+    if fallback is not None:
+        return fallback
+    return str(val).strip() if val is not None else ""
+
+
+def normalize_start_bound(bound: Optional[str]) -> Optional[str]:
+    """Normalize an optional ISO date or timestamp lower bound to canonical 27-char UTC ISO-8601."""
+    if bound is None:
+        return None
+    cleaned = str(bound).strip()
+    if not cleaned:
+        return None
+    if _ISO_DATE_ONLY_PATTERN.match(cleaned):
+        parsed = parse_iso_utc_datetime(f"{cleaned}T00:00:00.000000Z")
+        return format_utc_iso(parsed) if parsed is not None else cleaned
+    return canonicalize_iso_utc(cleaned)
+
+
+def normalize_end_bound(bound: Optional[str]) -> Optional[str]:
+    """Normalize an optional ISO date or timestamp upper bound (expanding YYYY-MM-DD to 23:59:59.999999Z)."""
+    if bound is None:
+        return None
+    cleaned = str(bound).strip()
+    if not cleaned:
+        return None
+    if _ISO_DATE_ONLY_PATTERN.match(cleaned):
+        parsed = parse_iso_utc_datetime(f"{cleaned}T23:59:59.999999Z")
+        return format_utc_iso(parsed) if parsed is not None else cleaned
+    return canonicalize_iso_utc(cleaned)
 
 
 @dataclass(frozen=True)
@@ -127,11 +219,7 @@ class TelemetryHistoryRow:
     @classmethod
     def from_db_row(cls, row: Any) -> "TelemetryHistoryRow":
         """Instantiate a TelemetryHistoryRow from a sqlite3.Row or dict-like object."""
-        rec_at = row["recorded_at"]
-        if hasattr(rec_at, "isoformat"):
-            rec_at_str = rec_at.isoformat().replace("+00:00", "Z")
-        else:
-            rec_at_str = str(rec_at).replace("+00:00", "Z")
+        rec_at_str = canonicalize_iso_utc(row["recorded_at"])
 
         keys = row.keys() if hasattr(row, "keys") else row
 
@@ -160,7 +248,8 @@ class TelemetryHistoryRow:
         cls, pos: TrainPosition, recorded_at: Optional[str] = None
     ) -> "TelemetryHistoryRow":
         """Instantiate a database row from a live TrainPosition telemetry entity."""
-        timestamp = recorded_at or pos.timestamp or iso_utc_now()
+        raw_ts = recorded_at or pos.timestamp
+        timestamp = canonicalize_iso_utc(raw_ts, fallback=iso_utc_now()) if raw_ts else iso_utc_now()
         return cls(
             train_number=pos.train_number,
             schedule_id=pos.schedule_id,
@@ -216,18 +305,9 @@ class RecordingSessionDB:
     @classmethod
     def from_db_row(cls, row: Any) -> "RecordingSessionDB":
         """Instantiate a RecordingSessionDB from a sqlite3.Row or dict-like object."""
-        started = row["started_at"]
-        started_str = (
-            started.isoformat().replace("+00:00", "Z")
-            if hasattr(started, "isoformat")
-            else str(started).replace("+00:00", "Z")
-        )
+        started_str = canonicalize_iso_utc(row["started_at"])
         ended = row["ended_at"]
-        ended_str = (
-            ended.isoformat().replace("+00:00", "Z")
-            if hasattr(ended, "isoformat")
-            else (str(ended).replace("+00:00", "Z") if ended is not None else None)
-        )
+        ended_str = canonicalize_iso_utc(ended) if ended is not None else None
         keys = row.keys() if hasattr(row, "keys") else row
 
         return cls(
@@ -271,18 +351,8 @@ class TripSummary:
     @classmethod
     def from_db_row(cls, row: Any) -> "TripSummary":
         """Instantiate a TripSummary from a sqlite3.Row or dict-like object."""
-        first_seen = row["first_seen"]
-        first_seen_str = (
-            first_seen.isoformat().replace("+00:00", "Z")
-            if hasattr(first_seen, "isoformat")
-            else str(first_seen).replace("+00:00", "Z")
-        )
-        last_seen = row["last_seen"]
-        last_seen_str = (
-            last_seen.isoformat().replace("+00:00", "Z")
-            if hasattr(last_seen, "isoformat")
-            else str(last_seen).replace("+00:00", "Z")
-        )
+        first_seen_str = canonicalize_iso_utc(row["first_seen"])
+        last_seen_str = canonicalize_iso_utc(row["last_seen"])
         keys = row.keys() if hasattr(row, "keys") else row
 
         return cls(
@@ -364,18 +434,8 @@ class StationDwellRecord:
     @classmethod
     def from_db_row(cls, row: Any) -> "StationDwellRecord":
         """Instantiate a StationDwellRecord from a sqlite3.Row or dict-like object."""
-        arr = row["arrival_time"]
-        arr_str = (
-            arr.isoformat().replace("+00:00", "Z")
-            if hasattr(arr, "isoformat")
-            else str(arr).replace("+00:00", "Z")
-        )
-        dep = row["departure_time"]
-        dep_str = (
-            dep.isoformat().replace("+00:00", "Z")
-            if hasattr(dep, "isoformat")
-            else str(dep).replace("+00:00", "Z")
-        )
+        arr_str = canonicalize_iso_utc(row["arrival_time"])
+        dep_str = canonicalize_iso_utc(row["departure_time"])
 
         return cls(
             train_number=str(row["train_number"]),
@@ -403,12 +463,7 @@ class SpeedProfilePoint:
     @classmethod
     def from_db_row(cls, row: Any) -> "SpeedProfilePoint":
         """Instantiate a SpeedProfilePoint from a sqlite3.Row or dict-like object."""
-        rec = row["recorded_at"]
-        rec_str = (
-            rec.isoformat().replace("+00:00", "Z")
-            if hasattr(rec, "isoformat")
-            else str(rec).replace("+00:00", "Z")
-        )
+        rec_str = canonicalize_iso_utc(row["recorded_at"])
         keys = row.keys() if hasattr(row, "keys") else row
 
         return cls(

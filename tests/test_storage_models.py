@@ -120,7 +120,7 @@ class TestStorageModels(unittest.TestCase):
         row = TelemetryHistoryRow.from_train_position(pos)
         self.assertEqual(row.train_number, "2232")
         self.assertEqual(row.schedule_id, "sched-suburban-1")
-        self.assertEqual(row.recorded_at, "2026-11-18T12:00:00.000Z")
+        self.assertEqual(row.recorded_at, "2026-11-18T12:00:00.000000Z")
         self.assertEqual(row.lat, 38.0508)
         self.assertEqual(row.lng, 23.7824)
         self.assertEqual(row.speed, 95.5)
@@ -139,7 +139,7 @@ class TestStorageModels(unittest.TestCase):
         self.assertEqual(len(db_row), 16)
         self.assertEqual(db_row[0], "2232")
         self.assertEqual(db_row[1], "sched-suburban-1")
-        self.assertEqual(db_row[2], "2026-11-18T12:00:00.000Z")
+        self.assertEqual(db_row[2], "2026-11-18T12:00:00.000000Z")
         self.assertEqual(db_row[3], 38.0508)
         self.assertEqual(db_row[4], 23.7824)
         self.assertEqual(db_row[5], 95.5)
@@ -219,6 +219,48 @@ class TestStorageModels(unittest.TestCase):
         parsed = datetime.fromisoformat(row.recorded_at.replace("Z", "+00:00"))
         now_dt = datetime.now(timezone.utc)
         self.assertLess(abs((now_dt - parsed).total_seconds()), 5.0)
+
+    def test_canonical_utc_parser_matrix_python_310_safe(self):
+        """TC-STO-09: canonicalize_iso_utc and parse_iso_utc_datetime normalize all valid ISO formats to 27-char UTC."""
+        from storage.models import (
+            canonicalize_iso_utc,
+            normalize_end_bound,
+            normalize_start_bound,
+            parse_iso_utc_datetime,
+        )
+
+        cases = [
+            ("2026-11-20T10:00:00Z", "2026-11-20T10:00:00.000000Z"),
+            ("2026-11-20T10:00:00z", "2026-11-20T10:00:00.000000Z"),
+            ("2026-11-20T10:00:00+00:00", "2026-11-20T10:00:00.000000Z"),
+            ("2026-11-20T12:00:00+02:00", "2026-11-20T10:00:00.000000Z"),
+            ("2026-11-20T04:30:00-0530", "2026-11-20T10:00:00.000000Z"),
+            ("2026-11-20 10:00:00", "2026-11-20T10:00:00.000000Z"),
+            ("2026-11-20T10:00:00.5Z", "2026-11-20T10:00:00.500000Z"),
+            ("2026-11-20T10:00:00.50Z", "2026-11-20T10:00:00.500000Z"),
+            ("2026-11-20T10:00:00.500Z", "2026-11-20T10:00:00.500000Z"),
+            ("2026-11-20T10:00:00.123456Z", "2026-11-20T10:00:00.123456Z"),
+            ("2026-11-20T10:00:00.123456789Z", "2026-11-20T10:00:00.123456Z"),
+            (datetime(2026, 11, 20, 10, 0, 0, tzinfo=timezone.utc), "2026-11-20T10:00:00.000000Z"),
+            (1795168800.25, "2026-11-20T10:00:00.250000Z"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                out = canonicalize_iso_utc(raw)
+                self.assertEqual(len(out), 27)
+                self.assertEqual(out, expected)
+
+        # Reject invalid types / non-finite numbers cleanly
+        for bad in (None, "", "   ", "not-a-timestamp", True, False, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad=bad):
+                self.assertIsNone(parse_iso_utc_datetime(bad))
+
+        # Date-only bound expansion
+        self.assertEqual(normalize_start_bound("2026-11-20"), "2026-11-20T00:00:00.000000Z")
+        self.assertEqual(normalize_end_bound("2026-11-20"), "2026-11-20T23:59:59.999999Z")
+        self.assertIsNone(normalize_start_bound(None))
+        self.assertIsNone(normalize_end_bound("  "))
+        self.assertEqual(len(iso_utc_now()), 27)
 
 
 if __name__ == "__main__":

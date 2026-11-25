@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from train_tracker import TrainPosition
 
@@ -40,6 +40,17 @@ class _LastRecordedState:
     schedule_id: Optional[str]
 
 
+@dataclass(frozen=True)
+class DeadbandBatchEvaluation:
+    """Immutable staged result of pure deadband evaluation prior to database commit."""
+
+    admitted: Tuple[TrainPosition, ...]
+    staged_states: Tuple[Tuple[str, _LastRecordedState], ...]
+    inspected_count: int
+    admitted_count: int
+    suppressed_count: int
+
+
 class DeadbandFilter:
     """
     Evaluates train telemetry against spatial, temporal, and operational thresholds
@@ -56,6 +67,29 @@ class DeadbandFilter:
         self._total_evicted: int = 0
         self._last_prune_ts: float = 0.0
 
+    def _prune_stale_locked(
+        self,
+        current_time: float,
+        max_age_sec: Optional[float] = None,
+        force: bool = False,
+    ) -> int:
+        """Evict stale vehicle states under active self._lock."""
+        if (
+            not force
+            and (current_time - self._last_prune_ts) < self.config.stale_prune_interval_sec
+        ):
+            return 0
+        cutoff = max_age_sec if max_age_sec is not None else self.config.stale_timeout_sec
+        stale_keys = [
+            tid for tid, state in self._states.items()
+            if (current_time - state.timestamp) > cutoff
+        ]
+        for tid in stale_keys:
+            del self._states[tid]
+        self._total_evicted += len(stale_keys)
+        self._last_prune_ts = current_time
+        return len(stale_keys)
+
     def prune_stale_states(
         self,
         max_age_sec: Optional[float] = None,
@@ -65,18 +99,13 @@ class DeadbandFilter:
         Evict cached train states that have not received telemetry updates within max_age_sec.
         Returns count of evicted vehicle states.
         """
-        cutoff = max_age_sec if max_age_sec is not None else self.config.stale_timeout_sec
         current_time = now_epoch if now_epoch is not None else time.time()
         with self._lock:
-            stale_keys = [
-                tid for tid, state in self._states.items()
-                if (current_time - state.timestamp) > cutoff
-            ]
-            for tid in stale_keys:
-                del self._states[tid]
-            self._total_evicted += len(stale_keys)
-            self._last_prune_ts = current_time
-            return len(stale_keys)
+            return self._prune_stale_locked(
+                current_time=current_time,
+                max_age_sec=max_age_sec,
+                force=True,
+            )
 
     @staticmethod
     def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -91,8 +120,103 @@ class DeadbandFilter:
             math.sin(delta_phi / 2.0) ** 2
             + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
         )
-        c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+        a_clamped = min(1.0, max(0.0, a))
+        c = 2.0 * math.atan2(math.sqrt(a_clamped), math.sqrt(1.0 - a_clamped))
         return r * c
+
+    def _evaluate_position_against_state(
+        self,
+        pos: TrainPosition,
+        last: Optional[_LastRecordedState],
+        current_time: float,
+    ) -> Tuple[bool, Optional[str]]:
+        """Pure deadband rule evaluation with zero state or counter mutation."""
+        if last is None:
+            return True, "initial"
+        if self.config.track_status_change and pos.status != last.status:
+            return True, "status"
+        if self.config.track_station_change and pos.next_station != last.next_station:
+            return True, "station"
+        if self.config.track_schedule_change and pos.schedule_id != last.schedule_id:
+            return True, "schedule"
+        if abs(pos.delay - last.delay) >= self.config.min_delay_delta_min:
+            return True, "delay"
+        dist_m = self.haversine_distance(last.lat, last.lng, pos.lat, pos.lng)
+        if dist_m >= self.config.min_distance_m:
+            return True, "distance"
+        if abs(pos.speed - last.speed) >= self.config.min_speed_delta_kmh:
+            return True, "speed"
+        elapsed = current_time - last.timestamp
+        if elapsed >= self.config.max_heartbeat_interval_sec:
+            return True, "heartbeat"
+        return False, None
+
+    @staticmethod
+    def _build_state(pos: TrainPosition, current_time: float) -> _LastRecordedState:
+        """Construct an internal state snapshot for an admitted TrainPosition."""
+        return _LastRecordedState(
+            timestamp=current_time,
+            lat=pos.lat,
+            lng=pos.lng,
+            speed=pos.speed,
+            delay=pos.delay,
+            status=pos.status,
+            next_station=pos.next_station,
+            schedule_id=pos.schedule_id,
+        )
+
+    def evaluate_batch(
+        self,
+        positions: Sequence[TrainPosition],
+        now_epoch: Optional[float] = None,
+    ) -> DeadbandBatchEvaluation:
+        """Purely evaluate a telemetry batch without mutating filter state or counters."""
+        current_time = now_epoch if now_epoch is not None else time.time()
+        with self._lock:
+            working_states: Dict[str, _LastRecordedState] = {
+                p.train_number: self._states[p.train_number]
+                for p in positions
+                if p.train_number in self._states
+            }
+
+        admitted: List[TrainPosition] = []
+        staged_updates: Dict[str, _LastRecordedState] = {}
+        suppressed_count = 0
+
+        for pos in positions:
+            train_id = pos.train_number
+            last = working_states.get(train_id)
+            should_save, _ = self._evaluate_position_against_state(pos, last, current_time)
+            if should_save:
+                new_state = self._build_state(pos, current_time)
+                working_states[train_id] = new_state
+                staged_updates[train_id] = new_state
+                admitted.append(pos)
+            else:
+                suppressed_count += 1
+
+        return DeadbandBatchEvaluation(
+            admitted=tuple(admitted),
+            staged_states=tuple(staged_updates.items()),
+            inspected_count=len(positions),
+            admitted_count=len(admitted),
+            suppressed_count=suppressed_count,
+        )
+
+    def commit_batch(
+        self,
+        evaluation: DeadbandBatchEvaluation,
+        now_epoch: Optional[float] = None,
+    ) -> None:
+        """Promote staged deadband states and counters strictly AFTER SQLite commit succeeds."""
+        current_time = now_epoch if now_epoch is not None else time.time()
+        with self._lock:
+            self._prune_stale_locked(current_time=current_time, force=False)
+            for train_id, new_state in evaluation.staged_states:
+                self._states[train_id] = new_state
+            self._total_inspected += evaluation.inspected_count
+            self._total_admitted += evaluation.admitted_count
+            self._total_suppressed += evaluation.suppressed_count
 
     def should_record(
         self, pos: TrainPosition, now_epoch: Optional[float] = None
@@ -109,61 +233,14 @@ class DeadbandFilter:
         train_id = pos.train_number
 
         with self._lock:
-            # Automatic periodic eviction of stale train states
-            if (current_time - self._last_prune_ts) >= self.config.stale_prune_interval_sec:
-                stale_keys = [
-                    tid for tid, state in self._states.items()
-                    if (current_time - state.timestamp) > self.config.stale_timeout_sec
-                ]
-                for tid in stale_keys:
-                    del self._states[tid]
-                self._total_evicted += len(stale_keys)
-                self._last_prune_ts = current_time
-
+            self._prune_stale_locked(current_time=current_time, force=False)
             self._total_inspected += 1
             last = self._states.get(train_id)
-            if last is None:
+            should_save, reason = self._evaluate_position_against_state(pos, last, current_time)
+            if should_save:
                 self._admit_locked(train_id, pos, current_time)
-                return True, "initial"
+                return True, reason
 
-            # 1. Status transition check (e.g. Κανονική -> Στάση)
-            if self.config.track_status_change and pos.status != last.status:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "status"
-
-            # 2. Next station change check
-            if self.config.track_station_change and pos.next_station != last.next_station:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "station"
-
-            # 3. Schedule change check
-            if self.config.track_schedule_change and pos.schedule_id != last.schedule_id:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "schedule"
-
-            # 4. Delay change check
-            if abs(pos.delay - last.delay) >= self.config.min_delay_delta_min:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "delay"
-
-            # 5. Distance displacement check
-            dist_m = self.haversine_distance(last.lat, last.lng, pos.lat, pos.lng)
-            if dist_m >= self.config.min_distance_m:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "distance"
-
-            # 6. Speed change check
-            if abs(pos.speed - last.speed) >= self.config.min_speed_delta_kmh:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "speed"
-
-            # 7. Heartbeat interval check
-            elapsed = current_time - last.timestamp
-            if elapsed >= self.config.max_heartbeat_interval_sec:
-                self._admit_locked(train_id, pos, current_time)
-                return True, "heartbeat"
-
-            # Suppressed redundant record
             self._total_suppressed += 1
             return False, None
 
@@ -180,16 +257,7 @@ class DeadbandFilter:
 
     def _admit_locked(self, train_id: str, pos: TrainPosition, current_time: float) -> None:
         """Internal helper to mutate state cache under active lock."""
-        self._states[train_id] = _LastRecordedState(
-            timestamp=current_time,
-            lat=pos.lat,
-            lng=pos.lng,
-            speed=pos.speed,
-            delay=pos.delay,
-            status=pos.status,
-            next_station=pos.next_station,
-            schedule_id=pos.schedule_id,
-        )
+        self._states[train_id] = self._build_state(pos, current_time)
         self._total_admitted += 1
 
     def reset(self) -> None:
