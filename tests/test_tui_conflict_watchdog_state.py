@@ -2,7 +2,7 @@
 
 import unittest
 
-from train_tracker import TrainPosition
+from train_tracker import DelayUpdate, TrainPosition
 from tui.geo import (
     ConflictSeverity,
     ConflictType,
@@ -267,6 +267,83 @@ class TestConflictWatchdogState(unittest.TestCase):
         new_cfg = ConflictWatchdogConfig(headway_critical_distance_km=0.8)
         self.store.set_conflict_config(new_cfg)
         self.assertEqual(self.store.get_conflict_config().headway_critical_distance_km, 0.8)
+
+    def test_tc_wdg_13_state_store_stale_ghost_preemption_end_to_end(self) -> None:
+        """TC-WDG-13: Real TrainPosition records in TrainStateStore demote 120s-stale opposing ghost to ADVISORY."""
+        self.store.set_stations([])
+        t0 = 10000.0
+        t1 = _make_pos("T1597", "1597", 38.4000, 23.6000, speed=90.0, course=30.0, corridor="proastiakos-chalkida")
+        t2 = _make_pos("T1598", "1598", 38.4180, 23.6120, speed=0.0, course=210.0, corridor="proastiakos-chalkida")
+
+        self.store.update_positions([t1, t2], virtual_now=t0)
+        snap0 = self.store.get_snapshot(now=t0)
+        self.assertEqual(snap0.critical_conflict_count, 1)
+        self.assertTrue(self.store.consume_conflict_bell())
+
+        # Advance 120s: only T1597 refreshes; T1598 is silent 120s (> 60s threshold)
+        self.store.update_positions([t1], virtual_now=t0 + 120.0)
+        snap1 = self.store.get_snapshot(now=t0 + 120.0)
+        self.assertEqual(snap1.critical_conflict_count, 0)
+        self.assertEqual(snap1.warning_conflict_count, 0)
+        self.assertEqual(snap1.advisory_conflict_count, 1)
+        self.assertEqual(len(snap1.active_conflicts), 1)
+        self.assertTrue(snap1.active_conflicts[0].alert_id.endswith("_STALE_OBSTRUCTION"))
+        self.assertFalse(self.store.consume_conflict_bell())
+
+    def test_tc_wdg_14_state_store_stale_headway_demotion_and_recovery(self) -> None:
+        """TC-WDG-14: Stale lead train demotes headway breach to ADVISORY and recovers immediately on fresh GPS."""
+        self.store.set_stations([])
+        t0 = 20000.0
+        t_lead = _make_pos("T-LEAD", "IC 50", 39.5200, 22.4000, speed=80.0, course=0.0, corridor="pathe-mainline")
+        t_trail = _make_pos("T-TRAIL", "IC 52", 39.5165, 22.4000, speed=120.0, course=0.0, corridor="pathe-mainline")
+
+        self.store.update_positions([t_lead, t_trail], virtual_now=t0)
+        snap0 = self.store.get_snapshot(now=t0)
+        self.assertEqual(snap0.critical_conflict_count, 1)
+        self.assertTrue(self.store.consume_conflict_bell())
+
+        # Lead train silent 75s (> 60s threshold) -> demoted to ADVISORY _STALE_HEADWAY
+        self.store.update_positions([t_trail], virtual_now=t0 + 75.0)
+        snap_stale = self.store.get_snapshot(now=t0 + 75.0)
+        self.assertEqual(snap_stale.critical_conflict_count, 0)
+        self.assertEqual(snap_stale.advisory_conflict_count, 1)
+        self.assertTrue(snap_stale.active_conflicts[0].alert_id.endswith("_STALE_HEADWAY"))
+        self.assertFalse(self.store.consume_conflict_bell())
+
+        # Lead train sends fresh GPS at t0 + 80s -> immediately re-evaluates to live CRITICAL
+        self.store.update_positions([t_lead, t_trail], virtual_now=t0 + 80.0)
+        snap_rec = self.store.get_snapshot(now=t0 + 80.0)
+        self.assertEqual(snap_rec.critical_conflict_count, 1)
+        self.assertEqual(snap_rec.advisory_conflict_count, 0)
+
+    def test_tc_wdg_18_delay_updates_preserve_conflict_staleness(self) -> None:
+        """TC-WDG-18: F-10.1 apply_delay_updates() must not refresh last_updated or clear stale-ghost demotion."""
+        self.store.set_stations([])
+        t0 = 30000.0
+        t1 = _make_pos("T1597", "1597", 38.4000, 23.6000, speed=90.0, course=30.0, corridor="proastiakos-chalkida")
+        t2 = _make_pos("T1598", "1598", 38.4180, 23.6120, speed=0.0, course=210.0, corridor="proastiakos-chalkida")
+        self.store.update_positions([t1, t2], virtual_now=t0)
+        _ = self.store.consume_conflict_bell()
+
+        # At t0 + 90s: T1597 updates GPS; T1598 only gets a delay delta (no GPS update)
+        self.store.update_positions([t1], virtual_now=t0 + 90.0)
+        delay_upd = DelayUpdate(
+            train_id="T1598",
+            train_number="1598",
+            schedule_id="sch-1",
+            delay=5,
+        )
+        applied = self.store.apply_delay_updates([delay_upd], now=t0 + 90.0)
+        self.assertGreaterEqual(applied, 1)
+
+        rec2 = self.store.get_train("T1598")
+        assert rec2 is not None
+        self.assertAlmostEqual(rec2.last_updated, t0)
+
+        snap = self.store.get_snapshot(now=t0 + 90.0)
+        self.assertEqual(snap.critical_conflict_count, 0)
+        self.assertEqual(snap.advisory_conflict_count, 1)
+        self.assertTrue(snap.active_conflicts[0].alert_id.endswith("_STALE_OBSTRUCTION"))
 
 
 if __name__ == "__main__":

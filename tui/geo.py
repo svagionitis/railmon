@@ -7,13 +7,18 @@ a 2x4 sub-pixel Braille rasterizer for rendering railway tracks.
 
 import json
 import locale
+import logging
 import math
 import os
 import sys
+import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple, Union
+
+logger = logging.getLogger("railmon." + __name__)
 
 
 # Base Unicode code point for Braille Patterns block (U+2800)
@@ -1465,33 +1470,123 @@ DEFAULT_CORRIDOR_SPEED_RULES: Dict[str, CorridorSpeedRule] = {
 }
 
 
+DEFAULT_DOUBLE_TRACK_CORRIDORS: FrozenSet[str] = frozenset({
+    "pathe-mainline",
+    "proastiakos-airport-kiato",
+})
+
+# Macro family labels that span multiple physical corridors (often mixing double-track
+# and single-track lines, or distinct regional branches) and require geometric or
+# route-metadata disambiguation rather than eager collapse to double-track defaults.
+AMBIGUOUS_CORRIDOR_FAMILIES: Dict[str, FrozenSet[str]] = {
+    "proastiakos": frozenset({"proastiakos-airport-kiato", "proastiakos-chalkida"}),
+    "thessaly": frozenset({"thessaly-kalambaka", "thessaly-volos"}),
+    "northern": frozenset({"northern-corridor", "thessaloniki-idomeni"}),
+}
+
+# Ordered SPECIFIC-FIRST keyword table (single-track branches checked BEFORE mainline rules).
+# Broad ambiguous substrings like "thess" or "athina" are intentionally excluded from
+# mainline rules so regional corridors are never hijacked to double-track pathe-mainline.
+_SPECIFIC_CORRIDOR_KEYWORDS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("proastiakos-chalkida", ("chalk", "χαλκ", "athhal", "inoichalk", "oinoichalk", "αυλιδ", "avlis", "οινωφυτ", "οινοφυτ", "oinofyt")),
+    ("thessaloniki-idomeni", ("idomeni", "ειδομεν", "polykastro", "πολυκαστρ")),
+    (
+        "thessaly-kalambaka",
+        ("kalambaka", "kalampaka", "καλαμπακ", "farsala", "paleofarsal", "palaiofarsal", "παλαιοφαρσαλ", "karditsa", "καρδιτσ", "trikala", "τρικαλ"),
+    ),
+    ("thessaly-volos", ("volos", "βολος", "βολο", "βολου", "velestin", "βελεστιν")),
+    (
+        "western-macedonia",
+        ("thesflor", "edessa", "εδεσσ", "florina", "φλωριν", "veria", "veroia", "βεροι", "amyntaio", "αμυνται", "westmacedonia", "westernmacedonia"),
+    ),
+    (
+        "northern-corridor",
+        (
+            "alexandroupol", "αλεξανδρουπολ", "alexor", "ormenio", "ορμεν",
+            "dikea", "δικαι", "pythio", "πυθι", "komotini", "κομοτην",
+            "xanthi", "ξανθ", "drama", "δραμ", "serres", "σερρ",
+            "thrace", "θρακ", "strymon", "στρυμον", "easternmacedonia", "northerncorridor",
+        ),
+    ),
+    (
+        "proastiakos-airport-kiato",
+        ("airport", "aerodromio", "αεροδρομ", "kiato", "κιατ", "pirair", "korinth", "corinth", "κορινθ", "megara", "μεγαρ"),
+    ),
+    ("pathe-mainline", ("pathe", "e85", "mainline", "athlia", "theslar")),
+)
+
+_AMBIGUOUS_FAMILY_KEYWORDS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("thessaly", ("thessaly", "θεσσαλ")),
+    ("proastiakos", ("proast", "προαστ", "suburban")),
+    ("northern", ("northern", "northgreece")),
+)
+
+_PATHE_ROUTE_KEYWORDS: Tuple[str, ...] = (
+    "thessaloniki", "θεσσαλονικ", "larissa", "λαρισ",
+    "lianoklad", "λιανοκλαδ", "domok", "δομοκ",
+    "katerin", "κατεριν", "thiva", "θηβ", "levadia", "λιβαδει",
+)
+
+_DEFAULT_TRACKS_CACHE_LOCK = threading.Lock()
+_DEFAULT_TRACKS_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _fold_corridor_token(text: str) -> str:
+    """Fold text to diacritic-stripped, lowercase, separator-free token for matching."""
+    nfd = unicodedata.normalize("NFD", text.strip().lower())
+    stripped = "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn")
+    return stripped.replace("-", "").replace("_", "").replace(" ", "")
+
+
+def _get_default_tracks_data() -> Optional[Dict[str, Any]]:
+    """Lazily load and cache package track polylines without repeated disk I/O."""
+    global _DEFAULT_TRACKS_CACHE
+    with _DEFAULT_TRACKS_CACHE_LOCK:
+        if _DEFAULT_TRACKS_CACHE is not None:
+            return _DEFAULT_TRACKS_CACHE
+        try:
+            from tui.mock_engine import load_tracks
+
+            _DEFAULT_TRACKS_CACHE = load_tracks()
+            return _DEFAULT_TRACKS_CACHE
+        except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
+            logger.debug("Failed to load default track polylines: %s", exc)
+            return None
+
+
 def _normalize_corridor_key(corridor_id: Optional[str]) -> Optional[str]:
-    """Normalize Hellenic Railways corridor strings and aliases to standard corridor IDs."""
+    """Normalize Hellenic Railways corridor strings and aliases to canonical corridor IDs.
+
+    Specific single-track branches are matched before double-track mainlines so broad
+    prefixes ('thess', 'athina') never hijack regional corridors onto pathe-mainline.
+    Macro family labels ('PROASTIAKOS', 'THESSALY', 'NORTHERN') normalize to their
+    family key so callers with coordinates can disambiguate geometrically via tracks.json.
+    """
     if not corridor_id:
         return None
     raw = corridor_id.strip().lower()
+    if not raw:
+        return None
     if raw in DEFAULT_CORRIDOR_SPEED_RULES:
         return raw
 
-    clean = raw.replace("-", "").replace("_", "")
-    if any(k in clean for k in ("pathe", "e85", "mainline", "athina", "thess")):
-        return "pathe-mainline"
-    if any(k in clean for k in ("airport", "kiato", "pirair")):
-        return "proastiakos-airport-kiato"
-    if "chalk" in clean:
-        return "proastiakos-chalkida"
-    if "idomeni" in clean:
-        return "thessaloniki-idomeni"
-    if "kalambaka" in clean or "farsala" in clean:
-        return "thessaly-kalambaka"
-    if "volos" in clean:
-        return "thessaly-volos"
-    if any(k in clean for k in ("edessa", "florina", "veria", "westmacedonia")):
+    clean = _fold_corridor_token(raw)
+    for canonical_id, keywords in _SPECIFIC_CORRIDOR_KEYWORDS:
+        if any(k in clean for k in keywords):
+            return canonical_id
+
+    if clean == "macedonia":
         return "western-macedonia"
-    if any(k in clean for k in ("northern", "thrace", "strymon", "alex")):
-        return "northern-corridor"
-    if "proast" in clean:
-        return "proastiakos-airport-kiato"
+
+    has_south_hub = any(k in clean for k in ("athina", "athens", "piraeus", "πειραι", "αθην"))
+    has_pathe_north = any(k in clean for k in ("thessaloniki", "θεσσαλονικ", "larissa", "λαρισ", "lianoklad", "δομοκ", "domok"))
+    if (has_south_hub and has_pathe_north) or clean in ("athina", "athens", "thessaloniki"):
+        return "pathe-mainline"
+
+    for family_key, keywords in _AMBIGUOUS_FAMILY_KEYWORDS:
+        if any(k in clean for k in keywords):
+            return family_key
+
     return raw
 
 
@@ -1674,6 +1769,46 @@ def _classify_speed_severity(
     return OverspeedSeverity.NORMAL, "", pair_default
 
 
+def _resolve_speed_corridor_rule(
+    point: GeoPoint,
+    corridor_id: Optional[str],
+    speed_rules: Dict[str, CorridorSpeedRule],
+    tracks_data: Optional[Dict[str, Any]] = None,
+    route_hint_train: Optional[Any] = None,
+) -> Tuple[Optional[str], Optional[CorridorSpeedRule]]:
+    """Resolve canonical corridor key and speed rule using tags, geometry, and family fail-safes."""
+    corr_key = _normalize_corridor_key(corridor_id)
+    if corr_key and corr_key in speed_rules:
+        return corr_key, speed_rules[corr_key]
+
+    td = tracks_data if tracks_data is not None else _get_default_tracks_data()
+    family_members = AMBIGUOUS_CORRIDOR_FAMILIES.get(corr_key) if corr_key else None
+
+    if family_members:
+        snapped = _snap_point_to_corridor(
+            point, route_hint_train, td, allowed_corridors=family_members, max_snap_distance_m=1500.0
+        )
+        if snapped and snapped in speed_rules:
+            return snapped, speed_rules[snapped]
+        meta_cid = _disambiguate_corridor_by_route_metadata(
+            route_hint_train, tuple(sorted(family_members))
+        )
+        if meta_cid and meta_cid in speed_rules:
+            return meta_cid, speed_rules[meta_cid]
+        member_rules = [speed_rules[m] for m in sorted(family_members) if m in speed_rules]
+        if member_rules:
+            conservative = min(member_rules, key=lambda r: r.default_speed_kmh)
+            return conservative.corridor_id, conservative
+        return corr_key, None
+
+    snapped_any = _snap_point_to_corridor(
+        point, route_hint_train, td, allowed_corridors=None, max_snap_distance_m=1500.0
+    )
+    if snapped_any and snapped_any in speed_rules:
+        return snapped_any, speed_rules[snapped_any]
+    return corr_key, None
+
+
 def evaluate_train_speed(
     point: GeoPoint,
     current_speed: Optional[float],
@@ -1684,6 +1819,8 @@ def evaluate_train_speed(
     overspeed_threshold_kmh: float = 10.0,
     tsr_overspeed_threshold_kmh: float = 5.0,
     train_id: str = "",
+    tracks_data: Optional[Dict[str, Any]] = None,
+    route_hint_train: Optional[Any] = None,
 ) -> SpeedEnforcementResult:
     """Evaluate train instantaneous velocity against applicable corridor speed limits and active TSRs.
 
@@ -1697,6 +1834,8 @@ def evaluate_train_speed(
         overspeed_threshold_kmh: Minimum delta to trigger general overspeed alert (default: 10.0).
         tsr_overspeed_threshold_kmh: Minimum delta to trigger TSR overspeed violation (default: 5.0).
         train_id: Train identifier for traceability.
+        tracks_data: Optional track corridors dictionary for geometric disambiguation.
+        route_hint_train: Optional train object exposing origin/destination/next_station for tie-breaks.
 
     Returns:
         SpeedEnforcementResult containing severity, governing limit, margin, and status tags.
@@ -1708,18 +1847,29 @@ def evaluate_train_speed(
     # 1. Check for Active Temporary Speed Restrictions (TSRs)
     matched_tsr, tsr_limit = _find_active_tsr(point, tsr_list)
 
-    # 2. Check for Segment-Level Speed Limits
-    corr_key = _normalize_corridor_key(corridor_id)
-    matched_seg, seg_limit, corr_rule = _find_segment_limit(point, corr_key, speed_rules)
+    # 2. Resolve canonical corridor (specific tag -> geometric snap -> conservative family rule)
+    corr_key, resolved_rule = _resolve_speed_corridor_rule(
+        point=point,
+        corridor_id=corridor_id,
+        speed_rules=speed_rules,
+        tracks_data=tracks_data,
+        route_hint_train=route_hint_train,
+    )
+    matched_seg, seg_limit, seg_corr_rule = _find_segment_limit(point, corr_key, speed_rules)
+    corr_rule = seg_corr_rule or resolved_rule
 
     # 3. Macro Corridor Base Limit & Governing Limit Resolution
     base_limit = corr_rule.default_speed_kmh if corr_rule else default_network_limit_kmh
     gov_limit = min(tsr_limit, seg_limit, base_limit)
-    is_tsr = (matched_tsr is not None and gov_limit == matched_tsr.max_speed_kmh)
+    is_tsr = matched_tsr is not None and math.isclose(
+        gov_limit, matched_tsr.max_speed_kmh, rel_tol=1e-9, abs_tol=1e-9
+    )
 
     if is_tsr and matched_tsr:
         gov_name = f"TSR: {matched_tsr.name}"
-    elif matched_seg and gov_limit == matched_seg.max_speed_kmh:
+    elif matched_seg and math.isclose(
+        gov_limit, matched_seg.max_speed_kmh, rel_tol=1e-9, abs_tol=1e-9
+    ):
         gov_name = matched_seg.name
     elif corr_rule:
         gov_name = corr_rule.name
@@ -1765,12 +1915,51 @@ class SensorHealthState(Enum):
 DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC: float = 180.0
 DEFAULT_TUNNEL_DROP_MIN_SEC: float = 300.0
 DEFAULT_TUNNEL_MARGIN_FACTOR: float = 1.35
+DEFAULT_TUNNEL_MIN_ENTRY_SPEED_KMH: float = 40.0
+DEFAULT_TUNNEL_FALLBACK_LENGTH_M: float = 5000.0
 DEFAULT_TERMINAL_DWELL_RADIUS_M: float = 600.0
 DEFAULT_STATION_DWELL_RADIUS_M: float = 350.0
 DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC: float = 60.0
 DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH: float = 5.0
 DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC: float = 15.0
 TERMINAL_STATION_IDS: Set[str] = {"ath", "skg", "ska", "lian", "lar", "dom", "kth"}
+
+
+def compute_tunnel_grace_sec(
+    tunnel: Any,
+    speed_kmh: Optional[float],
+    min_grace_sec: float = DEFAULT_TUNNEL_DROP_MIN_SEC,
+    margin_factor: float = DEFAULT_TUNNEL_MARGIN_FACTOR,
+) -> float:
+    """Compute the tunnel transit deadband grace period in seconds before DROPPED escalation.
+
+    Shared between sensor-health tunnel evaluation and TrainStateStore state-aware eviction
+    so slow/freight transits in long bores (e.g. Kallidromo 9,038m) are never prematurely pruned.
+    """
+    raw_len = getattr(tunnel, "length_m", None)
+    if (
+        isinstance(raw_len, (int, float))
+        and not isinstance(raw_len, bool)
+        and math.isfinite(raw_len)
+        and raw_len > 0.0
+    ):
+        tun_len = float(raw_len)
+    else:
+        tun_len = DEFAULT_TUNNEL_FALLBACK_LENGTH_M
+
+    if (
+        isinstance(speed_kmh, (int, float))
+        and not isinstance(speed_kmh, bool)
+        and math.isfinite(speed_kmh)
+        and speed_kmh > 0.0
+    ):
+        spd = float(speed_kmh)
+    else:
+        spd = 0.0
+
+    entry_spd = max(spd, DEFAULT_TUNNEL_MIN_ENTRY_SPEED_KMH)
+    nominal_transit_sec = tun_len / (entry_spd * (1000.0 / 3600.0))
+    return max(float(min_grace_sec), nominal_transit_sec * float(margin_factor))
 
 
 @dataclass(frozen=True)
@@ -1858,13 +2047,7 @@ def _evaluate_tunnel_health(
         return None
 
     tunnel, dist_along_m, _ = tunnel_info
-    tun_len = getattr(tunnel, "length_m", None) or 5000.0
-    entry_spd = max(spd, 40.0)  # Conservative floor for freight/crawling transit
-    nominal_transit_sec = tun_len / (entry_spd * (1000.0 / 3600.0))
-    grace_sec = max(
-        DEFAULT_TUNNEL_DROP_MIN_SEC,
-        nominal_transit_sec * DEFAULT_TUNNEL_MARGIN_FACTOR,
-    )
+    grace_sec = compute_tunnel_grace_sec(tunnel, spd)
     tun_name = getattr(tunnel, "name", "Tunnel")
 
     if elapsed >= grace_sec:
@@ -2238,6 +2421,8 @@ DEFAULT_SINGLE_TRACK_CORRIDORS: FrozenSet[str] = frozenset({
     "thessaly-volos",
     "western-macedonia",
     "northern-corridor",
+    "thessaly",
+    "northern",
 })
 
 CORRIDOR_DISPLAY_NAMES: Dict[str, str] = {
@@ -2422,56 +2607,184 @@ def compute_closing_velocity_kmh(
     return v1_proj + v2_proj
 
 
+def _record_min_corridor_distance(
+    distances: Dict[str, float],
+    raw_cid: str,
+    dist_m: float,
+) -> None:
+    """Update minimum finite perpendicular distance for a normalized corridor key."""
+    if not math.isfinite(dist_m):
+        return
+    norm_key = _normalize_corridor_key(raw_cid) or raw_cid
+    prev = distances.get(norm_key)
+    if prev is None or dist_m < prev:
+        distances[norm_key] = dist_m
+
+
+def _collect_polyline_object_distances(
+    pt: GeoPoint,
+    tracks_data: Dict[str, Any],
+) -> Dict[str, float]:
+    """Compute distances for TrackPolyline mappings exposing project_point()."""
+    distances: Dict[str, float] = {}
+    for cid, track_obj in tracks_data.items():
+        if not hasattr(track_obj, "project_point"):
+            continue
+        try:
+            _, dist_m, _ = track_obj.project_point(pt)
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.debug("Track projection failed for corridor %s: %s", cid, exc)
+            continue
+        key = str(getattr(track_obj, "corridor_id", cid) or cid)
+        _record_min_corridor_distance(distances, key, dist_m)
+    return distances
+
+
+def _collect_track_distances(
+    pt: GeoPoint,
+    tracks_data: Dict[str, Any],
+) -> Dict[str, float]:
+    """Compute minimum perpendicular distance in meters from pt to each corridor in tracks_data."""
+    # Case 1: Dict[str, TrackPolyline] (from load_tracks)
+    if any(hasattr(v, "project_point") for v in tracks_data.values()):
+        return _collect_polyline_object_distances(pt, tracks_data)
+
+    distances: Dict[str, float] = {}
+
+    # Case 2: Dict containing "corridors" key (from raw tracks.json)
+    raw_corridors = tracks_data.get("corridors")
+    if isinstance(raw_corridors, list):
+        for c in raw_corridors:
+            if not isinstance(c, dict):
+                continue
+            cid = str(c.get("id") or "")
+            if cid:
+                _record_min_corridor_distance(
+                    distances, cid, _min_distance_to_raw_segments(pt, c.get("segments", []))
+                )
+        return distances
+
+    # Case 3: Generic mapping of objects with points list
+    for cid, obj in tracks_data.items():
+        pts = getattr(obj, "points", None)
+        if not (pts and isinstance(pts, list) and len(pts) >= 2):
+            continue
+        best_for_c = min(
+            project_point_to_segment(pt, pts[k - 1], pts[k])[1]
+            for k in range(1, len(pts))
+        )
+        key = str(getattr(obj, "corridor_id", cid) or cid)
+        _record_min_corridor_distance(distances, key, best_for_c)
+
+    return distances
+
+
+def _min_distance_to_raw_segments(pt: GeoPoint, segments: Any) -> float:
+    """Compute minimum perpendicular distance from pt to raw tracks.json segment lists."""
+    best = float("inf")
+    if not isinstance(segments, list):
+        return best
+    for seg in segments:
+        if not isinstance(seg, list) or len(seg) < 2:
+            continue
+        for k in range(1, len(seg)):
+            p0 = GeoPoint(lat=float(seg[k - 1][0]), lng=float(seg[k - 1][1]))
+            p1 = GeoPoint(lat=float(seg[k][0]), lng=float(seg[k][1]))
+            _, dist_m = project_point_to_segment(pt, p0, p1)
+            if dist_m < best:
+                best = dist_m
+    return best
+
+
+def _find_nearest_track_corridor_candidates(
+    pt: GeoPoint,
+    tracks_data: Dict[str, Any],
+    allowed_corridors: Optional[FrozenSet[str]] = None,
+    max_snap_distance_m: float = 1500.0,
+    tie_epsilon_m: float = 50.0,
+) -> Tuple[Optional[str], float, Tuple[str, ...]]:
+    """Find nearest corridor(s) within max_snap_distance_m, returning tied candidates within tie_epsilon_m."""
+    distances = _collect_track_distances(pt, tracks_data)
+    filtered = [
+        (cid, d)
+        for cid, d in distances.items()
+        if (allowed_corridors is None or cid in allowed_corridors)
+    ]
+    if not filtered:
+        return None, float("inf"), ()
+
+    filtered.sort(key=lambda item: (item[1], item[0]))
+    best_cid, best_dist_m = filtered[0]
+    if best_dist_m > max_snap_distance_m:
+        return best_cid, best_dist_m, ()
+
+    tied = tuple(cid for cid, d in filtered if d <= (best_dist_m + tie_epsilon_m))
+    return best_cid, best_dist_m, tied
+
+
 def _find_nearest_track_corridor(
     pt: GeoPoint,
     tracks_data: Dict[str, Any],
 ) -> Tuple[Optional[str], float]:
     """Find the nearest track corridor and distance in meters to a geographic point."""
-    best_cid: Optional[str] = None
-    best_dist_m = float("inf")
-
-    # Case 1: Dict[str, TrackPolyline] (from load_tracks)
-    if any(hasattr(v, "project_point") for v in tracks_data.values()):
-        for cid, track_obj in tracks_data.items():
-            if hasattr(track_obj, "project_point"):
-                try:
-                    _, dist_m, _ = track_obj.project_point(pt)
-                    if dist_m < best_dist_m:
-                        best_dist_m = dist_m
-                        best_cid = getattr(track_obj, "corridor_id", cid)
-                except Exception:
-                    continue
-        return best_cid, best_dist_m
-
-    # Case 2: Dict containing "corridors" key (from raw tracks.json)
-    if "corridors" in tracks_data and isinstance(tracks_data["corridors"], list):
-        for c in tracks_data["corridors"]:
-            if not isinstance(c, dict):
-                continue
-            cid = str(c.get("id") or "")
-            for seg in c.get("segments", []):
-                if not isinstance(seg, list) or len(seg) < 2:
-                    continue
-                for k in range(1, len(seg)):
-                    p0 = GeoPoint(lat=float(seg[k - 1][0]), lng=float(seg[k - 1][1]))
-                    p1 = GeoPoint(lat=float(seg[k][0]), lng=float(seg[k][1]))
-                    _, dist_m = project_point_to_segment(pt, p0, p1)
-                    if dist_m < best_dist_m:
-                        best_dist_m = dist_m
-                        best_cid = cid
-        return best_cid, best_dist_m
-
-    # Case 3: Generic mapping of objects with points list
-    for cid, obj in tracks_data.items():
-        pts = getattr(obj, "points", None)
-        if pts and isinstance(pts, list) and len(pts) >= 2:
-            for k in range(1, len(pts)):
-                _, dist_m = project_point_to_segment(pt, pts[k - 1], pts[k])
-                if dist_m < best_dist_m:
-                    best_dist_m = dist_m
-                    best_cid = getattr(obj, "corridor_id", cid)
-
+    best_cid, best_dist_m, _ = _find_nearest_track_corridor_candidates(
+        pt, tracks_data, allowed_corridors=None, max_snap_distance_m=float("inf")
+    )
     return best_cid, best_dist_m
+
+
+def _disambiguate_corridor_by_route_metadata(
+    train: Any,
+    candidates: Sequence[str],
+) -> Optional[str]:
+    """Break shared-trunk or macro-family corridor ties using origin/destination/next_station."""
+    if not candidates or train is None:
+        return None
+    parts = [
+        str(getattr(train, attr, "") or "").strip()
+        for attr in ("destination", "origin", "next_station")
+    ]
+    combined = " ".join(p for p in parts if p)
+    if not combined:
+        return None
+
+    clean_meta = _fold_corridor_token(combined)
+    candidate_set = set(candidates)
+
+    # Check specific branch keywords in priority order (single-track branches before mainline)
+    for canonical_id, keywords in _SPECIFIC_CORRIDOR_KEYWORDS:
+        if canonical_id in candidate_set and any(k in clean_meta for k in keywords):
+            return canonical_id
+
+    if "pathe-mainline" in candidate_set and any(k in clean_meta for k in _PATHE_ROUTE_KEYWORDS):
+        return "pathe-mainline"
+
+    return None
+
+
+def _snap_point_to_corridor(
+    pt: Optional[GeoPoint],
+    train: Any,
+    td: Optional[Dict[str, Any]],
+    allowed_corridors: Optional[FrozenSet[str]],
+    max_snap_distance_m: float,
+) -> Optional[str]:
+    """Snap a geographic point to the nearest allowed corridor, breaking ties via route metadata."""
+    if pt is None or not td or not isinstance(td, dict):
+        return None
+    best_cid, best_dist_m, tied = _find_nearest_track_corridor_candidates(
+        pt,
+        td,
+        allowed_corridors=allowed_corridors,
+        max_snap_distance_m=max_snap_distance_m,
+    )
+    if best_cid is None or best_dist_m > max_snap_distance_m:
+        return None
+    if len(tied) > 1:
+        tie_winner = _disambiguate_corridor_by_route_metadata(train, tied)
+        if tie_winner is not None:
+            return tie_winner
+    return _normalize_corridor_key(best_cid) or best_cid
 
 
 def resolve_train_corridor(
@@ -2479,12 +2792,16 @@ def resolve_train_corridor(
     tracks_data: Optional[Dict[str, Any]] = None,
     max_snap_distance_m: float = 1500.0,
 ) -> str:
-    """Resolve the operational railway corridor for a train using metadata or track projection.
+    """Resolve the operational railway corridor for a train using metadata and track projection.
 
-    If the train object contains an explicit corridor attribute, normalizes and returns it.
-    If the corridor is absent or empty, searches tracks_data for the geometrically nearest
-    track polyline within max_snap_distance_m. If tracks_data is omitted, attempts to load
-    default package track corridors. If no track matches within threshold, returns 'unassigned'.
+    Resolution order:
+    1. Unambiguous canonical corridor tags (single-track branches checked before mainlines).
+    2. Ambiguous macro family tags ('PROASTIAKOS', 'THESSALY', 'NORTHERN') -> family-scoped
+       geometric track snapping with route-metadata tie-breaking, then route-metadata fallback,
+       then full-network snapping, finally falling back to the family key (never pathe-mainline).
+    3. Absent/empty tags -> full-network geometric track snapping with route-metadata tie-breaking
+       or 'unassigned' if outside max_snap_distance_m.
+    4. Unrecognized tags -> full-network geometric snapping, falling back to normalized tag.
 
     Args:
         train: Train position object (must have lat, lng, and optional corridor).
@@ -2492,39 +2809,51 @@ def resolve_train_corridor(
         max_snap_distance_m: Maximum perpendicular distance in meters to snap to track.
 
     Returns:
-        Canonical corridor identifier, or 'unassigned'.
+        Canonical corridor identifier, macro family fallback, or 'unassigned'.
     """
     raw_cid = getattr(train, "corridor", None)
-    if raw_cid:
-        norm = _normalize_corridor_key(str(raw_cid))
-        return norm if norm else str(raw_cid).strip() or "unassigned"
+    norm_cid = _normalize_corridor_key(str(raw_cid)) if raw_cid else None
 
-    if not hasattr(train, "lat") or not hasattr(train, "lng"):
-        return "unassigned"
+    if norm_cid and norm_cid in DEFAULT_CORRIDOR_SPEED_RULES:
+        return norm_cid
 
-    try:
-        pt = GeoPoint(lat=float(train.lat), lng=float(train.lng))
-    except (ValueError, TypeError):
-        return "unassigned"
-
-    td = tracks_data
-    if td is None:
+    pt: Optional[GeoPoint] = None
+    if hasattr(train, "lat") and hasattr(train, "lng"):
         try:
-            from tui.mock_engine import load_tracks
+            lat_f = float(train.lat)
+            lng_f = float(train.lng)
+            if math.isfinite(lat_f) and math.isfinite(lng_f):
+                pt = GeoPoint(lat=lat_f, lng=lng_f)
+        except (ValueError, TypeError):
+            pt = None
 
-            td = load_tracks()
-        except Exception:
-            td = None
+    td = tracks_data if tracks_data is not None else _get_default_tracks_data()
+    family_candidates = AMBIGUOUS_CORRIDOR_FAMILIES.get(norm_cid) if norm_cid else None
 
-    if not td or not isinstance(td, dict):
-        return "unassigned"
+    if family_candidates is not None:
+        snapped_fam = _snap_point_to_corridor(
+            pt, train, td, allowed_corridors=family_candidates, max_snap_distance_m=max_snap_distance_m
+        )
+        if snapped_fam is not None:
+            return snapped_fam
+        meta_match = _disambiguate_corridor_by_route_metadata(train, tuple(sorted(family_candidates)))
+        if meta_match is not None:
+            return meta_match
+        snapped_any = _snap_point_to_corridor(
+            pt, train, td, allowed_corridors=None, max_snap_distance_m=max_snap_distance_m
+        )
+        if snapped_any is not None:
+            return snapped_any
+        return norm_cid if norm_cid else "unassigned"
 
-    best_cid, best_dist_m = _find_nearest_track_corridor(pt, td)
+    snapped = _snap_point_to_corridor(
+        pt, train, td, allowed_corridors=None, max_snap_distance_m=max_snap_distance_m
+    )
+    if snapped is not None:
+        return snapped
 
-    if best_cid is not None and best_dist_m <= max_snap_distance_m:
-        norm = _normalize_corridor_key(best_cid)
-        return norm if norm else best_cid
-
+    if norm_cid:
+        return norm_cid
     return "unassigned"
 
 
@@ -2593,6 +2922,293 @@ def find_station_passing_meet(
     return None
 
 
+def _coerce_finite_epoch(raw_ts: Any) -> Optional[float]:
+    """Convert raw numeric timestamp to finite float epoch, rejecting bool/NaN/Inf."""
+    if isinstance(raw_ts, bool) or raw_ts is None:
+        return None
+    if isinstance(raw_ts, (int, float)):
+        val = float(raw_ts)
+        return val if math.isfinite(val) else None
+    return None
+
+
+def _unwrap_train_entry(entry: Any) -> Tuple[Any, Optional[float]]:
+    """Extract (position_obj, last_updated_epoch) from TrainRecord, (pos, ts) tuple, or TrainPosition."""
+    if isinstance(entry, tuple) and len(entry) == 2:
+        pos_obj, raw_ts = entry
+        return pos_obj, _coerce_finite_epoch(raw_ts)
+
+    nested_pos = getattr(entry, "position", None)
+    if nested_pos is not None:
+        raw_ts = getattr(entry, "last_updated", getattr(entry, "last_updated_time", None))
+        return nested_pos, _coerce_finite_epoch(raw_ts)
+
+    raw_ts = getattr(entry, "last_updated", getattr(entry, "last_updated_time", None))
+    return entry, _coerce_finite_epoch(raw_ts)
+
+
+@dataclass(frozen=True)
+class _PairKinematics:
+    """Immutable kinematic bundle for evaluating a single same-corridor train pair."""
+
+    t1_id: str
+    t1_no: str
+    t2_id: str
+    t2_no: str
+    spd1: float
+    spd2: float
+    cid: str
+    c_display_name: str
+    is_single: bool
+    dist_km: float
+    heading_delta: float
+    closing_spd: float
+    ttc_sec: Optional[float]
+    meet_stn: Optional[str]
+    is_stale_ghost: bool
+    eval_time: float
+
+
+def _evaluate_opposing_conflict(
+    kin: _PairKinematics,
+    cfg: ConflictWatchdogConfig,
+) -> Optional[ConflictAlert]:
+    """Evaluate single-track opposing collision hazard with station meet and stale-ghost demotion."""
+    pair_key = f"{min(kin.t1_id, kin.t2_id)}_{max(kin.t1_id, kin.t2_id)}"
+    if kin.meet_stn is not None:
+        return ConflictAlert(
+            alert_id=f"{pair_key}_STATION_MEET",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.STATION_MEET,
+            severity=ConflictSeverity.ADVISORY,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=kin.ttc_sec,
+            is_single_track=kin.is_single,
+            station_proximity_name=kin.meet_stn,
+            description=f"Passing meet at {kin.meet_stn} ({kin.t1_no} <-> {kin.t2_no}, {kin.dist_km:.1f}km)",
+            timestamp=kin.eval_time,
+        )
+
+    if kin.closing_spd <= 5.0 or kin.dist_km > cfg.opposing_warning_distance_km:
+        return None
+
+    if kin.is_stale_ghost:
+        return ConflictAlert(
+            alert_id=f"{pair_key}_STALE_OBSTRUCTION",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.OPPOSING_COLLISION,
+            severity=ConflictSeverity.ADVISORY,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=None,
+            is_single_track=kin.is_single,
+            station_proximity_name=None,
+            description=(
+                f"Stale telemetry track occupancy caution: {kin.t1_no} <-> {kin.t2_no} "
+                f"on {kin.c_display_name} ({kin.dist_km:.1f}km)"
+            ),
+            timestamp=kin.eval_time,
+        )
+
+    if kin.dist_km <= cfg.opposing_critical_distance_km:
+        return ConflictAlert(
+            alert_id=f"{pair_key}_OPPOSING",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.OPPOSING_COLLISION,
+            severity=ConflictSeverity.CRITICAL,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=kin.ttc_sec,
+            is_single_track=kin.is_single,
+            station_proximity_name=None,
+            description=(
+                f"CRITICAL OPPOSING CONFLICT: {kin.t1_no} <-> {kin.t2_no} on {kin.c_display_name} "
+                f"({kin.dist_km:.1f}km, TTC {int(kin.ttc_sec or 0)}s)"
+            ),
+            timestamp=kin.eval_time,
+        )
+
+    return ConflictAlert(
+        alert_id=f"{pair_key}_OPPOSING",
+        train_id_1=kin.t1_id,
+        train_number_1=kin.t1_no,
+        train_id_2=kin.t2_id,
+        train_number_2=kin.t2_no,
+        corridor_id=kin.cid,
+        corridor_name=kin.c_display_name,
+        conflict_type=ConflictType.OPPOSING_COLLISION,
+        severity=ConflictSeverity.WARNING,
+        distance_km=kin.dist_km,
+        closing_speed_kmh=kin.closing_spd,
+        time_to_collision_sec=kin.ttc_sec,
+        is_single_track=kin.is_single,
+        station_proximity_name=None,
+        description=(
+            f"Opposing approach: {kin.t1_no} <-> {kin.t2_no} on {kin.c_display_name} "
+            f"({kin.dist_km:.1f}km)"
+        ),
+        timestamp=kin.eval_time,
+    )
+
+
+def _evaluate_headway_conflict(
+    kin: _PairKinematics,
+    cfg: ConflictWatchdogConfig,
+) -> Optional[ConflictAlert]:
+    """Evaluate co-directional headway hazard with consist, station, and stale-ghost demotion."""
+    pair_key = f"{min(kin.t1_id, kin.t2_id)}_{max(kin.t1_id, kin.t2_id)}"
+
+    # Coupled multiple-unit consist detection (Διπλή Έλξη)
+    is_coupled_consist = (
+        kin.t1_no == kin.t2_no
+        and kin.t1_no not in ("", "0", "Unknown")
+        and kin.t1_id != kin.t2_id
+        and kin.dist_km <= cfg.coupled_consist_max_distance_km
+    )
+    if is_coupled_consist:
+        return ConflictAlert(
+            alert_id=f"{pair_key}_COUPLED_CONSIST",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.HEADWAY_VIOLATION,
+            severity=ConflictSeverity.ADVISORY,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=None,
+            is_single_track=kin.is_single,
+            station_proximity_name=kin.meet_stn,
+            description=(
+                f"Coupled multiple-unit consist: {kin.t1_no} on {kin.c_display_name} "
+                f"({kin.dist_km * 1000.0:.0f}m separation)"
+            ),
+            timestamp=kin.eval_time,
+        )
+
+    if kin.meet_stn is not None:
+        return ConflictAlert(
+            alert_id=f"{pair_key}_STATION_HEADWAY",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.STATION_MEET,
+            severity=ConflictSeverity.ADVISORY,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=kin.ttc_sec,
+            is_single_track=kin.is_single,
+            station_proximity_name=kin.meet_stn,
+            description=(
+                f"Station headway alignment at {kin.meet_stn} "
+                f"({kin.t1_no} / {kin.t2_no}, {kin.dist_km:.2f}km)"
+            ),
+            timestamp=kin.eval_time,
+        )
+
+    is_active_motion = kin.closing_spd > 0.0 or kin.spd1 > 1.0 or kin.spd2 > 1.0
+    if kin.dist_km > cfg.headway_warning_distance_km or not is_active_motion:
+        return None
+
+    if kin.is_stale_ghost:
+        return ConflictAlert(
+            alert_id=f"{pair_key}_STALE_HEADWAY",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.HEADWAY_VIOLATION,
+            severity=ConflictSeverity.ADVISORY,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=None,
+            is_single_track=kin.is_single,
+            station_proximity_name=None,
+            description=(
+                f"Stale telemetry preceding train caution: {kin.t1_no} / {kin.t2_no} "
+                f"on {kin.c_display_name} ({kin.dist_km:.2f}km)"
+            ),
+            timestamp=kin.eval_time,
+        )
+
+    crit_dist = (
+        cfg.headway_critical_distance_km
+        if kin.is_single
+        else cfg.double_track_headway_critical_km
+    )
+    if kin.dist_km <= crit_dist:
+        severity = (
+            ConflictSeverity.CRITICAL
+            if kin.closing_spd > cfg.headway_closing_speed_threshold_kmh
+            else ConflictSeverity.WARNING
+        )
+        desc_prefix = (
+            "CRITICAL HEADWAY BREACH"
+            if severity == ConflictSeverity.CRITICAL
+            else "Headway compression"
+        )
+        return ConflictAlert(
+            alert_id=f"{pair_key}_HEADWAY",
+            train_id_1=kin.t1_id,
+            train_number_1=kin.t1_no,
+            train_id_2=kin.t2_id,
+            train_number_2=kin.t2_no,
+            corridor_id=kin.cid,
+            corridor_name=kin.c_display_name,
+            conflict_type=ConflictType.HEADWAY_VIOLATION,
+            severity=severity,
+            distance_km=kin.dist_km,
+            closing_speed_kmh=kin.closing_spd,
+            time_to_collision_sec=kin.ttc_sec,
+            is_single_track=kin.is_single,
+            station_proximity_name=None,
+            description=f"{desc_prefix}: {kin.t1_no} / {kin.t2_no} on {kin.c_display_name} ({kin.dist_km:.2f}km)",
+            timestamp=kin.eval_time,
+        )
+
+    return ConflictAlert(
+        alert_id=f"{pair_key}_HEADWAY",
+        train_id_1=kin.t1_id,
+        train_number_1=kin.t1_no,
+        train_id_2=kin.t2_id,
+        train_number_2=kin.t2_no,
+        corridor_id=kin.cid,
+        corridor_name=kin.c_display_name,
+        conflict_type=ConflictType.HEADWAY_VIOLATION,
+        severity=ConflictSeverity.WARNING,
+        distance_km=kin.dist_km,
+        closing_speed_kmh=kin.closing_spd,
+        time_to_collision_sec=kin.ttc_sec,
+        is_single_track=kin.is_single,
+        station_proximity_name=None,
+        description=f"Headway compression: {kin.t1_no} / {kin.t2_no} on {kin.c_display_name} ({kin.dist_km:.1f}km)",
+        timestamp=kin.eval_time,
+    )
+
+
 def _evaluate_corridor_pair_conflict(
     t1: Any,
     t2: Any,
@@ -2602,10 +3218,17 @@ def _evaluate_corridor_pair_conflict(
     cfg: ConflictWatchdogConfig,
     stations: Optional[Sequence[Any]],
     eval_time: float,
+    t1_ts: Optional[float] = None,
+    t2_ts: Optional[float] = None,
 ) -> Optional[ConflictAlert]:
     """Evaluate kinematic conflict between a single pair of trains on the same corridor."""
     p1 = GeoPoint(lat=float(t1.lat), lng=float(t1.lng))
     p2 = GeoPoint(lat=float(t2.lat), lng=float(t2.lng))
+    dist_km = haversine_distance_km(p1, p2)
+    max_check_dist = max(cfg.opposing_warning_distance_km, cfg.headway_warning_distance_km)
+    if dist_km > max_check_dist:
+        return None
+
     spd1 = float(getattr(t1, "speed", 0.0) or 0.0)
     spd2 = float(getattr(t2, "speed", 0.0) or 0.0)
     c1_raw = getattr(t1, "course", None)
@@ -2613,253 +3236,98 @@ def _evaluate_corridor_pair_conflict(
     c2_raw = getattr(t2, "course", None)
     c2 = float(c2_raw if c2_raw is not None else getattr(t2, "track_heading", 0.0) or 0.0)
     t1_id = str(getattr(t1, "id", "t1"))
-    t1_no = str(getattr(t1, "train_number", t1_id))
     t2_id = str(getattr(t2, "id", "t2"))
-    t2_no = str(getattr(t2, "train_number", t2_id))
-
-    dist_km = haversine_distance_km(p1, p2)
-    max_check_dist = max(cfg.opposing_warning_distance_km, cfg.headway_warning_distance_km)
-    if dist_km > max_check_dist:
-        return None
 
     heading_delta = compute_relative_heading_delta(c1, c2)
     closing_spd = compute_closing_velocity_kmh(p1, spd1, c1, p2, spd2, c2)
-
-    ttc_sec: Optional[float] = None
-    if closing_spd > 1.0:
-        ttc_sec = (dist_km / closing_spd) * 3600.0
+    ttc_sec: Optional[float] = (dist_km / closing_spd) * 3600.0 if closing_spd > 1.0 else None
 
     meet_stn = find_station_passing_meet(
-        t1, t2, stations, radius_m=cfg.station_siding_radius_m, terminal_radius_m=cfg.terminal_siding_radius_m
+        t1,
+        t2,
+        stations,
+        radius_m=cfg.station_siding_radius_m,
+        terminal_radius_m=cfg.terminal_siding_radius_m,
     )
 
-    # Check for stale telemetry / ghost train preemption
-    t1_ts = getattr(t1, "last_updated", getattr(t1, "last_updated_time", None))
-    t2_ts = getattr(t2, "last_updated", getattr(t2, "last_updated_time", None))
-    is_t1_stale = (eval_time - float(t1_ts)) > cfg.stale_conflict_threshold_sec if t1_ts is not None else False
-    is_t2_stale = (eval_time - float(t2_ts)) > cfg.stale_conflict_threshold_sec if t2_ts is not None else False
-    is_stale_ghost = is_t1_stale or is_t2_stale
+    eff_t1_ts = (
+        t1_ts
+        if t1_ts is not None
+        else _coerce_finite_epoch(getattr(t1, "last_updated", getattr(t1, "last_updated_time", None)))
+    )
+    eff_t2_ts = (
+        t2_ts
+        if t2_ts is not None
+        else _coerce_finite_epoch(getattr(t2, "last_updated", getattr(t2, "last_updated_time", None)))
+    )
+    is_t1_stale = (eval_time - eff_t1_ts) > cfg.stale_conflict_threshold_sec if eff_t1_ts is not None else False
+    is_t2_stale = (eval_time - eff_t2_ts) > cfg.stale_conflict_threshold_sec if eff_t2_ts is not None else False
+
+    kin = _PairKinematics(
+        t1_id=t1_id,
+        t1_no=str(getattr(t1, "train_number", t1_id)),
+        t2_id=t2_id,
+        t2_no=str(getattr(t2, "train_number", t2_id)),
+        spd1=spd1,
+        spd2=spd2,
+        cid=cid,
+        c_display_name=c_display_name,
+        is_single=is_single,
+        dist_km=dist_km,
+        heading_delta=heading_delta,
+        closing_spd=closing_spd,
+        ttc_sec=ttc_sec,
+        meet_stn=meet_stn,
+        is_stale_ghost=is_t1_stale or is_t2_stale,
+        eval_time=eval_time,
+    )
 
     # 1. Opposing Collision Condition
-    is_opposing = heading_delta >= (180.0 - cfg.heading_opposing_tolerance_deg)
-    if is_opposing and (is_single or cid in cfg.single_line_working_corridors):
-        if meet_stn is not None:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STATION_MEET"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.STATION_MEET,
-                severity=ConflictSeverity.ADVISORY,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=ttc_sec,
-                is_single_track=is_single,
-                station_proximity_name=meet_stn,
-                description=f"Passing meet at {meet_stn} ({t1_no} <-> {t2_no}, {dist_km:.1f}km)",
-                timestamp=eval_time,
-            )
-        if is_stale_ghost:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STALE_OBSTRUCTION"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.OPPOSING_COLLISION,
-                severity=ConflictSeverity.ADVISORY,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=None,
-                is_single_track=is_single,
-                station_proximity_name=None,
-                description=f"Stale telemetry track occupancy caution: {t1_no} <-> {t2_no} on {c_display_name} ({dist_km:.1f}km)",
-                timestamp=eval_time,
-            )
-        if closing_spd > 5.0 and dist_km <= cfg.opposing_critical_distance_km:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_OPPOSING"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.OPPOSING_COLLISION,
-                severity=ConflictSeverity.CRITICAL,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=ttc_sec,
-                is_single_track=is_single,
-                station_proximity_name=None,
-                description=(
-                    f"CRITICAL OPPOSING CONFLICT: {t1_no} <-> {t2_no} on {c_display_name} "
-                    f"({dist_km:.1f}km, TTC {int(ttc_sec or 0)}s)"
-                ),
-                timestamp=eval_time,
-            )
-        if closing_spd > 5.0 and dist_km <= cfg.opposing_warning_distance_km:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_OPPOSING"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.OPPOSING_COLLISION,
-                severity=ConflictSeverity.WARNING,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=ttc_sec,
-                is_single_track=is_single,
-                station_proximity_name=None,
-                description=(
-                    f"Opposing approach: {t1_no} <-> {t2_no} on {c_display_name} "
-                    f"({dist_km:.1f}km)"
-                ),
-                timestamp=eval_time,
-            )
+    if heading_delta >= (180.0 - cfg.heading_opposing_tolerance_deg) and (
+        is_single or cid in cfg.single_line_working_corridors
+    ):
+        return _evaluate_opposing_conflict(kin, cfg)
 
     # 2. Co-directional Headway Violation Condition
-    is_codirectional = heading_delta <= cfg.heading_codirectional_tolerance_deg
-    if is_codirectional:
-        # Coupled multiple-unit consist detection (Διπλή Έλξη)
-        # Coupled units of the same physical train share commercial train number
-        # and travel co-directionally within coupler separation distance.
-        is_coupled_consist = (
-            t1_no == t2_no
-            and t1_no not in ("", "0", "Unknown")
-            and t1_id != t2_id
-            and dist_km <= cfg.coupled_consist_max_distance_km
-        )
-        if is_coupled_consist:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_COUPLED_CONSIST"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.HEADWAY_VIOLATION,
-                severity=ConflictSeverity.ADVISORY,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=None,
-                is_single_track=is_single,
-                station_proximity_name=meet_stn,
-                description=f"Coupled multiple-unit consist: {t1_no} on {c_display_name} ({dist_km * 1000.0:.0f}m separation)",
-                timestamp=eval_time,
-            )
-
-        # Station passing siding & platform demotion
-        if meet_stn is not None:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STATION_HEADWAY"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.STATION_MEET,
-                severity=ConflictSeverity.ADVISORY,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=ttc_sec,
-                is_single_track=is_single,
-                station_proximity_name=meet_stn,
-                description=f"Station headway alignment at {meet_stn} ({t1_no} / {t2_no}, {dist_km:.2f}km)",
-                timestamp=eval_time,
-            )
-
-        if is_stale_ghost:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_STALE_HEADWAY"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.HEADWAY_VIOLATION,
-                severity=ConflictSeverity.ADVISORY,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=None,
-                is_single_track=is_single,
-                station_proximity_name=None,
-                description=f"Stale telemetry preceding train caution: {t1_no} / {t2_no} on {c_display_name} ({dist_km:.2f}km)",
-                timestamp=eval_time,
-            )
-
-        is_active_motion = closing_spd > 0.0 or spd1 > 1.0 or spd2 > 1.0
-        crit_dist = cfg.headway_critical_distance_km if is_single else cfg.double_track_headway_critical_km
-
-        if dist_km <= crit_dist and is_active_motion:
-            # Gating: Critical severity requires positive closing speed exceeding threshold
-            severity = ConflictSeverity.CRITICAL if closing_spd > cfg.headway_closing_speed_threshold_kmh else ConflictSeverity.WARNING
-            desc_prefix = "CRITICAL HEADWAY BREACH" if severity == ConflictSeverity.CRITICAL else "Headway compression"
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_HEADWAY"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.HEADWAY_VIOLATION,
-                severity=severity,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=ttc_sec,
-                is_single_track=is_single,
-                station_proximity_name=None,
-                description=(
-                    f"{desc_prefix}: {t1_no} / {t2_no} on {c_display_name} "
-                    f"({dist_km:.2f}km)"
-                ),
-                timestamp=eval_time,
-            )
-        if dist_km <= cfg.headway_warning_distance_km and is_active_motion:
-            alert_id = f"{min(t1_id, t2_id)}_{max(t1_id, t2_id)}_HEADWAY"
-            return ConflictAlert(
-                alert_id=alert_id,
-                train_id_1=t1_id,
-                train_number_1=t1_no,
-                train_id_2=t2_id,
-                train_number_2=t2_no,
-                corridor_id=cid,
-                corridor_name=c_display_name,
-                conflict_type=ConflictType.HEADWAY_VIOLATION,
-                severity=ConflictSeverity.WARNING,
-                distance_km=dist_km,
-                closing_speed_kmh=closing_spd,
-                time_to_collision_sec=ttc_sec,
-                is_single_track=is_single,
-                station_proximity_name=None,
-                description=(
-                    f"Headway compression: {t1_no} / {t2_no} on {c_display_name} "
-                    f"({dist_km:.1f}km)"
-                ),
-                timestamp=eval_time,
-            )
+    if heading_delta <= cfg.heading_codirectional_tolerance_deg:
+        return _evaluate_headway_conflict(kin, cfg)
 
     return None
+
+
+def _extract_double_track_map(tracks_data: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    """Build canonical corridor_id -> double_track flag map from tracks_data."""
+    double_track_map: Dict[str, bool] = {}
+    if not tracks_data:
+        return double_track_map
+    raw_corridors = tracks_data.get("corridors")
+    if isinstance(raw_corridors, list):
+        for c in raw_corridors:
+            if isinstance(c, dict) and "id" in c:
+                cid = str(c["id"])
+                double_track_map[cid] = bool(c.get("double_track", False))
+        return double_track_map
+    for cid, obj in tracks_data.items():
+        if hasattr(obj, "double_track"):
+            double_track_map[str(cid)] = bool(obj.double_track)
+    return double_track_map
+
+
+def _is_corridor_single_track(
+    cid: str,
+    cfg: ConflictWatchdogConfig,
+    double_track_map: Dict[str, bool],
+) -> bool:
+    """Determine single-track status fail-safely (unknown corridors default to single-track)."""
+    if cid in cfg.single_line_working_corridors:
+        return True
+    if cid in double_track_map:
+        return not double_track_map[cid]
+    if cid in DEFAULT_SINGLE_TRACK_CORRIDORS:
+        return True
+    if cid in DEFAULT_DOUBLE_TRACK_CORRIDORS:
+        return False
+    return True
 
 
 def evaluate_train_conflicts(
@@ -2868,20 +3336,23 @@ def evaluate_train_conflicts(
     stations: Optional[Sequence[Any]] = None,
     config: Optional[ConflictWatchdogConfig] = None,
     now: Optional[float] = None,
+    last_updated_by_id: Optional[Mapping[str, float]] = None,
 ) -> List[ConflictAlert]:
     """Evaluate pairwise spatial and kinematic conflicts across active trains.
 
     Identifies:
     1. Opposing collision risks on single-track lines and single-line working zones.
     2. Headway compression and braking curve violations for co-directional trains.
-    3. Authorized station passing meets (suppressed to ADVISORY).
+    3. Authorized station passing meets and stale-ghost cautions (demoted to ADVISORY).
 
     Args:
-        active_trains: Collection of active TrainPosition objects.
+        active_trains: Sequence of TrainRecord, (TrainPosition, last_updated) tuples,
+            or TrainPosition objects.
         tracks_data: Optional track corridors dictionary or parsed JSON.
         stations: Optional collection of station nodes.
         config: Optional configuration thresholds.
         now: Reference timestamp in seconds.
+        last_updated_by_id: Optional mapping of train ID -> last_updated epoch timestamp.
 
     Returns:
         List of generated ConflictAlert objects ordered by severity (CRITICAL first).
@@ -2890,57 +3361,51 @@ def evaluate_train_conflicts(
         return []
 
     cfg = config if config is not None else ConflictWatchdogConfig()
-    eval_time = now if now is not None else time.time()
+    eval_time = float(now) if now is not None else time.time()
+    double_track_map = _extract_double_track_map(tracks_data)
 
-    # Pre-parse double_track map from tracks_data if provided
-    double_track_map: Dict[str, bool] = {}
-    if tracks_data:
-        if "corridors" in tracks_data and isinstance(tracks_data["corridors"], list):
-            for c in tracks_data["corridors"]:
-                if isinstance(c, dict) and "id" in c:
-                    double_track_map[c["id"]] = bool(c.get("double_track", False))
-        else:
-            for cid, obj in tracks_data.items():
-                if hasattr(obj, "double_track"):
-                    double_track_map[cid] = bool(obj.double_track)
-
-    # 1. Group active trains by corridor (with dynamic geometric snapping)
-    corridor_buckets: Dict[str, List[Any]] = {}
-    for train in active_trains:
+    # 1. Group active trains by canonical corridor (preserving observation timestamps)
+    corridor_buckets: Dict[str, List[Tuple[Any, Optional[float]]]] = {}
+    for entry in active_trains:
+        pos, obs_ts = _unwrap_train_entry(entry)
+        if obs_ts is None and last_updated_by_id is not None:
+            pos_id = str(getattr(pos, "id", ""))
+            obs_ts = _coerce_finite_epoch(last_updated_by_id.get(pos_id))
         cid = resolve_train_corridor(
-            train,
+            pos,
             tracks_data=tracks_data,
             max_snap_distance_m=cfg.max_corridor_snap_distance_m,
         )
         if not cid or cid == "unassigned":
             continue
-        norm_cid = _normalize_corridor_key(str(cid)) or str(cid)
-        corridor_buckets.setdefault(norm_cid, []).append(train)
+        corridor_buckets.setdefault(cid, []).append((pos, obs_ts))
 
     alerts: List[ConflictAlert] = []
 
     # 2. Iterate pairwise within each corridor
-    for cid, trains in corridor_buckets.items():
-        if len(trains) < 2:
+    for cid, train_entries in corridor_buckets.items():
+        if len(train_entries) < 2:
             continue
 
-        is_single = False
-        if cid in cfg.single_line_working_corridors:
-            is_single = True
-        elif cid in double_track_map:
-            is_single = not double_track_map[cid]
-        elif cid in DEFAULT_SINGLE_TRACK_CORRIDORS:
-            is_single = True
-
+        is_single = _is_corridor_single_track(cid, cfg, double_track_map)
         c_display_name = CORRIDOR_DISPLAY_NAMES.get(cid, cid.replace("-", " ").title())
 
-        n = len(trains)
+        n = len(train_entries)
         for i in range(n):
-            t1 = trains[i]
+            t1, t1_ts = train_entries[i]
             for j in range(i + 1, n):
-                t2 = trains[j]
+                t2, t2_ts = train_entries[j]
                 conflict = _evaluate_corridor_pair_conflict(
-                    t1, t2, cid, c_display_name, is_single, cfg, stations, eval_time
+                    t1,
+                    t2,
+                    cid,
+                    c_display_name,
+                    is_single,
+                    cfg,
+                    stations,
+                    eval_time,
+                    t1_ts=t1_ts,
+                    t2_ts=t2_ts,
                 )
                 if conflict is not None:
                     alerts.append(conflict)

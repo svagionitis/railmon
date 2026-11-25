@@ -5,6 +5,7 @@ Thread-safe state repository and reactive models for live train telemetry and UI
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
+import logging
 import threading
 import time
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
@@ -16,6 +17,8 @@ from tui.geo import (
     DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC,
     DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH,
     DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC,
+    DEFAULT_STATION_DWELL_RADIUS_M,
+    DEFAULT_TERMINAL_DWELL_RADIUS_M,
     ConflictAlert,
     ConflictSeverity,
     ConflictWatchdogConfig,
@@ -31,11 +34,16 @@ from tui.geo import (
     SensorHealthState,
     SlowOrder,
     SpeedEnforcementResult,
+    _resolve_station_candidate,
+    compute_tunnel_grace_sec,
+    detect_train_tunnel,
     evaluate_sensor_health,
     evaluate_train_conflicts,
     evaluate_train_speed,
 )
 from tui.theme import ThemeProfile, get_next_theme
+
+logger = logging.getLogger("railmon." + __name__)
 
 
 class ConnectionStatus(Enum):
@@ -164,7 +172,10 @@ class TrainTimetableDTO:
     fetched_at: float = 0.0
 
 
-DEFAULT_LIVE_STALE_TIMEOUT_SEC: float = 90.0
+DEFAULT_LIVE_STALE_TIMEOUT_SEC: float = 600.0
+DEFAULT_POST_DROP_RETENTION_SEC: float = 300.0
+DEFAULT_STATION_DWELL_STALE_TIMEOUT_SEC: float = 240.0
+DEFAULT_MAX_TUNNEL_EVICTION_TTL_SEC: float = 1800.0
 DEFAULT_REPLAY_STALE_TIMEOUT_SEC: float = 1800.0
 
 
@@ -252,7 +263,7 @@ class TrainRecord:
         return speeds
 
     def is_stale(self, threshold_sec: float = DEFAULT_LIVE_STALE_TIMEOUT_SEC) -> bool:
-        """Check if train has stopped receiving updates beyond threshold (default: 90 seconds)."""
+        """Check if train has stopped receiving updates beyond threshold (default: 600 seconds)."""
         return (time.time() - self.last_updated) > threshold_sec
 
 
@@ -577,15 +588,30 @@ class TrainStateStore:
 
     def __init__(
         self,
-        stale_timeout_sec: float = DEFAULT_LIVE_STALE_TIMEOUT_SEC,
+        stale_timeout_sec: Optional[float] = None,
         max_trail_len: int = DEFAULT_MAX_TRAIL_LEN,
         initial_theme: Optional[ThemeProfile] = None,
         ghost_stale_timeout_sec: float = DEFAULT_GHOST_STALE_TIMEOUT_SEC,
     ) -> None:
         self._lock = threading.RLock()
-        self._stale_timeout_sec = stale_timeout_sec
+        self._has_custom_stale_timeout: bool = stale_timeout_sec is not None
+        self._stale_timeout_sec: float = (
+            max(1.0, float(stale_timeout_sec))
+            if stale_timeout_sec is not None
+            else DEFAULT_LIVE_STALE_TIMEOUT_SEC
+        )
         self._max_trail_len = max_trail_len
         self._ghost_stale_timeout_sec = max(10.0, float(ghost_stale_timeout_sec))
+        if (
+            self._has_custom_stale_timeout
+            and self._stale_timeout_sec <= DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC
+        ):
+            logger.warning(
+                "Custom stale_timeout_sec (%.1fs) is <= open-line drop threshold (%.1fs); "
+                "silent trains may be evicted before DROPPED alerts fire.",
+                self._stale_timeout_sec,
+                DEFAULT_OPEN_LINE_DROP_THRESHOLD_SEC,
+            )
 
         # Telemetry data
         self._trains: Dict[str, TrainRecord] = {}
@@ -702,6 +728,8 @@ class TrainStateStore:
             rules=self._speed_rules,
             active_tsrs=self._active_tsrs,
             train_id=pos.train_number or pos.id,
+            tracks_data=self._tracks_data,
+            route_hint_train=pos,
         )
         if pos.id in self._trains:
             rec = self._trains[pos.id]
@@ -1002,9 +1030,9 @@ class TrainStateStore:
 
     def _recompute_conflicts(self, now: float) -> None:
         """Evaluate and cache pairwise conflicts across all active trains (caller holds self._lock)."""
-        active_positions = [rec.position for rec in self._trains.values()]
+        active_records = list(self._trains.values())
         alerts = evaluate_train_conflicts(
-            active_trains=active_positions,
+            active_trains=active_records,
             tracks_data=self._tracks_data,
             stations=self._stations,
             config=self._conflict_config,
@@ -1141,7 +1169,59 @@ class TrainStateStore:
         """Update the stale train eviction threshold in seconds."""
         with self._lock:
             self._stale_timeout_sec = max(1.0, float(timeout_sec))
+            self._has_custom_stale_timeout = True
+            if (
+                not self._is_replay
+                and self._stale_timeout_sec <= self._telemetry_drop_threshold_sec
+            ):
+                logger.warning(
+                    "Custom stale_timeout_sec (%.1fs) is <= telemetry drop threshold (%.1fs); "
+                    "silent trains may be evicted before DROPPED alerts fire.",
+                    self._stale_timeout_sec,
+                    self._telemetry_drop_threshold_sec,
+                )
             self._version += 1
+
+    def _compute_record_eviction_ttl(
+        self,
+        rec: TrainRecord,
+        explicit_cutoff: Optional[float],
+    ) -> float:
+        """Compute state-aware eviction TTL in seconds for a train record (caller holds self._lock)."""
+        if explicit_cutoff is not None:
+            return float(explicit_cutoff)
+        if self._is_replay or self._has_custom_stale_timeout:
+            return self._stale_timeout_sec
+
+        pt = GeoPoint(lat=rec.position.lat, lng=rec.position.lng)
+
+        # 1. Tunnel transit: retain through full dynamic tunnel grace + post-drop alert window
+        if self._tunnels:
+            tunnel_info = detect_train_tunnel(pt, self._tunnels)
+            if tunnel_info is not None:
+                tunnel, _, _ = tunnel_info
+                grace_sec = compute_tunnel_grace_sec(tunnel, rec.position.speed)
+                tunnel_ttl = max(
+                    self._stale_timeout_sec,
+                    grace_sec + DEFAULT_POST_DROP_RETENTION_SEC,
+                )
+                return min(DEFAULT_MAX_TUNNEL_EVICTION_TTL_SEC, tunnel_ttl)
+
+        # 2. Terminated / idle station dwell (non-alert): evict promptly after 240s
+        spd = max(0.0, float(rec.position.speed)) if rec.position.speed is not None else 0.0
+        if self._stations and (spd <= 5.0 or rec.station_dwell_start is not None):
+            nearest_stn, _ = _resolve_station_candidate(
+                point=pt,
+                stations=self._stations,
+                station_dwell_radius_m=DEFAULT_STATION_DWELL_RADIUS_M,
+                terminal_dwell_radius_m=DEFAULT_TERMINAL_DWELL_RADIUS_M,
+            )
+            if nearest_stn is not None:
+                return min(self._stale_timeout_sec, DEFAULT_STATION_DWELL_STALE_TIMEOUT_SEC)
+
+        # 3. Open-line default: guaranteed strictly above telemetry_drop_threshold + retention window
+        open_line_floor = self._telemetry_drop_threshold_sec + DEFAULT_POST_DROP_RETENTION_SEC
+        return max(self._stale_timeout_sec, open_line_floor)
 
     def prune_stale_trains(
         self,
@@ -1149,11 +1229,11 @@ class TrainStateStore:
         now: Optional[float] = None,
     ) -> int:
         """
-        Remove trains that have not received telemetry updates within max_age_sec.
+        Remove trains that have not received telemetry updates within their effective TTL.
         Atomically clears associated conflicts, resets orphaned selections,
         and returns the number of pruned trains.
         """
-        cutoff = max_age_sec if max_age_sec is not None else self._stale_timeout_sec
+        explicit_cutoff = float(max_age_sec) if max_age_sec is not None else None
         with self._lock:
             if now is not None:
                 ref_now = float(now)
@@ -1162,8 +1242,10 @@ class TrainStateStore:
             else:
                 ref_now = time.time()
             stale_ids = [
-                tid for tid, rec in self._trains.items()
-                if (ref_now - rec.last_updated) > cutoff
+                tid
+                for tid, rec in self._trains.items()
+                if (ref_now - rec.last_updated)
+                > self._compute_record_eviction_ttl(rec, explicit_cutoff)
             ]
             # Evict expired pending trainHistory staging entries and stale ghosts (F-10.1)
             expired_pending = [
@@ -1247,10 +1329,10 @@ class TrainStateStore:
             was_replay = self._is_replay
             self._is_replay = bool(is_replay)
             if self._is_replay and not was_replay:
-                if self._stale_timeout_sec == DEFAULT_LIVE_STALE_TIMEOUT_SEC:
+                if not self._has_custom_stale_timeout:
                     self._stale_timeout_sec = DEFAULT_REPLAY_STALE_TIMEOUT_SEC
             elif not self._is_replay and was_replay:
-                if self._stale_timeout_sec == DEFAULT_REPLAY_STALE_TIMEOUT_SEC:
+                if not self._has_custom_stale_timeout:
                     self._stale_timeout_sec = DEFAULT_LIVE_STALE_TIMEOUT_SEC
             if db_path is not None or not is_replay:
                 self._replay_db = db_path
@@ -1284,6 +1366,8 @@ class TrainStateStore:
                     rules=self._speed_rules,
                     active_tsrs=self._active_tsrs,
                     train_id=rec.position.train_number or rec.position.id,
+                    tracks_data=self._tracks_data,
+                    route_hint_train=rec.position,
                 )
             self._version += 1
 

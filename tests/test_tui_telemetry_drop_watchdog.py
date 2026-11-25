@@ -8,6 +8,7 @@ from tui.geo import (
     GeoPoint,
     InfrastructureType,
     SensorHealthState,
+    compute_tunnel_grace_sec,
     evaluate_sensor_health,
 )
 from tui.mock_engine import StationNode, load_infrastructure
@@ -294,6 +295,158 @@ class TestTelemetryDropWatchdog(unittest.TestCase):
         # Outside 350m local radius and speed > 5 km/h -> genuine open-line drop
         self.assertEqual(assess.state, SensorHealthState.DROPPED)
         self.assertTrue(assess.is_alert)
+
+    def test_tc_wdg_01_open_line_drop_reachable_under_5s_pruning(self) -> None:
+        """TC-WDG-01: Open-line silent train survives 5s periodic pruning to reach DROPPED (180s) and evicts >600s."""
+        store = TrainStateStore()
+        store.set_stations(self.stations)
+        store.set_tunnels(self.tunnels)
+        t0 = 10000.0
+        pos = _make_pos(train_id="t-open", train_number="IC52", speed=140.0, lat=39.5, lng=22.35)
+        store.update_positions([pos], virtual_now=t0)
+
+        for dt in range(5, 600, 5):
+            self.assertEqual(store.prune_stale_trains(now=t0 + dt), 0, f"Prematurely pruned at dt={dt}s")
+            if dt == 35:
+                snap = store.get_snapshot(now=t0 + dt)
+                self.assertEqual(snap.trains["t-open"].sensor_health.state, SensorHealthState.STALE)
+                self.assertEqual(snap.dropped_count, 0)
+            elif dt == 185:
+                snap = store.get_snapshot(now=t0 + dt)
+                self.assertEqual(snap.trains["t-open"].sensor_health.state, SensorHealthState.DROPPED)
+                self.assertTrue(snap.trains["t-open"].sensor_health.is_alert)
+                self.assertEqual(snap.dropped_count, 1)
+            elif dt == 595:
+                snap = store.get_snapshot(now=t0 + dt)
+                self.assertEqual(snap.dropped_count, 1)
+
+        self.assertEqual(store.prune_stale_trains(now=t0 + 605.0), 1)
+        snap_end = store.get_snapshot(now=t0 + 605.0)
+        self.assertEqual(snap_end.dropped_count, 0)
+        self.assertNotIn("t-open", snap_end.trains)
+
+    def test_tc_wdg_02_kallidromo_passenger_tunnel_lifecycle_under_5s_pruning(self) -> None:
+        """TC-WDG-02: Kallidromo 160 km/h train survives 5s pruning through TUN -> OVERDUE IN TUNNEL -> eviction."""
+        store = TrainStateStore()
+        store.set_stations(self.stations)
+        store.set_tunnels(self.tunnels)
+        t0 = 20000.0
+        pos = _make_pos(train_id="t-kal-ic", train_number="IC50", speed=160.0, lat=38.7620, lng=22.5320)
+        store.update_positions([pos], virtual_now=t0)
+
+        for dt in range(5, 600, 5):
+            self.assertEqual(store.prune_stale_trains(now=t0 + dt), 0, f"Prematurely pruned at dt={dt}s")
+            if dt in (35, 295):
+                snap = store.get_snapshot(now=t0 + dt)
+                self.assertEqual(snap.trains["t-kal-ic"].sensor_health.state, SensorHealthState.TUNNEL_TRANSIT)
+                self.assertEqual(snap.dropped_count, 0)
+            elif dt in (305, 595):
+                snap = store.get_snapshot(now=t0 + dt)
+                sh = snap.trains["t-kal-ic"].sensor_health
+                self.assertEqual(sh.state, SensorHealthState.DROPPED)
+                self.assertTrue(sh.is_alert)
+                self.assertIn("OVERDUE IN TUNNEL", sh.description)
+                self.assertEqual(snap.dropped_count, 1)
+
+        self.assertEqual(store.prune_stale_trains(now=t0 + 605.0), 1)
+        self.assertIsNone(store.get_train("t-kal-ic"))
+
+    def test_tc_wdg_03_kallidromo_freight_and_slow_tunnel_extension(self) -> None:
+        """TC-WDG-03: Freight (80 km/h, grace=549s) and slow (40 km/h, grace=1098s) transits are not pruned at 600s."""
+        store = TrainStateStore()
+        store.set_stations(self.stations)
+        store.set_tunnels(self.tunnels)
+        t0 = 30000.0
+        pos_freight = _make_pos(train_id="t-frg", train_number="80512", speed=80.0, lat=38.7620, lng=22.5320)
+        pos_slow = _make_pos(train_id="t-slow", train_number="80514", speed=40.0, lat=38.7620, lng=22.5320)
+        store.update_positions([pos_freight, pos_slow], virtual_now=t0)
+
+        # At 540s: both still in TUNNEL_TRANSIT and neither pruned
+        self.assertEqual(store.prune_stale_trains(now=t0 + 540.0), 0)
+        snap_540 = store.get_snapshot(now=t0 + 540.0)
+        self.assertEqual(snap_540.trains["t-frg"].sensor_health.state, SensorHealthState.TUNNEL_TRANSIT)
+        self.assertEqual(snap_540.trains["t-slow"].sensor_health.state, SensorHealthState.TUNNEL_TRANSIT)
+
+        # At 605s (past 600s base TTL!): freight is OVERDUE IN TUNNEL (retained until ~849s), slow is still TUN
+        self.assertEqual(store.prune_stale_trains(now=t0 + 605.0), 0)
+        snap_605 = store.get_snapshot(now=t0 + 605.0)
+        self.assertEqual(snap_605.trains["t-frg"].sensor_health.state, SensorHealthState.DROPPED)
+        self.assertIn("OVERDUE IN TUNNEL", snap_605.trains["t-frg"].sensor_health.description)
+        self.assertEqual(snap_605.trains["t-slow"].sensor_health.state, SensorHealthState.TUNNEL_TRANSIT)
+
+        # At 855s: freight evicted (> 849.1s), slow still in TUNNEL_TRANSIT (< 1098.1s)
+        self.assertEqual(store.prune_stale_trains(now=t0 + 855.0), 1)
+        self.assertIsNone(store.get_train("t-frg"))
+        self.assertIsNotNone(store.get_train("t-slow"))
+
+        # At 1105s: slow escalates to OVERDUE IN TUNNEL; retained until ~1398s
+        self.assertEqual(store.prune_stale_trains(now=t0 + 1105.0), 0)
+        snap_1105 = store.get_snapshot(now=t0 + 1105.0)
+        self.assertEqual(snap_1105.trains["t-slow"].sensor_health.state, SensorHealthState.DROPPED)
+        self.assertIn("OVERDUE IN TUNNEL", snap_1105.trains["t-slow"].sensor_health.description)
+
+        # At 1405s: slow cleanly evicted (> 1398.1s, <= 1800s cap)
+        self.assertEqual(store.prune_stale_trains(now=t0 + 1405.0), 1)
+        self.assertIsNone(store.get_train("t-slow"))
+
+    def test_tc_wdg_04_terminated_station_dwell_prompt_eviction(self) -> None:
+        """TC-WDG-04: Silent stationary train at terminal stays DWL through 235s and evicts at 245s."""
+        store = TrainStateStore()
+        store.set_stations(self.stations)
+        store.set_tunnels(self.tunnels)
+        t0 = 40000.0
+        pos_ath = _make_pos(train_id="t-ath", train_number="IC54", speed=0.0, lat=37.9922, lng=23.7208)
+        store.update_positions([pos_ath], virtual_now=t0)
+
+        for dt in range(5, 240, 5):
+            self.assertEqual(store.prune_stale_trains(now=t0 + dt), 0)
+        snap_235 = store.get_snapshot(now=t0 + 235.0)
+        self.assertEqual(snap_235.trains["t-ath"].sensor_health.state, SensorHealthState.STATION_DWELL)
+        self.assertEqual(snap_235.dropped_count, 0)
+
+        self.assertEqual(store.prune_stale_trains(now=t0 + 245.0), 1)
+        self.assertIsNone(store.get_train("t-ath"))
+
+    def test_tc_wdg_05_dynamic_drop_threshold_floor_safety(self) -> None:
+        """TC-WDG-05: Raising telemetry_drop_threshold_sec to 400s extends open-line eviction floor to 700s."""
+        store = TrainStateStore()
+        store.set_stations(self.stations)
+        store.set_tunnels(self.tunnels)
+        store.set_telemetry_drop_threshold(400.0)
+        t0 = 50000.0
+        pos = _make_pos(train_id="t-hi", train_number="IC56", speed=120.0, lat=39.5, lng=22.35)
+        store.update_positions([pos], virtual_now=t0)
+
+        # Retained past 600s and reaches DROPPED at 405s; stays through 695s, evicted at 705s
+        self.assertEqual(store.prune_stale_trains(now=t0 + 405.0), 0)
+        snap_405 = store.get_snapshot(now=t0 + 405.0)
+        self.assertEqual(snap_405.trains["t-hi"].sensor_health.state, SensorHealthState.DROPPED)
+        self.assertEqual(store.prune_stale_trains(now=t0 + 695.0), 0)
+        self.assertEqual(store.prune_stale_trains(now=t0 + 705.0), 1)
+
+    def test_tc_wdg_06_custom_override_and_compute_tunnel_grace_hygiene(self) -> None:
+        """TC-WDG-06: Explicit stale_timeout_sec/max_age_sec overrides work and compute_tunnel_grace_sec handles NaN/Inf/bool."""
+        custom_store = TrainStateStore(stale_timeout_sec=30.0)
+        t0 = 60000.0
+        pos = _make_pos(train_id="t-cust", train_number="IC58", speed=120.0, lat=39.5, lng=22.35)
+        custom_store.update_positions([pos], virtual_now=t0)
+        self.assertEqual(custom_store.prune_stale_trains(now=t0 + 25.0), 0)
+        self.assertEqual(custom_store.prune_stale_trains(now=t0 + 35.0), 1)
+
+        # Explicit max_age_sec overrides default live state-aware TTL
+        default_store = TrainStateStore()
+        default_store.update_positions([pos], virtual_now=t0)
+        self.assertEqual(default_store.prune_stale_trains(max_age_sec=15.0, now=t0 + 20.0), 1)
+
+        # NaN / Inf / bool / negative / None length and speed inputs never crash
+        class _DummyTunnel:
+            def __init__(self, length_m: object) -> None:
+                self.length_m = length_m
+
+        for bad_len in (None, 0, -100.0, float("nan"), float("inf"), True):
+            for bad_spd in (None, 0.0, -20.0, float("nan"), float("inf"), False):
+                grace = compute_tunnel_grace_sec(_DummyTunnel(bad_len), bad_spd)  # type: ignore[arg-type]
+                self.assertGreaterEqual(grace, 300.0)
 
 
 if __name__ == "__main__":

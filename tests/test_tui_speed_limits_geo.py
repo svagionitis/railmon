@@ -17,7 +17,7 @@ from tui.geo import (
     evaluate_train_speed,
     parse_speed_limits_json,
 )
-from tui.mock_engine import load_slow_orders, load_speed_limits
+from tui.mock_engine import load_slow_orders, load_speed_limits, load_tracks
 
 
 class TestSpeedLimitsGeoModels(unittest.TestCase):
@@ -291,6 +291,38 @@ class TestSpeedEvaluationMath(unittest.TestCase):
         )
         self.assertEqual(res_none.severity, OverspeedSeverity.NORMAL)
         self.assertEqual(res_none.current_speed, 0.0)
+
+    def test_tc_wdg_12_macro_and_untagged_regional_speed_limits(self) -> None:
+        """TC-WDG-12: Macro tags, live API codes, and untagged regional points enforce exact OSE speed limits."""
+        tracks = load_tracks()
+        cases = [
+            # (label, lat, lng, speed, corridor_id, expected_limit, expected_sev)
+            ("THESSALY Volos", 39.3625, 22.9361, 95.0, "THESSALY", 80.0, OverspeedSeverity.OVERSPEED),
+            ("THESSALY Kalambaka", 39.5528, 21.7694, 95.0, "THESSALY", 80.0, OverspeedSeverity.OVERSPEED),
+            ("THESSALY off-grid conservative", 35.0, 25.0, 95.0, "THESSALY", 80.0, OverspeedSeverity.OVERSPEED),
+            ("PROASTIAKOS Chalkida", 38.4180, 23.6050, 105.0, "PROASTIAKOS", 90.0, OverspeedSeverity.OVERSPEED),
+            ("PROASTIAKOS Megara (Kiato)", 37.9944, 23.3361, 115.0, "PROASTIAKOS", 120.0, OverspeedSeverity.NORMAL),
+            ("THESFLOR Western Macedonia", 40.7833, 21.4111, 85.0, "THESFLOR", 70.0, OverspeedSeverity.OVERSPEED),
+            ("Thessaloniki - Alexandroupoli", 41.0833, 23.5472, 105.0, "Thessaloniki - Alexandroupoli", 90.0, OverspeedSeverity.OVERSPEED),
+            ("ATHLIA mainline", 38.5040, 22.8120, 150.0, "ATHLIA", 160.0, OverspeedSeverity.NORMAL),
+            ("THESLAR mainline", 40.2708, 22.5083, 150.0, "THESLAR", 160.0, OverspeedSeverity.NORMAL),
+            ("Untagged Volos geo-snap", 39.3625, 22.9361, 95.0, None, 80.0, OverspeedSeverity.OVERSPEED),
+            ("Untagged Chalkida geo-snap", 38.4180, 23.6050, 105.0, None, 90.0, OverspeedSeverity.OVERSPEED),
+            ("Untagged Florina geo-snap", 40.7833, 21.4111, 85.0, None, 70.0, OverspeedSeverity.OVERSPEED),
+        ]
+        for label, lat, lng, spd, cid, exp_lim, exp_sev in cases:
+            with self.subTest(case=label):
+                res = evaluate_train_speed(
+                    point=GeoPoint(lat=lat, lng=lng),
+                    current_speed=spd,
+                    corridor_id=cid,
+                    rules=self.rules,
+                    active_tsrs=self.tsrs,
+                    tracks_data=tracks,
+                    train_id="TEST",
+                )
+                self.assertEqual(res.governing_limit, exp_lim)
+                self.assertEqual(res.severity, exp_sev)
 
 
 if __name__ == "__main__":

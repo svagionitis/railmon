@@ -10,6 +10,7 @@ from tui.geo import (
     ConflictType,
     ConflictWatchdogConfig,
     GeoPoint,
+    _normalize_corridor_key,
     compute_closing_velocity_kmh,
     compute_forward_bearing,
     compute_relative_heading_delta,
@@ -18,7 +19,8 @@ from tui.geo import (
     haversine_distance_km,
     resolve_train_corridor,
 )
-from tui.mock_engine import StationNode, load_tracks
+from tui.mock_engine import MockTelemetryEngine, StationNode, load_tracks
+from tui.state import TrainRecord
 
 
 def _make_pos(
@@ -614,6 +616,222 @@ class TestConflictWatchdogGeo(unittest.TestCase):
         alert = alerts[0]
         self.assertEqual(alert.severity, ConflictSeverity.ADVISORY)
         self.assertIn("Stale telemetry track occupancy caution", alert.description)
+
+    def test_tc_wdg_07_normalize_corridor_key_anti_hijack_matrix(self) -> None:
+        """TC-WDG-07: Single-track corridors and live API codes never hijack to double-track mainlines."""
+        expected = {
+            "PATHE": "pathe-mainline",
+            "pathe-mainline": "pathe-mainline",
+            "E85": "pathe-mainline",
+            "MAINLINE": "pathe-mainline",
+            "ATHLIA": "pathe-mainline",
+            "THESLAR": "pathe-mainline",
+            "Athens - Thessaloniki": "pathe-mainline",
+            "PIRAIR": "proastiakos-airport-kiato",
+            "KIATO": "proastiakos-airport-kiato",
+            "Airport - Kiato": "proastiakos-airport-kiato",
+            "Athina - Airport": "proastiakos-airport-kiato",
+            "Athina - Kiato": "proastiakos-airport-kiato",
+            "proastiakos-chalkida": "proastiakos-chalkida",
+            "proastiakos_chalkida": "proastiakos-chalkida",
+            "Proastiakos Chalkida": "proastiakos-chalkida",
+            "CHALKIDA": "proastiakos-chalkida",
+            "Athina - Chalkida": "proastiakos-chalkida",
+            "Athens - Chalkida": "proastiakos-chalkida",
+            "ATH-HAL": "proastiakos-chalkida",
+            "thessaloniki-idomeni": "thessaloniki-idomeni",
+            "thessaloniki_idomeni": "thessaloniki-idomeni",
+            "Thessaloniki - Idomeni": "thessaloniki-idomeni",
+            "IDOMENI": "thessaloniki-idomeni",
+            "thessaly-volos": "thessaly-volos",
+            "thessaly_volos": "thessaly-volos",
+            "Thessaly Volos": "thessaly-volos",
+            "Larissa - Volos": "thessaly-volos",
+            "thessaly-kalambaka": "thessaly-kalambaka",
+            "thessaly_kalambaka": "thessaly-kalambaka",
+            "Thessaly Kalambaka": "thessaly-kalambaka",
+            "Palaiofarsalos - Kalambaka": "thessaly-kalambaka",
+            "THESFLOR": "western-macedonia",
+            "Thessaloniki - Edessa - Florina": "western-macedonia",
+            "Platy - Florina": "western-macedonia",
+            "MACEDONIA": "western-macedonia",
+            "Thessaloniki - Alexandroupoli": "northern-corridor",
+            "Thessaloniki-Alexandroupoli": "northern-corridor",
+            "ALEXOR": "northern-corridor",
+            "Eastern Macedonia & Thrace": "northern-corridor",
+            "THESSALY": "thessaly",
+            "PROASTIAKOS": "proastiakos",
+            "PROASTIAKOS_ATH": "proastiakos",
+            "NORTHERN": "northern",
+        }
+        for raw, exp in expected.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_normalize_corridor_key(raw), exp)
+
+    def test_tc_wdg_08_mock_engine_all_11_trains_resolve_exact_track(self) -> None:
+        """TC-WDG-08: All 11 MockTelemetryEngine fleet trains resolve to their exact physical track."""
+        tracks = load_tracks()
+        engine = MockTelemetryEngine()
+        self.assertEqual(len(engine.trains), 11)
+        for sim in engine.trains:
+            pos = sim.step(1.0)
+            resolved = resolve_train_corridor(pos, tracks_data=tracks)
+            with self.subTest(train=sim.id, tag=pos.corridor):
+                self.assertEqual(resolved, sim.track.corridor_id)
+
+    def test_tc_wdg_09_single_track_head_on_collision_restored(self) -> None:
+        """TC-WDG-09: Opposing trains on misclassified single-track corridors trigger CRITICAL; Kiato stays suppressed."""
+        tracks = load_tracks()
+        single_track_scenarios = [
+            ("THESSALY (Volos)", "THESSALY", 39.5000, 22.6100, 39.4700, 22.6500, 130.0, 310.0, "thessaly-volos"),
+            ("thessaloniki_idomeni", "thessaloniki_idomeni", 41.0500, 22.5480, 41.0800, 22.5360, 340.0, 160.0, "thessaloniki-idomeni"),
+            ("Thessaloniki - Alexandroupoli", "Thessaloniki - Alexandroupoli", 41.1200, 24.3000, 41.1300, 24.3400, 75.0, 255.0, "northern-corridor"),
+            ("THESFLOR", "THESFLOR", 40.7600, 21.7750, 40.7400, 21.7500, 220.0, 40.0, "western-macedonia"),
+            ("PROASTIAKOS (Chalkida)", "PROASTIAKOS", 38.3925, 23.6115, 38.4180, 23.6050, 350.0, 170.0, "proastiakos-chalkida"),
+        ]
+        for label, corr_tag, lat1, lng1, lat2, lng2, c1, c2, expected_cid in single_track_scenarios:
+            with self.subTest(scenario=label):
+                t1 = _make_pos("T1", "101", lat1, lng1, speed=80.0, course=c1, corridor=corr_tag)
+                t2 = _make_pos("T2", "102", lat2, lng2, speed=80.0, course=c2, corridor=corr_tag)
+                alerts = evaluate_train_conflicts([t1, t2], tracks_data=tracks, stations=[], config=self.config)
+                self.assertEqual(len(alerts), 1)
+                self.assertEqual(alerts[0].severity, ConflictSeverity.CRITICAL)
+                self.assertEqual(alerts[0].conflict_type, ConflictType.OPPOSING_COLLISION)
+                self.assertTrue(alerts[0].is_single_track)
+                self.assertEqual(alerts[0].corridor_id, expected_cid)
+
+        # Opposing trains tagged PROASTIAKOS on double-track Airport-Kiato (near Megara) stay suppressed
+        k1 = _make_pos("K1", "1201", 37.9944, 23.3361, speed=100.0, course=250.0, corridor="PROASTIAKOS")
+        k2 = _make_pos("K2", "1202", 37.9840, 23.3020, speed=100.0, course=70.0, corridor="PROASTIAKOS")
+        self.assertEqual(evaluate_train_conflicts([k1, k2], tracks_data=tracks, stations=[], config=self.config), [])
+
+    def test_tc_wdg_10_shared_trunk_tie_breaking_ska_and_kilkis(self) -> None:
+        """TC-WDG-10: Shared-trunk ties at SKA and Kilkis disambiguate cleanly via route metadata."""
+        tracks = load_tracks()
+        # SKA Hub (38.0744, 23.7381): shared by PATHE, Airport-Kiato, and Chalkida
+        p_ska_chal = TrainPosition(
+            id="s1", train_number="1314", locomotive_number="460", name="1314",
+            train_type="Proastiakos", service_type="Suburban", status="In Transit",
+            origin="Αθήνα", destination="Χαλκίδα", next_station="Αυλώνας",
+            speed=60.0, course=30.0, track_heading=30.0, lat=38.0744, lng=23.7381,
+            altitude=130.0, delay=0, progress=0.2, chainage_m=0, corridor="PROASTIAKOS",
+            distance_to_destination_m=60000, timestamp="2026-11-25T12:00:00Z", schedule_id="s1",
+        )
+        p_ska_kiato = TrainPosition(
+            id="s2", train_number="2232", locomotive_number="460", name="2232",
+            train_type="Proastiakos", service_type="Suburban", status="In Transit",
+            origin="Αεροδρόμιο", destination="Κιάτο", next_station="Άνω Λιόσια",
+            speed=60.0, course=270.0, track_heading=270.0, lat=38.0744, lng=23.7381,
+            altitude=130.0, delay=0, progress=0.3, chainage_m=0, corridor="PROASTIAKOS",
+            distance_to_destination_m=90000, timestamp="2026-11-25T12:00:00Z", schedule_id="s2",
+        )
+        p_ska_ic = TrainPosition(
+            id="s3", train_number="IC 52", locomotive_number="120", name="IC 52",
+            train_type="InterCity", service_type="Passenger", status="In Transit",
+            origin="Αθήνα", destination="Θεσσαλονίκη", next_station="Οινόη",
+            speed=90.0, course=30.0, track_heading=30.0, lat=38.0744, lng=23.7381,
+            altitude=130.0, delay=0, progress=0.1, chainage_m=0, corridor=None,
+            distance_to_destination_m=480000, timestamp="2026-11-25T12:00:00Z", schedule_id="s3",
+        )
+        self.assertEqual(resolve_train_corridor(p_ska_chal, tracks_data=tracks), "proastiakos-chalkida")
+        self.assertEqual(resolve_train_corridor(p_ska_kiato, tracks_data=tracks), "proastiakos-airport-kiato")
+        self.assertEqual(resolve_train_corridor(p_ska_ic, tracks_data=tracks), "pathe-mainline")
+
+        # Kilkis (40.9917, 22.8750): shared by thessaloniki-idomeni and northern-corridor
+        p_kil_ido = TrainPosition(
+            id="k1", train_number="361", locomotive_number="120", name="361",
+            train_type="International", service_type="Passenger", status="In Transit",
+            origin="Θεσσαλονίκη", destination="Ειδομένη", next_station="Πολύκαστρο",
+            speed=80.0, course=300.0, track_heading=300.0, lat=40.9917, lng=22.8750,
+            altitude=260.0, delay=0, progress=0.5, chainage_m=0, corridor="NORTHERN",
+            distance_to_destination_m=40000, timestamp="2026-11-25T12:00:00Z", schedule_id="k1",
+        )
+        p_kil_alex = TrainPosition(
+            id="k2", train_number="600", locomotive_number="220", name="600",
+            train_type="Regional", service_type="Passenger", status="In Transit",
+            origin="Θεσσαλονίκη", destination="Αλεξανδρούπολη", next_station="Σέρρες",
+            speed=80.0, course=45.0, track_heading=45.0, lat=40.9917, lng=22.8750,
+            altitude=260.0, delay=0, progress=0.2, chainage_m=0, corridor="NORTHERN",
+            distance_to_destination_m=280000, timestamp="2026-11-25T12:00:00Z", schedule_id="k2",
+        )
+        self.assertEqual(resolve_train_corridor(p_kil_ido, tracks_data=tracks), "thessaloniki-idomeni")
+        self.assertEqual(resolve_train_corridor(p_kil_alex, tracks_data=tracks), "northern-corridor")
+
+    def test_tc_wdg_11_unknown_corridor_fail_safe_single_track(self) -> None:
+        """TC-WDG-11: Unrecognized regional corridors fail-safely default to single-track."""
+        t1 = _make_pos("U1", "901", 35.1000, 25.1000, speed=70.0, course=0.0, corridor="unknown-regional-spur")
+        t2 = _make_pos("U2", "902", 35.1300, 25.1000, speed=70.0, course=180.0, corridor="unknown-regional-spur")
+        alerts = evaluate_train_conflicts([t1, t2], tracks_data={}, stations=[], config=self.config)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].severity, ConflictSeverity.CRITICAL)
+        self.assertEqual(alerts[0].conflict_type, ConflictType.OPPOSING_COLLISION)
+        self.assertTrue(alerts[0].is_single_track)
+
+    def test_tc_wdg_15_stale_ghost_envelope_zero_false_distant_headway(self) -> None:
+        """TC-WDG-15: Co-directional trains 15 km apart with one stale train produce 0 alerts (not STALE_HEADWAY)."""
+        now = 1700000000.0
+        t1 = _make_pos("IC50", "IC 50", 39.4000, 22.3500, speed=140.0, course=0.0, corridor="pathe-mainline")
+        t2 = _make_pos("IC52", "IC 52", 39.5350, 22.3500, speed=140.0, course=0.0, corridor="pathe-mainline")
+        # Distance ~15 km (> 2.5 km headway warning, <= 20 km outer check)
+        alerts = evaluate_train_conflicts(
+            [(t1, now), (t2, now - 90.0)],
+            stations=[],
+            config=self.config,
+            now=now,
+        )
+        self.assertEqual(alerts, [])
+
+    def test_tc_wdg_16_stale_ghost_envelope_zero_false_diverging_opposing(self) -> None:
+        """TC-WDG-16: Diverging opposing trains with one stale train produce 0 alerts (not STALE_OBSTRUCTION)."""
+        now = 1700000000.0
+        # t1 south moving South (180°), t2 north moving North (0°) -> closing_spd < 0
+        t1 = _make_pos("1597", "1597", 38.3800, 23.6000, speed=80.0, course=180.0, corridor="proastiakos-chalkida")
+        t2 = _make_pos("1598", "1598", 38.4500, 23.6000, speed=80.0, course=0.0, corridor="proastiakos-chalkida")
+        alerts = evaluate_train_conflicts(
+            [(t1, now), (t2, now - 90.0)],
+            stations=[],
+            config=self.config,
+            now=now,
+        )
+        self.assertEqual(alerts, [])
+
+    def test_tc_wdg_17_conflict_input_contract_matrix_and_nan_rejection(self) -> None:
+        """TC-WDG-17: TrainRecord, (pos, ts) tuple, last_updated_by_id, and legacy attr all trigger stale demotion; NaN/bool ignored."""
+        now = 1700000000.0
+        p1 = _make_pos("1597", "1597", 38.4000, 23.6000, speed=90.0, course=30.0, corridor="proastiakos-chalkida")
+        p2 = _make_pos("1598", "1598", 38.4180, 23.6120, speed=0.0, course=210.0, corridor="proastiakos-chalkida")
+
+        # 1. Sequence[TrainRecord]
+        r1 = TrainRecord(position=p1, first_seen=now, last_updated=now)
+        r2 = TrainRecord(position=p2, first_seen=now - 120.0, last_updated=now - 120.0)
+        alerts_rec = evaluate_train_conflicts([r1, r2], stations=[], config=self.config, now=now)
+        self.assertEqual(len(alerts_rec), 1)
+        self.assertEqual(alerts_rec[0].severity, ConflictSeverity.ADVISORY)
+        self.assertTrue(alerts_rec[0].alert_id.endswith("_STALE_OBSTRUCTION"))
+
+        # 2. Sequence[Tuple[TrainPosition, float]]
+        alerts_tup = evaluate_train_conflicts([(p1, now), (p2, now - 120.0)], stations=[], config=self.config, now=now)
+        self.assertEqual(alerts_tup[0].severity, ConflictSeverity.ADVISORY)
+
+        # 3. Sequence[TrainPosition] + last_updated_by_id
+        alerts_map = evaluate_train_conflicts(
+            [p1, p2],
+            stations=[],
+            config=self.config,
+            now=now,
+            last_updated_by_id={"1597": now, "1598": now - 120.0},
+        )
+        self.assertEqual(alerts_map[0].severity, ConflictSeverity.ADVISORY)
+
+        # 4. Non-finite / bool timestamps rejected cleanly (do not crash or falsely demote)
+        alerts_bad_ts = evaluate_train_conflicts(
+            [(p1, float("nan")), (p2, True)],  # type: ignore[list-item]
+            stations=[],
+            config=self.config,
+            now=now,
+        )
+        self.assertEqual(len(alerts_bad_ts), 1)
+        self.assertEqual(alerts_bad_ts[0].severity, ConflictSeverity.CRITICAL)
 
 
 if __name__ == "__main__":

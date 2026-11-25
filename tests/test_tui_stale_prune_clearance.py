@@ -56,7 +56,7 @@ def _make_test_position(
 
 
 class TestStalePruneClearance(unittest.TestCase):
-    """Test suite validating 90s stale pruning, immediate conflict eviction, and station dwell preemption."""
+    """Test suite validating state-aware stale pruning (P0-9/P0-17), immediate conflict eviction, and station dwell preemption."""
 
     def setUp(self) -> None:
         self.store = TrainStateStore()
@@ -71,10 +71,10 @@ class TestStalePruneClearance(unittest.TestCase):
         )
         self.store.set_stations([self.stn_athens])
 
-    def test_live_stale_timeout_default_90s(self) -> None:
-        """TC-PRN-01: Default stale timeout is 90s for live mode, toggling to 1800s in replay mode."""
+    def test_live_stale_timeout_default_600s(self) -> None:
+        """TC-PRN-01: Default stale timeout is 600s for live mode, toggling to 1800s in replay mode."""
         self.assertEqual(self.store.get_stale_timeout(), DEFAULT_LIVE_STALE_TIMEOUT_SEC)
-        self.assertEqual(self.store.get_stale_timeout(), 90.0)
+        self.assertEqual(self.store.get_stale_timeout(), 600.0)
 
         # Toggle to replay mode
         self.store.set_replay_status(is_replay=True, virtual_time=1000.0)
@@ -84,37 +84,37 @@ class TestStalePruneClearance(unittest.TestCase):
         # Toggle back to live mode
         self.store.set_replay_status(is_replay=False)
         self.assertEqual(self.store.get_stale_timeout(), DEFAULT_LIVE_STALE_TIMEOUT_SEC)
-        self.assertEqual(self.store.get_stale_timeout(), 90.0)
+        self.assertEqual(self.store.get_stale_timeout(), 600.0)
 
         # Explicit custom timeout override
         self.store.set_stale_timeout(45.0)
         self.assertEqual(self.store.get_stale_timeout(), 45.0)
 
     def test_prune_evicts_departed_train(self) -> None:
-        """TC-PRN-02: Trains absent past the 90s cutoff are evicted from state store."""
+        """TC-PRN-02: Open-line trains absent past the 600s cutoff are evicted from state store."""
         t0 = 1000.0
         pos = _make_test_position("T-101", "IC52")
         self.store.update_positions([pos], virtual_now=t0)
 
         self.assertIsNotNone(self.store.get_train("T-101"))
-        snap_before = self.store.get_snapshot()
+        snap_before = self.store.get_snapshot(now=t0)
         self.assertEqual(len(snap_before.trains), 1)
 
-        # Advance by 80s (within 90s grace window)
-        pruned_80 = self.store.prune_stale_trains(now=t0 + 80.0)
-        self.assertEqual(pruned_80, 0)
+        # Advance by 590s (within 600s live eviction window — survives past 180s DROPPED threshold)
+        pruned_590 = self.store.prune_stale_trains(now=t0 + 590.0)
+        self.assertEqual(pruned_590, 0)
         self.assertIsNotNone(self.store.get_train("T-101"))
 
-        # Advance past 90s cutoff (e.g. 95s)
-        pruned_95 = self.store.prune_stale_trains(now=t0 + 95.0)
-        self.assertEqual(pruned_95, 1)
+        # Advance past 600s cutoff (e.g. 605s)
+        pruned_605 = self.store.prune_stale_trains(now=t0 + 605.0)
+        self.assertEqual(pruned_605, 1)
         self.assertIsNone(self.store.get_train("T-101"))
 
-        snap_after = self.store.get_snapshot()
+        snap_after = self.store.get_snapshot(now=t0 + 605.0)
         self.assertEqual(len(snap_after.trains), 0)
 
     def test_prune_clears_active_conflict_immediately(self) -> None:
-        """TC-PRN-03: Pruning a train immediately purges active conflicts and resets latches."""
+        """TC-PRN-03: Stale train demotes conflict to ADVISORY at >60s and pruning clears it completely."""
         t0 = 2000.0
         # Two opposing trains on single-track section
         cfg = ConflictWatchdogConfig(
@@ -128,42 +128,49 @@ class TestStalePruneClearance(unittest.TestCase):
         t2 = _make_test_position("T-2", "1598", lat=38.05, lng=23.70, speed=60.0, course=180.0)
         self.store.update_positions([t1, t2], virtual_now=t0)
 
-        snap = self.store.get_snapshot()
+        snap = self.store.get_snapshot(now=t0)
         self.assertGreater(snap.critical_conflict_count + snap.warning_conflict_count, 0)
         self.assertGreater(len(snap.active_conflicts), 0)
 
-        # Update T-2 with fresh telemetry at t0 + 100s, leaving T-1 un-updated (completed at t0)
+        # Update T-2 with fresh telemetry at t0 + 100s, leaving T-1 stale (age 100s > 60s threshold)
         t2_fresh = _make_test_position("T-2", "1598", lat=38.04, lng=23.70, speed=60.0, course=180.0)
         self.store.update_positions([t2_fresh], virtual_now=t0 + 100.0)
+        snap_stale = self.store.get_snapshot(now=t0 + 100.0)
+        self.assertEqual(snap_stale.critical_conflict_count, 0)
+        self.assertEqual(snap_stale.advisory_conflict_count, 1)
 
-        # Prune stale trains at t0 + 100s (T-1 has age 100s > 90s cutoff)
-        pruned = self.store.prune_stale_trains(now=t0 + 100.0)
+        # Keep T-2 fresh at t0 + 605s and prune T-1 (age 605s > 600s cutoff)
+        self.store.update_positions([t2_fresh], virtual_now=t0 + 605.0)
+        pruned = self.store.prune_stale_trains(now=t0 + 605.0)
         self.assertEqual(pruned, 1)
         self.assertIsNone(self.store.get_train("T-1"))
         self.assertIsNotNone(self.store.get_train("T-2"))
 
         # Snapshot must reflect zero conflicts immediately
-        snap_pruned = self.store.get_snapshot()
+        snap_pruned = self.store.get_snapshot(now=t0 + 605.0)
         self.assertEqual(snap_pruned.critical_conflict_count, 0)
         self.assertEqual(snap_pruned.warning_conflict_count, 0)
+        self.assertEqual(snap_pruned.advisory_conflict_count, 0)
         self.assertEqual(len(snap_pruned.active_conflicts), 0)
 
     def test_prune_clears_dropped_and_frozen_snapshot_counts(self) -> None:
-        """TC-PRN-04: Pruning stale trains immediately clears dropped and frozen anomaly tallies."""
+        """TC-PRN-04: Open-line train reaches DROPPED at 190s and pruning past 600s clears all tallies."""
         t0 = 3000.0
         # Stationary train out on open line (no stations nearby)
         t_drop = _make_test_position("T-DROP", "9999", lat=39.5, lng=22.5, speed=0.0)
         self.store.update_positions([t_drop], virtual_now=t0)
 
-        # Before 90s, at 80s, verify train exists
-        snap_80 = self.store.get_snapshot()
-        self.assertEqual(len(snap_80.trains), 1)
+        # At 190s (past 180s drop threshold, before 600s eviction), train MUST reach DROPPED
+        self.assertEqual(self.store.prune_stale_trains(now=t0 + 190.0), 0)
+        snap_190 = self.store.get_snapshot(now=t0 + 190.0)
+        self.assertEqual(len(snap_190.trains), 1)
+        self.assertEqual(snap_190.dropped_count, 1)
 
-        # Advance past 90s and prune
-        pruned = self.store.prune_stale_trains(now=t0 + 95.0)
+        # Advance past 600s and prune
+        pruned = self.store.prune_stale_trains(now=t0 + 605.0)
         self.assertEqual(pruned, 1)
 
-        snap_after = self.store.get_snapshot()
+        snap_after = self.store.get_snapshot(now=t0 + 605.0)
         self.assertEqual(snap_after.dropped_count, 0)
         self.assertEqual(snap_after.frozen_count, 0)
         self.assertEqual(len(snap_after.trains), 0)
@@ -202,16 +209,16 @@ class TestStalePruneClearance(unittest.TestCase):
         self.store.set_follow_mode(True)
         self.assertTrue(self.store.toggle_watch_train("T-SEL"))
 
-        snap = self.store.get_snapshot()
+        snap = self.store.get_snapshot(now=t0)
         self.assertEqual(snap.selected_train.position.id, "T-SEL")
         self.assertTrue(snap.follow_mode)
         self.assertIn("T-SEL", snap.watched_train_ids)
 
-        # Prune stale train
-        pruned = self.store.prune_stale_trains(now=t0 + 100.0)
+        # Prune stale train past 600s live cutoff
+        pruned = self.store.prune_stale_trains(now=t0 + 605.0)
         self.assertEqual(pruned, 1)
 
-        snap_after = self.store.get_snapshot()
+        snap_after = self.store.get_snapshot(now=t0 + 605.0)
         self.assertIsNone(snap_after.selected_train)
         self.assertFalse(snap_after.follow_mode)
         self.assertNotIn("T-SEL", snap_after.watched_train_ids)

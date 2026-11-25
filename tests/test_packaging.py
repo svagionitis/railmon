@@ -580,7 +580,8 @@ class TestPackagingAndVersioning(unittest.TestCase):
 
         import tui
 
-        self.assertEqual(len(tui.__all__), 79)
+        self.assertEqual(len(tui.__all__), 80)
+        self.assertIn("compute_tunnel_grace_sec", tui.__all__)
         dir_names = set(dir(tui))
         for symbol in tui.__all__:
             self.assertIn(symbol, dir_names)

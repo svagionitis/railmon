@@ -135,21 +135,21 @@ class TestTrainStateStore(unittest.TestCase):
         self.assertFalse(snapshot.follow_mode)
 
     def test_default_stale_timeout_30_minutes(self):
-        """TC-P2-01 & TC-P2-02 & TC-P0-09: Verify default stale timeout is 90s (live) and 1800s (replay) for store and TrainRecord."""
+        """TC-P2-01 & TC-P2-02 & P0-17: Verify default stale timeout is 600s (live) and 1800s (replay) for store and TrainRecord."""
         default_store = TrainStateStore()
-        self.assertEqual(default_store._stale_timeout_sec, 90.0)
+        self.assertEqual(default_store._stale_timeout_sec, 600.0)
 
         replay_store = TrainStateStore(stale_timeout_sec=1800.0)
         self.assertEqual(replay_store._stale_timeout_sec, 1800.0)
 
         t = _create_sample_train("ic-50", "IC 50")
         rec = TrainRecord(position=t)
-        # Inactive for 80s (< 90s) -> not stale
-        rec.last_updated = time.time() - 80.0
+        # Inactive for 590s (< 600s) -> not stale
+        rec.last_updated = time.time() - 590.0
         self.assertFalse(rec.is_stale())
 
-        # Inactive for 95s (> 90s) -> stale
-        rec.last_updated = time.time() - 95.0
+        # Inactive for 605s (> 600s) -> stale
+        rec.last_updated = time.time() - 605.0
         self.assertTrue(rec.is_stale())
 
     def test_prune_stale_trains_30m_boundary_and_counters(self):
