@@ -239,6 +239,27 @@ class TestCliExportGtfsRt(unittest.TestCase):
                 self.assertIn(expected_id, ids)
             self.assertTrue(os.path.isfile(os.path.join(json_dir, "alerts.json")))
 
+    def test_tc_http_15_gtfs_serve_http_limit_flags_and_validation(self):
+        """TC-HTTP-15 (export): Parse and validate --max-connections and --request-timeout."""
+        parser = train_tracker.build_parser()
+        args = parser.parse_args(
+            ["gtfs-rt", "--serve", "--max-connections", "32", "--request-timeout", "6.5"]
+        )
+        self.assertEqual(args.max_connections, 32)
+        self.assertAlmostEqual(args.request_timeout, 6.5)
+
+        for bad_flags in (
+            ["gtfs-rt", "--serve", "--max-connections", "0"],
+            ["gtfs-rt", "--serve", "--request-timeout", "0"],
+            ["gtfs-rt", "--serve", "--request-timeout", "nan"],
+            ["gtfs-rt", "--serve", "--request-timeout", "inf"],
+        ):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                rc = train_tracker.main(bad_flags)
+            self.assertEqual(rc, 2, f"Expected exit code 2 for {bad_flags}")
+            self.assertIn("[ERROR]", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

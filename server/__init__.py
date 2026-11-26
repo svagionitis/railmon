@@ -23,7 +23,12 @@ from server.models import (
     SSEMessage,
     TileProvider,
 )
-from server.sse import MAX_CLIENT_QUEUE_DEPTH, SSEBroadcaster
+from server.sse import (
+    MAX_CLIENT_QUEUE_DEPTH,
+    MAX_SSE_CLIENTS,
+    SSEBroadcaster,
+    SSECapacityError,
+)
 
 __version__: str = train_tracker.__version__
 __author__: str = train_tracker.__author__
@@ -32,11 +37,13 @@ __all__: List[str] = [
     "__version__",
     "__author__",
     "MAX_CLIENT_QUEUE_DEPTH",
+    "MAX_SSE_CLIENTS",
     "ClientConnection",
     "GeoAssetCache",
     "ServerConfig",
     "ServerHealthMetrics",
     "SSEBroadcaster",
+    "SSECapacityError",
     "SSEMessage",
     "TileProvider",
     "WebMapRequestHandler",

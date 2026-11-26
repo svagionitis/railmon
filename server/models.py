@@ -7,6 +7,14 @@ from enum import Enum
 from queue import Queue
 from typing import Any, Dict, Optional, Tuple
 
+from railmon_http import (
+    DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_SSE_WRITE_TIMEOUT_SEC,
+    validate_positive_finite_float,
+    validate_positive_int,
+)
+
 
 class TileProvider(str, Enum):
     """Cartographic base tile layer provider."""
@@ -55,13 +63,20 @@ class ServerConfig:
     replay_db: Optional[str] = None
     replay_speed: float = 1.0
     open_browser: bool = False
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
+    max_sse_clients: int = 32
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC
+    sse_write_timeout_sec: float = DEFAULT_SSE_WRITE_TIMEOUT_SEC
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
-        if not (1 <= self.port <= 65535):
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
-        if self.replay_speed <= 0.0:
-            raise ValueError(f"Replay speed must be positive, got {self.replay_speed}")
+        validate_positive_finite_float("replay_speed", self.replay_speed)
+        validate_positive_int("max_connections", self.max_connections, minimum=1)
+        validate_positive_int("max_sse_clients", self.max_sse_clients, minimum=1)
+        validate_positive_finite_float("request_timeout_sec", self.request_timeout_sec)
+        validate_positive_finite_float("sse_write_timeout_sec", self.sse_write_timeout_sec)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to JSON-serializable dictionary."""
@@ -76,6 +91,10 @@ class ServerConfig:
             "replay_db": self.replay_db,
             "replay_speed": self.replay_speed,
             "open_browser": self.open_browser,
+            "max_connections": self.max_connections,
+            "max_sse_clients": self.max_sse_clients,
+            "request_timeout_sec": self.request_timeout_sec,
+            "sse_write_timeout_sec": self.sse_write_timeout_sec,
         }
 
 
@@ -130,6 +149,8 @@ class ServerHealthMetrics:
     total_broadcasts: int
     total_frames_sent: int
     total_frames_dropped: int
+    max_clients: int = 0
+    total_clients_rejected: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert metrics to dictionary."""
@@ -140,4 +161,6 @@ class ServerHealthMetrics:
             "total_broadcasts": self.total_broadcasts,
             "total_frames_sent": self.total_frames_sent,
             "total_frames_dropped": self.total_frames_dropped,
+            "max_clients": self.max_clients,
+            "total_clients_rejected": self.total_clients_rejected,
         }

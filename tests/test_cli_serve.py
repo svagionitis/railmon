@@ -397,6 +397,31 @@ class TestCliServe(unittest.TestCase):
 
         self.assertIn("[SECURITY NOTICE]", stderr_buf.getvalue())
 
+    def test_tc_http_15_serve_http_limit_flags_and_validation(self) -> None:
+        """TC-HTTP-15 (serve): Parse and validate --max-connections, --max-sse-clients, --request-timeout."""
+        args = self.parser.parse_args(
+            ["serve", "--max-connections", "16", "--max-sse-clients", "8", "--request-timeout", "5.5"]
+        )
+        self.assertEqual(args.max_connections, 16)
+        self.assertEqual(args.max_sse_clients, 8)
+        self.assertAlmostEqual(args.request_timeout, 5.5)
+
+        for bad_flags in (
+            ["serve", "--max-connections", "0"],
+            ["serve", "--max-connections", "-4"],
+            ["serve", "--max-sse-clients", "0"],
+            ["serve", "--request-timeout", "0"],
+            ["serve", "--request-timeout", "nan"],
+            ["serve", "--request-timeout", "inf"],
+            ["serve", "--speed", "nan"],
+        ):
+            bad_args = self.parser.parse_args(bad_flags)
+            stderr_buf = io.StringIO()
+            with patch("sys.stderr", stderr_buf):
+                rc = run_serve_mode(bad_args)
+            self.assertEqual(rc, 2, f"Expected exit code 2 for {bad_flags}")
+            self.assertIn("[ERROR]", stderr_buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

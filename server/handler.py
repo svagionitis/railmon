@@ -8,14 +8,15 @@ import queue
 import secrets
 import socket
 import time
-from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import urllib.parse
 
 from exporter.formatter import MetricsFormatter, negotiate_metrics_format
 from gtfs_rt.models import GTFS_RT_VERSION, OutputFormat
 from gtfs_rt.server import etag_matches, resolve_gtfs_route
+from railmon_http import BoundedHTTPRequestHandler
 from server.assets import get_geojson_asset, get_spa_html
+from server.sse import SSECapacityError
 
 if TYPE_CHECKING:
     from server.daemon import WebMapServer
@@ -55,7 +56,7 @@ def _sanitize_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
-class WebMapRequestHandler(BaseHTTPRequestHandler):
+class WebMapRequestHandler(BoundedHTTPRequestHandler):
     """Dispatches REST routes, embedded static SPA, and real-time SSE streams."""
 
     server: "WebMapServer"
@@ -278,6 +279,9 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
                 "connection_status": conn_status,
                 "total_messages_received": snapshot.total_messages_received,
                 "tile_provider": tile_provider,
+                "active_http_connections": self.server.active_connections,
+                "max_http_connections": self.server.max_connections,
+                "rejected_http_connections": self.server.rejected_connections,
             }
         )
         payload_bytes = json.dumps(health, ensure_ascii=False).encode("utf-8")
@@ -437,17 +441,27 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _handle_sse_stream(self) -> None:
-        """Maintain persistent HTTP/1.1 Server-Sent Events stream."""
+        """Maintain persistent HTTP/1.1 Server-Sent Events stream with bounded capacity and write timeout."""
         remote_ip = self.client_address[0] if self.client_address else "127.0.0.1"
-        client_conn = self.server.broadcaster.register_client(remote_addr=remote_ip)
+        try:
+            client_conn = self.server.broadcaster.register_client(remote_addr=remote_ip)
+        except SSECapacityError:
+            self._send_json_error(
+                503,
+                "Service Unavailable: maximum SSE subscribers reached",
+                retry_after=self._http_limits.overload_retry_after_sec,
+            )
+            return
+
         client_id = client_conn.client_id
+        self.prepare_sse_stream()
         logger.info("SSE client handshake complete [id=%s, ip=%s]", client_id, remote_ip)
 
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-transform")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self._add_security_headers(csp_policy=_API_CSP_POLICY)
             self._add_cors_headers()
             self.end_headers()
@@ -473,16 +487,19 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
                     self._send_sse_raw(":ping\n\n")
                     last_ping_time = now
 
+        except (TimeoutError, socket.timeout):
+            self._record_server_timeout()
+            logger.info("SSE client write timed out; evicting stalled subscriber [id=%s]", client_id)
         except (
             BrokenPipeError,
             ConnectionResetError,
             ConnectionAbortedError,
-            socket.timeout,
         ):
             logger.info("SSE client disconnected [id=%s]", client_id)
         except Exception as exc:
             logger.warning("SSE stream loop exception [id=%s]: %s", client_id, exc)
         finally:
+            self.close_connection = True
             self.server.broadcaster.unregister_client(client_id)
             logger.debug("Cleaned up SSE client channel [id=%s]", client_id)
 
@@ -551,7 +568,13 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         if not is_head:
             self.wfile.write(body)
 
-    def _send_json_error(self, code: int, message: str) -> None:
+    def _send_json_error(
+        self,
+        code: int,
+        message: str,
+        *,
+        retry_after: Optional[int] = None,
+    ) -> None:
         """Emit clean JSON error payload with corresponding HTTP error status."""
         self.close_connection = True
         error_body = json.dumps(
@@ -564,6 +587,8 @@ class WebMapRequestHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(error_body)))
+        if retry_after is not None:
+            self.send_header("Retry-After", str(retry_after))
         self.send_header("Connection", "close")
         self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()

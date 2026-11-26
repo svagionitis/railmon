@@ -5,22 +5,25 @@ import gzip
 import json
 import logging
 import signal
-import socket
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import FrameType
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from exporter.collector import MetricRegistry, ProcessMetricsCollector
 from exporter.formatter import MetricsFormatter, negotiate_metrics_format
 from exporter.models import ExporterConfig
+from railmon_http import (
+    BoundedHTTPRequestHandler,
+    BoundedHTTPServer,
+    HttpLimitsConfig,
+)
 
 logger = logging.getLogger("railmon.exporter.server")
 
 
-class MetricsRequestHandler(BaseHTTPRequestHandler):
+class MetricsRequestHandler(BoundedHTTPRequestHandler):
     """Dispatches /metrics, /health, / and OPTIONS preflight requests."""
 
     server: "MetricsServer"
@@ -82,6 +85,10 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
                 self._handle_index(is_head=is_head)
             else:
                 self._send_error(404, f"Endpoint '{raw_path}' not found")
+        except TimeoutError:
+            self._record_server_timeout()
+            self.close_connection = True
+            logger.debug("Client timed out during metrics request processing")
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             logger.debug("Client disconnected abruptly during request processing")
 
@@ -92,6 +99,16 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
 
         try:
             families = self.server.registry.collect_all()
+            if (time.perf_counter() - t_start) > self.server.config.scrape_timeout_seconds:
+                status_code = 504
+                self.close_connection = True
+                self._record_server_timeout()
+                self._send_error(
+                    504,
+                    "Gateway Timeout: metrics scrape exceeded configured deadline",
+                )
+                return
+
             accept_header = self.headers.get("Accept")
             content_type, format_mode = negotiate_metrics_format(accept_header)
 
@@ -119,6 +136,11 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
             if not is_head:
                 self.wfile.write(body)
 
+        except TimeoutError:
+            self._record_server_timeout()
+            self.close_connection = True
+            logger.debug("Scraper client timed out during metrics response write")
+            status_code = 499
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             logger.debug("Scraper client disconnected abruptly during metrics write")
             status_code = 499
@@ -127,8 +149,8 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
             status_code = 500
             try:
                 self._send_error(500, f"Internal Scrape Error: {exc}")
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                pass
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                logger.debug("Failed sending 500 error to disconnected scraper client")
         finally:
             duration = time.perf_counter() - t_start
             self._record_scrape_telemetry(duration, "/metrics", status_code)
@@ -150,6 +172,9 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
             "collectors_registered": collectors_count,
             "timestamp": time.time(),
             "version": getattr(self.server.config, "version", "1.0.0"),
+            "active_http_connections": self.server.active_connections,
+            "max_http_connections": self.server.max_connections,
+            "rejected_http_connections": self.server.rejected_connections,
         }
         body = json.dumps(payload, indent=2).encode("utf-8")
 
@@ -221,25 +246,16 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
             self._add_cors_headers()
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             logger.debug("Failed sending error response to disconnected client")
 
 
-class MetricsServer(ThreadingHTTPServer):
-    """Multi-threaded HTTP server daemon managing Prometheus scrapers."""
-
-    daemon_threads: bool = True
-    allow_reuse_address: bool = True
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        """Handle errors cleanly, suppressing noisy broken pipe / reset exceptions."""
-        exc_type, exc_val, _ = sys.exc_info()
-        if exc_type in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            logger.debug("Socket connection dropped by client %s: %s", client_address, exc_val)
-            return
-        super().handle_error(request, client_address)
+class MetricsServer(BoundedHTTPServer):
+    """Multi-threaded bounded HTTP server daemon managing Prometheus scrapers."""
 
     def __init__(
         self,
@@ -266,8 +282,17 @@ class MetricsServer(ThreadingHTTPServer):
         self._server_thread: Optional[threading.Thread] = None
         self._started_at: float = time.time()
 
+        http_limits = HttpLimitsConfig.for_request_timeout(
+            self.config.scrape_timeout_seconds,
+            max_connections=self.config.max_connections,
+        )
+
         try:
-            super().__init__(server_address, MetricsRequestHandler)
+            super().__init__(
+                server_address,
+                MetricsRequestHandler,
+                http_limits=http_limits,
+            )
         except OSError as exc:
             if exc.errno == errno.EADDRINUSE:
                 logger.error(
@@ -279,11 +304,12 @@ class MetricsServer(ThreadingHTTPServer):
             raise
 
         logger.info(
-            "Initialized MetricsServer on %s:%d (gzip=%s, timeout=%.1fs)",
+            "Initialized MetricsServer on %s:%d (gzip=%s, max_conn=%d, timeout=%.1fs)",
             self.server_address[0],
             self.server_port,
             self.config.gzip_compression,
-            self.config.scrape_timeout_seconds,
+            self.http_limits.max_connections,
+            self.http_limits.request_timeout_sec,
         )
 
     @property

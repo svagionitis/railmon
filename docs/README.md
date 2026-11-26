@@ -130,6 +130,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p1-7-ascii-fallback-safe-init-pair-fix-plan.md`](./plans/fixes/p1/p1-7-ascii-fallback-safe-init-pair-fix-plan.md) | Automatic ASCII fallback for non-UTF-8 terminals and safe `init_pair` cap |
 | [`p1-8-logging-hierarchy-rotating-file-handler-fix-plan.md`](./plans/fixes/p1/p1-8-logging-hierarchy-rotating-file-handler-fix-plan.md) | Hierarchical `railmon` logging with size-bounded `RotatingFileHandler` |
 | [`p1-9-pyproject-toml-single-source-version-fix-plan.md`](./plans/fixes/p1/p1-9-pyproject-toml-single-source-version-fix-plan.md) | PEP 517/621 `pyproject.toml` packaging and single-source `__version__` |
+| [`p1-10-slowloris-and-http-connection-exhaustion-fix-plan.md`](./plans/fixes/p1/p1-10-slowloris-and-http-connection-exhaustion-fix-plan.md) | Slowloris & unbounded thread/connection exhaustion across all 3 HTTP daemons (`railmon_http.py` bounded base, monotonic header deadline, RFC 9112 `503` rejector, live `scrape_timeout_seconds`, `SSEBroadcaster` client cap & write timeout) |
 
 #### P2 — Medium-Priority Plans (`plans/fixes/p2/`)
 

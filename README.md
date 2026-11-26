@@ -269,6 +269,7 @@ curl http://127.0.0.1:8085/gtfs-rt/feed.json
 - [`pyproject.toml`](./pyproject.toml): PEP 517 / PEP 518 / PEP 621 packaging specification, dynamic versioning, and unified tool configuration.
 - [`train_tracker.py`](./train_tracker.py): Core HTTP/SSE API client, data models, and CLI argument parsing.
 - [`railmon_watchdog.py`](./railmon_watchdog.py): Train trip watchdog evaluator, proximity calculations, and multimodal push alert dispatchers.
+- [`railmon_http.py`](./railmon_http.py): Shared zero-dependency bounded HTTP/1.1 server and request handler base (`BoundedHTTPServer`, `BoundedHTTPRequestHandler`, monotonic Slowloris header deadline, connection semaphore, and RFC 9112 `503` overload rejection).
 - [`tui/`](./tui): Modular curses terminal user interface:
   - [`tui/geo.py`](./tui/geo.py): EPSG:4326 to Braille canvas (2x4 dot matrix) projection engine.
   - [`tui/state.py`](./tui/state.py): Thread-safe telemetry state store and snapshot generation.

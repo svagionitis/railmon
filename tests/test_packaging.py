@@ -188,7 +188,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "uuid",
             "webbrowser",
         }
-        allowed_internal = {"server", "storage", "train_tracker", "tui", "exporter", "gtfs_rt"}
+        allowed_internal = {"server", "storage", "train_tracker", "tui", "exporter", "gtfs_rt", "railmon_http"}
         allowed = allowed_stdlib | allowed_internal
 
         for py_file in server_dir.glob("*.py"):
@@ -255,7 +255,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "typing",
             "urllib",
         }
-        allowed_internal = {"exporter", "server", "storage", "train_tracker", "tui"}
+        allowed_internal = {"exporter", "server", "storage", "train_tracker", "tui", "railmon_http"}
         allowed = allowed_stdlib | allowed_internal
 
         for py_file in exporter_dir.glob("*.py"):
@@ -325,7 +325,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "urllib",
             "zoneinfo",
         }
-        allowed_internal = {"gtfs_rt", "exporter", "server", "storage", "train_tracker", "tui"}
+        allowed_internal = {"gtfs_rt", "exporter", "server", "storage", "train_tracker", "tui", "railmon_http"}
         allowed = allowed_stdlib | allowed_internal
 
         for py_file in gtfs_dir.glob("*.py"):
@@ -468,7 +468,13 @@ class TestPackagingAndVersioning(unittest.TestCase):
             stage_dir.mkdir()
             wheel_dir.mkdir()
 
-            for root_file in ("pyproject.toml", "README.md", "train_tracker.py", "railmon_watchdog.py"):
+            for root_file in (
+                "pyproject.toml",
+                "README.md",
+                "train_tracker.py",
+                "railmon_watchdog.py",
+                "railmon_http.py",
+            ):
                 shutil.copy2(REPO_ROOT / root_file, stage_dir / root_file)
             for pkg_dir in ("storage", "tui", "server", "exporter", "gtfs_rt"):
                 shutil.copytree(
@@ -510,6 +516,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
         headless_targets = (
             "train_tracker",
             "railmon_watchdog",
+            "railmon_http",
             "storage",
             "storage.cli_formatters",
             "server",
@@ -639,6 +646,49 @@ class TestPackagingAndVersioning(unittest.TestCase):
             raw_bytes,
             "POSIX launcher './railmon' contains CRLF line endings (breaks Linux/WSL shebang)",
         )
+
+    def test_railmon_http_is_pure_stdlib_acyclic_leaf(self):
+        """TC-PKG-19: railmon_http.py is packaged and imports strictly Python stdlib (zero internal/PyPI deps)."""
+        parsed = _parse_pyproject()
+        setuptools_cfg = parsed["tool"]["setuptools"]
+        self.assertIn("railmon_http", setuptools_cfg["py-modules"])
+        self.assertIn("railmon_http.py", parsed["tool"]["ruff"]["src"])
+        self.assertIn("railmon_http", parsed["tool"]["coverage"]["run"]["source"])
+
+        http_file = REPO_ROOT / "railmon_http.py"
+        self.assertTrue(http_file.exists(), "railmon_http.py missing at repository root")
+
+        allowed_stdlib = {
+            "dataclasses",
+            "http",
+            "io",
+            "json",
+            "logging",
+            "math",
+            "socket",
+            "socketserver",
+            "sys",
+            "threading",
+            "time",
+            "typing",
+        }
+        tree = ast.parse(http_file.read_text(encoding="utf-8"), filename=str(http_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root_mod = alias.name.split(".")[0]
+                    self.assertIn(
+                        root_mod,
+                        allowed_stdlib,
+                        f"Non-stdlib or cyclic internal import '{root_mod}' in railmon_http.py",
+                    )
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                root_mod = node.module.split(".")[0]
+                self.assertIn(
+                    root_mod,
+                    allowed_stdlib,
+                    f"Non-stdlib or cyclic internal import '{root_mod}' in railmon_http.py",
+                )
 
 
 if __name__ == "__main__":

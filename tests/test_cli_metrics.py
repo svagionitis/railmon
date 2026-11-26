@@ -224,6 +224,29 @@ class TestCliMetrics(unittest.TestCase):
             self.assertEqual(args.mode, "metrics")
             self.assertEqual(args.port, 9150)
 
+    def test_tc_http_15_metrics_http_limit_flags_and_validation(self) -> None:
+        """TC-HTTP-15 (metrics): Parse and validate --max-connections and --scrape-timeout."""
+        args = self.parser.parse_args(
+            ["metrics", "--max-connections", "24", "--scrape-timeout", "4.5"]
+        )
+        self.assertEqual(args.max_connections, 24)
+        self.assertAlmostEqual(args.scrape_timeout, 4.5)
+
+        for bad_flags in (
+            ["metrics", "--max-connections", "0"],
+            ["metrics", "--max-connections", "-2"],
+            ["metrics", "--scrape-timeout", "0"],
+            ["metrics", "--scrape-timeout", "-1.0"],
+            ["metrics", "--scrape-timeout", "nan"],
+            ["metrics", "--scrape-timeout", "inf"],
+        ):
+            bad_args = self.parser.parse_args(bad_flags)
+            stderr_buf = io.StringIO()
+            with patch("sys.stderr", stderr_buf):
+                rc = run_metrics_mode(bad_args)
+            self.assertEqual(rc, 2, f"Expected exit code 2 for {bad_flags}")
+            self.assertIn("[ERROR]", stderr_buf.getvalue())
+
 
 class TestWebDaemonCrossExposing(unittest.TestCase):
     """Integration test suite validating Prometheus cross-exposing on WebMapServer."""

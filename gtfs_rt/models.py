@@ -29,6 +29,12 @@ from gtfs_rt.wire import (
     to_signed_int32,
     to_signed_int64,
 )
+from railmon_http import (
+    DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    validate_positive_finite_float,
+    validate_positive_int,
+)
 
 GTFS_RT_VERSION: str = "2.0"
 
@@ -214,14 +220,16 @@ class GtfsRtConfig:
     gzip_compression: bool = True
     cors_enabled: bool = True
     demo_mode: bool = False
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC
 
     def __post_init__(self) -> None:
         """Validate configuration bounds and numeric invariants."""
-        if not (1 <= self.port <= 65535):
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
         if not math.isfinite(self.refresh_interval_sec) or self.refresh_interval_sec <= 0.0:
             raise ValueError(f"refresh_interval_sec must be > 0, got {self.refresh_interval_sec}")
-        if self.delay_alert_min < 1:
+        if isinstance(self.delay_alert_min, bool) or self.delay_alert_min < 1:
             raise ValueError(f"delay_alert_min must be >= 1, got {self.delay_alert_min}")
         if not math.isfinite(self.station_proximity_m) or self.station_proximity_m <= 0.0:
             raise ValueError("station_proximity_m must be finite and > 0")
@@ -230,6 +238,8 @@ class GtfsRtConfig:
             or self.incoming_proximity_m < self.station_proximity_m
         ):
             raise ValueError("incoming_proximity_m must be >= station_proximity_m")
+        validate_positive_int("max_connections", self.max_connections, minimum=1)
+        validate_positive_finite_float("request_timeout_sec", self.request_timeout_sec)
 
 
 @dataclass(frozen=True)

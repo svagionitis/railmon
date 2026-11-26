@@ -7,10 +7,10 @@ import sys
 import threading
 import time
 import webbrowser
-from http.server import ThreadingHTTPServer
 from types import FrameType
 from typing import Callable, Optional, Tuple
 
+from railmon_http import BoundedHTTPServer, HttpLimitsConfig
 from server.handler import WebMapRequestHandler
 from server.models import ServerConfig
 from server.sse import SSEBroadcaster
@@ -19,11 +19,8 @@ from tui.state import TrainStateStore
 logger = logging.getLogger("railmon.server.daemon")
 
 
-class WebMapServer(ThreadingHTTPServer):
-    """Multi-threaded HTTP server daemon managing state, SSE bus, and client lifecycle."""
-
-    daemon_threads: bool = True
-    allow_reuse_address: bool = True
+class WebMapServer(BoundedHTTPServer):
+    """Multi-threaded bounded HTTP server daemon managing state, SSE bus, and client lifecycle."""
 
     def __init__(
         self,
@@ -83,8 +80,18 @@ class WebMapServer(ThreadingHTTPServer):
         self.gtfs_mapper = GtfsRtMapper()
         self.gtfs_cache = FeedCache(self.gtfs_mapper)
 
+        http_limits = HttpLimitsConfig.for_request_timeout(
+            self.config.request_timeout_sec,
+            max_connections=self.config.max_connections,
+            sse_write_timeout_sec=self.config.sse_write_timeout_sec,
+        )
+
         try:
-            super().__init__(server_address, WebMapRequestHandler)
+            super().__init__(
+                server_address,
+                WebMapRequestHandler,
+                http_limits=http_limits,
+            )
         except OSError as exc:
             if exc.errno == errno.EADDRINUSE:
                 logger.error(
@@ -96,11 +103,13 @@ class WebMapServer(ThreadingHTTPServer):
             raise
 
         logger.info(
-            "Initialized WebMapServer on %s:%d (CORS=%s, TileProvider=%s)",
+            "Initialized WebMapServer on %s:%d (CORS=%s, TileProvider=%s, max_conn=%d, timeout=%.1fs)",
             self.server_address[0],
             self.server_port,
             self.config.cors_enabled,
             self.config.tile_provider.value,
+            self.http_limits.max_connections,
+            self.http_limits.request_timeout_sec,
         )
 
     @property

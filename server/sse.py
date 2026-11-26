@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Dict, List, Optional
 
+from railmon_http import validate_positive_int
 from server.models import ClientConnection, ServerHealthMetrics
 
 logger = logging.getLogger("railmon.server.sse")
@@ -13,37 +14,84 @@ logger = logging.getLogger("railmon.server.sse")
 # Maximum queued events per subscriber before dropping oldest frames
 MAX_CLIENT_QUEUE_DEPTH: int = 100
 
+# Default cap on simultaneous persistent SSE subscribers (strictly below HTTP max_connections)
+MAX_SSE_CLIENTS: int = 32
+
+
+class SSECapacityError(RuntimeError):
+    """Raised when SSEBroadcaster rejects a new subscriber at max_clients capacity."""
+
 
 class SSEBroadcaster:
     """Manages active browser SSE client queues with non-blocking bounded fan-out."""
 
-    def __init__(self, max_queue_depth: int = MAX_CLIENT_QUEUE_DEPTH) -> None:
-        """Initialize broadcaster with thread lock and tracking counters."""
-        self._max_queue_depth = max_queue_depth
+    def __init__(
+        self,
+        max_queue_depth: int = MAX_CLIENT_QUEUE_DEPTH,
+        max_clients: int = MAX_SSE_CLIENTS,
+    ) -> None:
+        """Initialize broadcaster with thread lock, client capacity, and tracking counters."""
+        self._max_queue_depth: int = validate_positive_int(
+            "max_queue_depth", max_queue_depth, minimum=1
+        )
+        self._max_clients: int = validate_positive_int(
+            "max_clients", max_clients, minimum=1
+        )
         self._lock = threading.Lock()
         self._clients: Dict[str, ClientConnection] = {}
         self._started_at: float = time.time()
         self._total_clients_served: int = 0
+        self._total_clients_rejected: int = 0
         self._total_broadcasts: int = 0
         self._total_frames_sent: int = 0
         self._total_frames_dropped: int = 0
 
+    @property
+    def max_clients(self) -> int:
+        """Return configured maximum number of concurrent SSE subscribers."""
+        return self._max_clients
+
+    @property
+    def total_clients_rejected(self) -> int:
+        """Return cumulative count of SSE connections rejected due to capacity cap."""
+        with self._lock:
+            return self._total_clients_rejected
+
     def register_client(self, remote_addr: str = "127.0.0.1") -> ClientConnection:
-        """Register a new SSE client subscriber and return its connection descriptor."""
+        """Register a new SSE client subscriber and return its connection descriptor.
+
+        Raises:
+            SSECapacityError: When active subscribers have reached max_clients.
+        """
         conn = ClientConnection(
             remote_addr=remote_addr,
             queue=queue.Queue(maxsize=self._max_queue_depth),
         )
         with self._lock:
+            if len(self._clients) >= self._max_clients:
+                self._total_clients_rejected += 1
+                active = len(self._clients)
+                rejected_total = self._total_clients_rejected
+                logger.warning(
+                    "SSE client capacity reached (%d/%d); rejecting subscriber [ip=%s, total_rejected=%d]",
+                    active,
+                    self._max_clients,
+                    remote_addr,
+                    rejected_total,
+                )
+                raise SSECapacityError(
+                    f"Maximum SSE client capacity reached ({self._max_clients})"
+                )
             self._clients[conn.client_id] = conn
             self._total_clients_served += 1
             client_count = len(self._clients)
 
         logger.info(
-            "Registered SSE subscriber [id=%s, ip=%s, active_clients=%d]",
+            "Registered SSE subscriber [id=%s, ip=%s, active_clients=%d/%d]",
             conn.client_id,
             remote_addr,
             client_count,
+            self._max_clients,
         )
         return conn
 
@@ -149,4 +197,6 @@ class SSEBroadcaster:
                 total_broadcasts=self._total_broadcasts,
                 total_frames_sent=self._total_frames_sent,
                 total_frames_dropped=self._total_frames_dropped,
+                max_clients=self._max_clients,
+                total_clients_rejected=self._total_clients_rejected,
             )

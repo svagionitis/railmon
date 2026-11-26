@@ -4,10 +4,8 @@ import errno
 import gzip
 import json
 import logging
-import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Tuple
 import urllib.parse
 
@@ -17,6 +15,11 @@ from gtfs_rt.models import (
     FeedKind,
     GtfsRtConfig,
     OutputFormat,
+)
+from railmon_http import (
+    BoundedHTTPRequestHandler,
+    BoundedHTTPServer,
+    HttpLimitsConfig,
 )
 from tui.state import TrainStateStore
 
@@ -72,7 +75,7 @@ def etag_matches(if_none_match: Optional[str], current_etag: str) -> bool:
     return False
 
 
-class GtfsRtHandler(BaseHTTPRequestHandler):
+class GtfsRtHandler(BoundedHTTPRequestHandler):
     """HTTP request handler serving binary protobuf and ProtoJSON GTFS-RT feeds."""
 
     server: "GtfsRtServer"
@@ -144,6 +147,10 @@ class GtfsRtHandler(BaseHTTPRequestHandler):
                 self._handle_index(is_head=is_head)
             else:
                 self._send_err(404, f"Endpoint '{raw_path}' not found")
+        except TimeoutError:
+            self._record_server_timeout()
+            self.close_connection = True
+            logger.debug("Client timed out during GTFS-RT request")
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             logger.debug("Client disconnected abruptly during GTFS-RT request")
 
@@ -208,6 +215,9 @@ class GtfsRtHandler(BaseHTTPRequestHandler):
             "snapshot_version": snapshot.version,
             "connection_status": snapshot.connection_status.name,
             "timestamp": time.time(),
+            "active_http_connections": self.server.active_connections,
+            "max_http_connections": self.server.max_connections,
+            "rejected_http_connections": self.server.rejected_connections,
         }
         body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(200)
@@ -281,25 +291,16 @@ class GtfsRtHandler(BaseHTTPRequestHandler):
             self._add_cors()
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             logger.debug("Failed sending error response to disconnected GTFS-RT client")
 
 
-class GtfsRtServer(ThreadingHTTPServer):
-    """Multi-threaded HTTP server daemon serving GTFS-RT v2.0 feeds."""
-
-    daemon_threads: bool = True
-    allow_reuse_address: bool = True
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        """Suppress noisy tracebacks on abrupt client disconnects."""
-        exc_type, exc_val, _ = sys.exc_info()
-        if exc_type in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            logger.debug("GTFS-RT socket dropped by %s: %s", client_address, exc_val)
-            return
-        super().handle_error(request, client_address)
+class GtfsRtServer(BoundedHTTPServer):
+    """Multi-threaded bounded HTTP server daemon serving GTFS-RT v2.0 feeds."""
 
     def __init__(
         self,
@@ -319,8 +320,17 @@ class GtfsRtServer(ThreadingHTTPServer):
         self._server_thread: Optional[threading.Thread] = None
         self._started_at: float = time.time()
 
+        http_limits = HttpLimitsConfig.for_request_timeout(
+            self.config.request_timeout_sec,
+            max_connections=self.config.max_connections,
+        )
+
         try:
-            super().__init__(server_address, GtfsRtHandler)
+            super().__init__(
+                server_address,
+                GtfsRtHandler,
+                http_limits=http_limits,
+            )
         except OSError as exc:
             if exc.errno == errno.EADDRINUSE:
                 logger.error(
@@ -329,6 +339,14 @@ class GtfsRtServer(ThreadingHTTPServer):
                     server_address[0],
                 )
             raise
+
+        logger.info(
+            "Initialized GtfsRtServer on %s:%d (max_conn=%d, timeout=%.1fs)",
+            self.server_address[0],
+            self.server_port,
+            self.http_limits.max_connections,
+            self.http_limits.request_timeout_sec,
+        )
 
     @property
     def is_running(self) -> bool:

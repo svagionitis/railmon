@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from railmon_http import (
+    DEFAULT_MAX_CONNECTIONS,
+    validate_positive_finite_float,
+    validate_positive_int,
+)
+
 RE_METRIC_NAME = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
 RE_LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 RE_UNIT = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -156,10 +162,11 @@ class ExporterConfig:
     collect_db_stats: bool = True
     scrape_timeout_seconds: float = 10.0
     gzip_compression: bool = True
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
 
     def __post_init__(self) -> None:
         """Validate configuration settings."""
-        if not (1 <= self.port <= 65535):
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
-        if not math.isfinite(self.scrape_timeout_seconds) or self.scrape_timeout_seconds <= 0.0:
-            raise ValueError("Scrape timeout must be finite and strictly positive")
+        validate_positive_finite_float("scrape_timeout_seconds", self.scrape_timeout_seconds)
+        validate_positive_int("max_connections", self.max_connections, minimum=1)

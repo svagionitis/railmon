@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 
-from server.sse import SSEBroadcaster
+from server.sse import MAX_SSE_CLIENTS, SSEBroadcaster, SSECapacityError
 
 
 class TestServerSSE(unittest.TestCase):
@@ -186,6 +186,45 @@ class TestServerSSE(unittest.TestCase):
             250.0,
             f"Possible memory leak detected: {total_growth_kb:.2f} KB heap growth",
         )
+        self.assertEqual(broadcaster.client_count, 0)
+
+    def test_tc_http_11_max_clients_cap_and_rejection_accounting(self) -> None:
+        """TC-HTTP-11: SSEBroadcaster enforces max_clients cap, raises SSECapacityError, and tracks rejections."""
+        self.assertEqual(MAX_SSE_CLIENTS, 32)
+        with self.assertRaises(ValueError):
+            SSEBroadcaster(max_clients=0)
+        with self.assertRaises(ValueError):
+            SSEBroadcaster(max_clients=-5)
+        with self.assertRaises(ValueError):
+            SSEBroadcaster(max_clients=True)  # type: ignore[arg-type]
+
+        broadcaster = SSEBroadcaster(max_queue_depth=10, max_clients=3)
+        self.assertEqual(broadcaster.max_clients, 3)
+
+        c1 = broadcaster.register_client("127.0.0.1")
+        c2 = broadcaster.register_client("127.0.0.2")
+        c3 = broadcaster.register_client("127.0.0.3")
+        self.assertEqual(broadcaster.client_count, 3)
+        self.assertEqual(broadcaster.total_clients_rejected, 0)
+
+        with self.assertRaises(SSECapacityError):
+            broadcaster.register_client("127.0.0.4")
+
+        self.assertEqual(broadcaster.client_count, 3)
+        self.assertEqual(broadcaster.total_clients_rejected, 1)
+        metrics = broadcaster.get_health_metrics()
+        self.assertEqual(metrics.max_clients, 3)
+        self.assertEqual(metrics.total_clients_rejected, 1)
+        self.assertEqual(metrics.to_dict()["max_clients"], 3)
+        self.assertEqual(metrics.to_dict()["total_clients_rejected"], 1)
+
+        # Unregistering one client frees a slot cleanly
+        broadcaster.unregister_client(c2.client_id)
+        c4 = broadcaster.register_client("127.0.0.4")
+        self.assertEqual(broadcaster.client_count, 3)
+
+        for conn in (c1, c3, c4):
+            broadcaster.unregister_client(conn.client_id)
         self.assertEqual(broadcaster.client_count, 0)
 
 

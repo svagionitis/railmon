@@ -2356,6 +2356,24 @@ Examples:
         default=None,
         help="Export pruned observations to gzipped JSONL archive before deletion.",
     )
+    p_serve.add_argument(
+        "--max-connections",
+        type=int,
+        default=64,
+        help="Maximum concurrent HTTP connections before returning HTTP 503 (default: 64).",
+    )
+    p_serve.add_argument(
+        "--max-sse-clients",
+        type=int,
+        default=32,
+        help="Maximum concurrent /api/stream SSE browser subscribers (default: 32).",
+    )
+    p_serve.add_argument(
+        "--request-timeout",
+        type=float,
+        default=10.0,
+        help="HTTP socket and header read/write timeout in seconds (default: 10.0s).",
+    )
 
     # 6. metrics (F-8.2: Prometheus & OpenMetrics Operational Exporter)
     p_metrics = subparsers.add_parser(
@@ -2422,6 +2440,12 @@ Examples:
         type=float,
         default=10.0,
         help="Scrape timeout deadline in seconds (default: 10.0s).",
+    )
+    p_metrics.add_argument(
+        "--max-connections",
+        type=int,
+        default=64,
+        help="Maximum concurrent HTTP scraper connections before returning HTTP 503 (default: 64).",
     )
 
     # 7. export / gtfs-rt (F-8.3: GTFS-Realtime v2.0 Protocol Buffer Feed Exporter)
@@ -2607,6 +2631,18 @@ def _add_export_subparser(subparsers: Any) -> None:
         type=float,
         default=3.0,
         help="Base reconnection delay in seconds for live SSE upstream stream (default: 3.0s).",
+    )
+    p_export.add_argument(
+        "--max-connections",
+        type=int,
+        default=64,
+        help="Maximum concurrent HTTP connections in --serve mode before returning HTTP 503 (default: 64).",
+    )
+    p_export.add_argument(
+        "--request-timeout",
+        type=float,
+        default=10.0,
+        help="HTTP socket and header timeout in seconds for --serve mode (default: 10.0s).",
     )
 
 
@@ -4358,6 +4394,37 @@ def _print_serve_banner(
     print("=" * 78 + "\n", flush=True)
 
 
+def _parse_validated_http_limits(
+    args: argparse.Namespace,
+    *,
+    timeout_attr: str,
+    include_sse: bool = False,
+) -> Optional[Tuple[int, int, float]]:
+    """Validate bounded HTTP daemon CLI limits; print error and return None on failure."""
+    from railmon_http import (
+        DEFAULT_MAX_CONNECTIONS,
+        DEFAULT_REQUEST_TIMEOUT_SEC,
+        validate_positive_finite_float,
+        validate_positive_int,
+    )
+
+    try:
+        raw_conn = getattr(args, "max_connections", DEFAULT_MAX_CONNECTIONS)
+        max_conn = validate_positive_int("--max-connections", int(raw_conn), minimum=1)
+        raw_timeout = getattr(args, timeout_attr, DEFAULT_REQUEST_TIMEOUT_SEC)
+        timeout_sec = validate_positive_finite_float(
+            f"--{timeout_attr.replace('_', '-')}", float(raw_timeout)
+        )
+        max_sse = 32
+        if include_sse:
+            raw_sse = getattr(args, "max_sse_clients", 32)
+            max_sse = validate_positive_int("--max-sse-clients", int(raw_sse), minimum=1)
+    except (ValueError, TypeError) as exc:
+        print(f"[ERROR] Invalid HTTP daemon limit: {exc}", file=sys.stderr)
+        return None
+    return max_conn, max_sse, timeout_sec
+
+
 def run_serve_mode(args: argparse.Namespace) -> int:
     """Execute embedded zero-dependency web map server daemon.
 
@@ -4383,6 +4450,13 @@ def run_serve_mode(args: argparse.Namespace) -> int:
         )
         return 2
 
+    http_limit_vals = _parse_validated_http_limits(
+        args, timeout_attr="request_timeout", include_sse=True
+    )
+    if http_limit_vals is None:
+        return 2
+    max_connections, max_sse_clients, request_timeout = http_limit_vals
+
     replay_db = getattr(args, "replay", None)
     if replay_db is not None:
         replay_db_str = str(replay_db).strip()
@@ -4397,7 +4471,7 @@ def run_serve_mode(args: argparse.Namespace) -> int:
 
     raw_speed = getattr(args, "speed", None)
     replay_speed = float(raw_speed) if raw_speed is not None else 1.0
-    if replay_speed <= 0.0:
+    if not math.isfinite(replay_speed) or replay_speed <= 0.0:
         print(
             f"[ERROR] Invalid replay speed: {replay_speed}. Replay speed must be > 0.0.",
             file=sys.stderr,
@@ -4436,7 +4510,8 @@ def run_serve_mode(args: argparse.Namespace) -> int:
 
     # 4. Initialize Domain State Store & Event Broadcaster
     store = TrainStateStore()
-    broadcaster = SSEBroadcaster()
+    effective_max_sse = min(max_sse_clients, max_connections)
+    broadcaster = SSEBroadcaster(max_clients=effective_max_sse)
 
     # 5. Start Optional Telemetry Recorder Thread
     db, recorder = _start_optional_recorder(
@@ -4474,6 +4549,10 @@ def run_serve_mode(args: argparse.Namespace) -> int:
         replay_db=replay_db_str if source == TelemetrySource.REPLAY else None,
         replay_speed=replay_speed,
         open_browser=bool(getattr(args, "open_browser", False)),
+        max_connections=max_connections,
+        max_sse_clients=effective_max_sse,
+        request_timeout_sec=request_timeout,
+        sse_write_timeout_sec=request_timeout,
     )
 
     try:
@@ -4596,6 +4675,11 @@ def run_metrics_mode(args: argparse.Namespace) -> int:
         )
         return 2
 
+    http_limit_vals = _parse_validated_http_limits(args, timeout_attr="scrape_timeout")
+    if http_limit_vals is None:
+        return 2
+    max_connections, _, scrape_timeout = http_limit_vals
+
     # 2. Security Audit Notice for Public Network Binding
     if host in ("0.0.0.0", "::"):
         print(
@@ -4643,7 +4727,8 @@ def run_metrics_mode(args: argparse.Namespace) -> int:
         db_path=db_path,
         demo_mode=demo,
         gzip_compression=not bool(getattr(args, "no_gzip", False)),
-        scrape_timeout_seconds=float(getattr(args, "scrape_timeout", 10.0)),
+        scrape_timeout_seconds=scrape_timeout,
+        max_connections=max_connections,
     )
 
     try:
@@ -4704,6 +4789,8 @@ def _build_gtfs_config(args: argparse.Namespace) -> Any:
         gzip_compression=not bool(getattr(args, "no_gzip", False)),
         cors_enabled=bool(getattr(args, "cors", False)),
         demo_mode=bool(getattr(args, "demo", False) or getattr(args, "mock", False)),
+        max_connections=int(getattr(args, "max_connections", 64)),
+        request_timeout_sec=float(getattr(args, "request_timeout", 10.0)),
     )
 
 
