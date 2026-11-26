@@ -131,6 +131,7 @@ Detailed engineering plans broken down by subsystem and lifecycle phase.
 | [`p1-8-logging-hierarchy-rotating-file-handler-fix-plan.md`](./plans/fixes/p1/p1-8-logging-hierarchy-rotating-file-handler-fix-plan.md) | Hierarchical `railmon` logging with size-bounded `RotatingFileHandler` |
 | [`p1-9-pyproject-toml-single-source-version-fix-plan.md`](./plans/fixes/p1/p1-9-pyproject-toml-single-source-version-fix-plan.md) | PEP 517/621 `pyproject.toml` packaging and single-source `__version__` |
 | [`p1-10-slowloris-and-http-connection-exhaustion-fix-plan.md`](./plans/fixes/p1/p1-10-slowloris-and-http-connection-exhaustion-fix-plan.md) | Slowloris & unbounded thread/connection exhaustion across all 3 HTTP daemons (`railmon_http.py` bounded base, monotonic header deadline, RFC 9112 `503` rejector, live `scrape_timeout_seconds`, `SSEBroadcaster` client cap & write timeout) |
+| [`p1-11-exporter-cors-and-host-header-dns-rebinding-fix-plan.md`](./plans/fixes/p1/p1-11-exporter-cors-and-host-header-dns-rebinding-fix-plan.md) | Opt-in CORS across Prometheus exporter & GTFS-RT (`cors_enabled=False` default, `metrics --cors`) and centralized RFC 9110/9112 loopback `Host` header validation (`400`/`421`, `--allowed-hosts`) in `railmon_http.py` against DNS rebinding |
 
 #### P2 — Medium-Priority Plans (`plans/fixes/p2/`)
 

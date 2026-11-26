@@ -2374,6 +2374,12 @@ Examples:
         default=10.0,
         help="HTTP socket and header read/write timeout in seconds (default: 10.0s).",
     )
+    p_serve.add_argument(
+        "--allowed-hosts",
+        type=str,
+        default=None,
+        help="Comma-separated Host header allowlist (e.g. 'railmon.local,192.168.1.50') for DNS-rebinding/reverse-proxy defense.",
+    )
 
     # 6. metrics (F-8.2: Prometheus & OpenMetrics Operational Exporter)
     p_metrics = subparsers.add_parser(
@@ -2442,10 +2448,22 @@ Examples:
         help="Scrape timeout deadline in seconds (default: 10.0s).",
     )
     p_metrics.add_argument(
+        "--cors",
+        action="store_true",
+        default=False,
+        help="Enable permissive Cross-Origin Resource Sharing (Access-Control-Allow-Origin: *).",
+    )
+    p_metrics.add_argument(
         "--max-connections",
         type=int,
         default=64,
         help="Maximum concurrent HTTP scraper connections before returning HTTP 503 (default: 64).",
+    )
+    p_metrics.add_argument(
+        "--allowed-hosts",
+        type=str,
+        default=None,
+        help="Comma-separated Host header allowlist (e.g. 'railmon.local,192.168.1.50') for DNS-rebinding/reverse-proxy defense.",
     )
 
     # 7. export / gtfs-rt (F-8.3: GTFS-Realtime v2.0 Protocol Buffer Feed Exporter)
@@ -2643,6 +2661,12 @@ def _add_export_subparser(subparsers: Any) -> None:
         type=float,
         default=10.0,
         help="HTTP socket and header timeout in seconds for --serve mode (default: 10.0s).",
+    )
+    p_export.add_argument(
+        "--allowed-hosts",
+        type=str,
+        default=None,
+        help="Comma-separated Host header allowlist for --serve mode (DNS-rebinding/reverse-proxy defense).",
     )
 
 
@@ -4425,6 +4449,29 @@ def _parse_validated_http_limits(
     return max_conn, max_sse, timeout_sec
 
 
+def _parse_allowed_hosts_arg(raw_value: Optional[str]) -> Optional[Tuple[str, ...]]:
+    """Parse and validate comma-separated --allowed-hosts CLI argument."""
+    if raw_value is None:
+        return ()
+    text = str(raw_value).strip()
+    if not text:
+        return ()
+    from railmon_http import validate_allowed_hosts
+
+    tokens = [part.strip() for part in text.split(",")]
+    if any(not tok for tok in tokens):
+        print(
+            f"[ERROR] Invalid --allowed-hosts value {raw_value!r}: empty entry detected.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        return validate_allowed_hosts(tokens)
+    except ValueError as exc:
+        print(f"[ERROR] Invalid --allowed-hosts: {exc}", file=sys.stderr)
+        return None
+
+
 def run_serve_mode(args: argparse.Namespace) -> int:
     """Execute embedded zero-dependency web map server daemon.
 
@@ -4456,6 +4503,10 @@ def run_serve_mode(args: argparse.Namespace) -> int:
     if http_limit_vals is None:
         return 2
     max_connections, max_sse_clients, request_timeout = http_limit_vals
+
+    allowed_hosts = _parse_allowed_hosts_arg(getattr(args, "allowed_hosts", None))
+    if allowed_hosts is None:
+        return 2
 
     replay_db = getattr(args, "replay", None)
     if replay_db is not None:
@@ -4553,6 +4604,7 @@ def run_serve_mode(args: argparse.Namespace) -> int:
         max_sse_clients=effective_max_sse,
         request_timeout_sec=request_timeout,
         sse_write_timeout_sec=request_timeout,
+        allowed_hosts=allowed_hosts,
     )
 
     try:
@@ -4625,6 +4677,7 @@ def _print_metrics_banner(
     print("  [INFO] Standards          : Prometheus 0.0.4 / OpenMetrics 1.0.0 (Negotiated)")
     gzip_str = "ENABLED" if getattr(server.config, "gzip_compression", True) else "DISABLED"
     print(f"  [INFO] Gzip Compression   : {gzip_str}")
+    print(f"  [INFO] CORS Enabled       : {getattr(server.config, 'cors_enabled', False)}")
     if db_path:
         print(f"  [INFO] Storage Telemetry  : ENABLED (database: '{db_path}')")
     else:
@@ -4680,6 +4733,10 @@ def run_metrics_mode(args: argparse.Namespace) -> int:
         return 2
     max_connections, _, scrape_timeout = http_limit_vals
 
+    allowed_hosts = _parse_allowed_hosts_arg(getattr(args, "allowed_hosts", None))
+    if allowed_hosts is None:
+        return 2
+
     # 2. Security Audit Notice for Public Network Binding
     if host in ("0.0.0.0", "::"):
         print(
@@ -4727,8 +4784,10 @@ def run_metrics_mode(args: argparse.Namespace) -> int:
         db_path=db_path,
         demo_mode=demo,
         gzip_compression=not bool(getattr(args, "no_gzip", False)),
+        cors_enabled=bool(getattr(args, "cors", False)),
         scrape_timeout_seconds=scrape_timeout,
         max_connections=max_connections,
+        allowed_hosts=allowed_hosts,
     )
 
     try:
@@ -4771,6 +4830,15 @@ def run_metrics_mode(args: argparse.Namespace) -> int:
 def _build_gtfs_config(args: argparse.Namespace) -> Any:
     """Construct validated GtfsRtConfig from parsed CLI arguments."""
     from gtfs_rt.models import GtfsRtConfig, StopIdField
+    from railmon_http import validate_allowed_hosts
+
+    raw_allowed = getattr(args, "allowed_hosts", None)
+    allowed_hosts: Tuple[str, ...] = ()
+    if raw_allowed is not None and str(raw_allowed).strip():
+        tokens = [part.strip() for part in str(raw_allowed).strip().split(",")]
+        if any(not tok for tok in tokens):
+            raise ValueError(f"Invalid --allowed-hosts value {raw_allowed!r}: empty entry detected.")
+        allowed_hosts = validate_allowed_hosts(tokens)
 
     stop_field = StopIdField(str(getattr(args, "stop_id_field", "id")).lower())
     return GtfsRtConfig(
@@ -4791,6 +4859,7 @@ def _build_gtfs_config(args: argparse.Namespace) -> Any:
         demo_mode=bool(getattr(args, "demo", False) or getattr(args, "mock", False)),
         max_connections=int(getattr(args, "max_connections", 64)),
         request_timeout_sec=float(getattr(args, "request_timeout", 10.0)),
+        allowed_hosts=allowed_hosts,
     )
 
 

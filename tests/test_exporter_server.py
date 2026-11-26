@@ -238,12 +238,20 @@ class TestExporterServer(unittest.TestCase):
             self.assertEqual(len(resp.read()), 0)
 
     def test_tc_srv_09_cors_options_preflight(self) -> None:
-        """TC-SRV-09: OPTIONS /metrics returns 204 No Content with CORS headers."""
-        srv = self._start_server()
-        url = f"{srv.server_url}metrics"
+        """TC-SRV-09: OPTIONS /metrics returns 204; CORS headers emitted only when cors_enabled=True."""
+        # 1. Default secure (cors_enabled=False)
+        srv_default = self._start_server()
+        req_default = Request(f"{srv_default.server_url}metrics", method="OPTIONS")
+        with self._open(req_default) as resp:
+            self.assertEqual(resp.status, 204)
+            self.assertEqual(resp.headers.get("Allow"), "GET, HEAD, OPTIONS")
+            self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
+            self.assertEqual(resp.headers.get("Content-Length"), "0")
 
-        req = Request(url, method="OPTIONS")
-        with self._open(req) as resp:
+        # 2. Opt-in (cors_enabled=True)
+        srv_cors = self._start_server(config=ExporterConfig(cors_enabled=True))
+        req_cors = Request(f"{srv_cors.server_url}metrics", method="OPTIONS")
+        with self._open(req_cors) as resp:
             self.assertEqual(resp.status, 204)
             self.assertEqual(resp.headers.get("Allow"), "GET, HEAD, OPTIONS")
             self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "*")

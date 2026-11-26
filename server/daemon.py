@@ -91,6 +91,7 @@ class WebMapServer(BoundedHTTPServer):
                 server_address,
                 WebMapRequestHandler,
                 http_limits=http_limits,
+                allowed_hosts=self.config.allowed_hosts,
             )
         except OSError as exc:
             if exc.errno == errno.EADDRINUSE:

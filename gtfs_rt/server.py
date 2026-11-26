@@ -119,8 +119,8 @@ class GtfsRtHandler(BoundedHTTPRequestHandler):
         self._send_err(405, "Method Not Allowed: GTFS-RT feed server is read-only")
 
     def _add_cors(self) -> None:
-        """Emit permissive CORS headers when enabled in server config."""
-        if getattr(self.server.config, "cors_enabled", True):
+        """Emit permissive CORS headers only when explicitly enabled in server config."""
+        if getattr(self.server.config, "cors_enabled", False):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
             self.send_header(
@@ -330,6 +330,7 @@ class GtfsRtServer(BoundedHTTPServer):
                 server_address,
                 GtfsRtHandler,
                 http_limits=http_limits,
+                allowed_hosts=self.config.allowed_hosts,
             )
         except OSError as exc:
             if exc.errno == errno.EADDRINUSE:
@@ -341,9 +342,10 @@ class GtfsRtServer(BoundedHTTPServer):
             raise
 
         logger.info(
-            "Initialized GtfsRtServer on %s:%d (max_conn=%d, timeout=%.1fs)",
+            "Initialized GtfsRtServer on %s:%d (CORS=%s, max_conn=%d, timeout=%.1fs)",
             self.server_address[0],
             self.server_port,
+            self.config.cors_enabled,
             self.http_limits.max_connections,
             self.http_limits.request_timeout_sec,
         )

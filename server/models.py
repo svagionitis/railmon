@@ -11,6 +11,7 @@ from railmon_http import (
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_REQUEST_TIMEOUT_SEC,
     DEFAULT_SSE_WRITE_TIMEOUT_SEC,
+    validate_allowed_hosts,
     validate_positive_finite_float,
     validate_positive_int,
 )
@@ -67,16 +68,20 @@ class ServerConfig:
     max_sse_clients: int = 32
     request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC
     sse_write_timeout_sec: float = DEFAULT_SSE_WRITE_TIMEOUT_SEC
+    allowed_hosts: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
+        if not isinstance(self.cors_enabled, bool):
+            raise ValueError(f"cors_enabled must be a bool, got {self.cors_enabled!r}")
         validate_positive_finite_float("replay_speed", self.replay_speed)
         validate_positive_int("max_connections", self.max_connections, minimum=1)
         validate_positive_int("max_sse_clients", self.max_sse_clients, minimum=1)
         validate_positive_finite_float("request_timeout_sec", self.request_timeout_sec)
         validate_positive_finite_float("sse_write_timeout_sec", self.sse_write_timeout_sec)
+        object.__setattr__(self, "allowed_hosts", validate_allowed_hosts(self.allowed_hosts))
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to JSON-serializable dictionary."""
@@ -95,6 +100,7 @@ class ServerConfig:
             "max_sse_clients": self.max_sse_clients,
             "request_timeout_sec": self.request_timeout_sec,
             "sse_write_timeout_sec": self.sse_write_timeout_sec,
+            "allowed_hosts": list(self.allowed_hosts),
         }
 
 

@@ -14,14 +14,16 @@ HTTP daemons (WebMapServer, MetricsServer, GtfsRtServer) to defend against:
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import ipaddress
 import json
 import logging
 import math
+import re
 import socket
 import sys
 import threading
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger("railmon.http")
 
@@ -38,6 +40,13 @@ DEFAULT_REJECT_RECV_TIMEOUT_SEC: float = 0.25
 DEFAULT_REJECT_LINGER_TIMEOUT_SEC: float = 0.10
 MAX_HTTP_HEADER_BYTES: int = 65536
 MIN_HTTP_HEADER_BYTES: int = 1024
+
+DEFAULT_LOOPBACK_HOSTS: Tuple[str, ...] = ("localhost", "127.0.0.1", "::1")
+_RE_HOSTNAME = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+_FORBIDDEN_HOST_CHARS: FrozenSet[str] = frozenset("@/?#\\")
+_MAX_LOG_HOST_LEN: int = 128
 
 _EXPECTED_SOCKET_ERRORS = (
     BrokenPipeError,
@@ -67,6 +76,224 @@ def validate_positive_finite_float(name: str, value: Any) -> float:
     if not math.isfinite(val) or val <= 0.0:
         raise ValueError(f"{name} must be finite and strictly positive, got {value!r}")
     return val
+
+
+def _has_control_or_whitespace(value: str) -> bool:
+    """Return True if string contains ASCII control chars or any whitespace."""
+    return any(ord(ch) <= 0x20 or ord(ch) == 0x7F or ch.isspace() for ch in value)
+
+
+def _sanitize_host_for_log(raw_host: str) -> str:
+    """Sanitize and bound a raw Host header value before writing to logs."""
+    cleaned = "".join(" " if (ord(ch) < 0x20 or ord(ch) == 0x7F) else ch for ch in raw_host)
+    if len(cleaned) > _MAX_LOG_HOST_LEN:
+        return cleaned[:_MAX_LOG_HOST_LEN] + "..."
+    return cleaned
+
+
+def _parse_port_str(port_str: str) -> Optional[int]:
+    """Parse strict ASCII decimal TCP port in range 1..65535."""
+    if not port_str or not port_str.isascii() or not port_str.isdigit():
+        return None
+    port = int(port_str)
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _is_obfuscated_numeric_host(candidate: str) -> bool:
+    """Return True if candidate looks like integer/octal/hex obfuscated IPv4."""
+    labels = candidate.split(".")
+    if not labels:
+        return False
+    for label in labels:
+        if not label:
+            return True
+        is_dec = label.isascii() and label.isdigit()
+        is_hex = label.startswith("0x") and len(label) > 2 and all(
+            ch in "0123456789abcdef" for ch in label[2:]
+        )
+        if not (is_dec or is_hex):
+            return False
+    return True
+
+
+def _validate_reg_or_ipv4(candidate: str) -> Optional[str]:
+    """Validate canonical IPv4 or RFC 1123 hostname, rejecting obfuscated numeric IPs."""
+    if not candidate or len(candidate) > 253:
+        return None
+    try:
+        return str(ipaddress.IPv4Address(candidate))
+    except ValueError:
+        pass
+    if _is_obfuscated_numeric_host(candidate):
+        return None
+    if _RE_HOSTNAME.match(candidate):
+        return candidate
+    return None
+
+
+def is_loopback_bind_host(host: str) -> bool:
+    """Return True if the server bind interface targets loopback (127.0.0.0/8, ::1, localhost)."""
+    cleaned = str(host or "").strip().lower()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    if not cleaned:
+        return False
+    if cleaned == "localhost" or cleaned.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped.is_loopback
+    return False
+
+
+def normalize_allowed_host(raw_host: Any) -> str:
+    """Validate and canonicalize a single allowed Host entry (hostname or IP, no port/wildcard)."""
+    if not isinstance(raw_host, str) or not raw_host:
+        raise ValueError(f"allowed_hosts entry must be a non-empty string, got {raw_host!r}")
+    if _has_control_or_whitespace(raw_host) or "*" in raw_host:
+        raise ValueError(f"Invalid allowed_hosts entry {raw_host!r}")
+    if any(ch in _FORBIDDEN_HOST_CHARS for ch in raw_host):
+        raise ValueError(f"Forbidden character in allowed_hosts entry {raw_host!r}")
+
+    cleaned = raw_host.lower()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        inner = cleaned[1:-1]
+        if "%" in inner:
+            raise ValueError(f"Zone identifier not permitted in allowed_hosts entry {raw_host!r}")
+        try:
+            return str(ipaddress.IPv6Address(inner))
+        except ValueError as exc:
+            raise ValueError(f"Invalid IPv6 allowed_hosts entry {raw_host!r}") from exc
+
+    if ":" in cleaned:
+        if "%" in cleaned:
+            raise ValueError(f"Zone identifier not permitted in allowed_hosts entry {raw_host!r}")
+        try:
+            return str(ipaddress.IPv6Address(cleaned))
+        except ValueError as exc:
+            raise ValueError(
+                f"allowed_hosts entry must not include a port or invalid IPv6: {raw_host!r}"
+            ) from exc
+
+    candidate = cleaned[:-1] if (cleaned.endswith(".") and len(cleaned) > 1) else cleaned
+    canonical = _validate_reg_or_ipv4(candidate)
+    if canonical is None:
+        raise ValueError(f"Invalid hostname or IP in allowed_hosts: {raw_host!r}")
+    return canonical
+
+
+def validate_allowed_hosts(hosts: Sequence[str]) -> Tuple[str, ...]:
+    """Validate, canonicalize, and deduplicate an iterable of allowed Host entries."""
+    if isinstance(hosts, (str, bytes)):
+        raise ValueError("allowed_hosts must be a sequence of host strings, not a single string")
+    try:
+        items = list(hosts)
+    except TypeError as exc:
+        raise ValueError(f"allowed_hosts must be an iterable of strings, got {hosts!r}") from exc
+
+    seen: Set[str] = set()
+    normalized: List[str] = []
+    for item in items:
+        canonical = normalize_allowed_host(item)
+        if canonical not in seen:
+            seen.add(canonical)
+            normalized.append(canonical)
+    return tuple(normalized)
+
+
+def parse_host_header(raw_host: Any) -> Optional[Tuple[str, Optional[int]]]:
+    """Parse an HTTP Host header strictly per RFC 9110 §7.2 (uri-host [ ':' port ]).
+
+    Returns (canonical_host, optional_port) on success, or None if malformed.
+    """
+    if not isinstance(raw_host, str) or not raw_host:
+        return None
+    if _has_control_or_whitespace(raw_host):
+        return None
+    if any(ch in _FORBIDDEN_HOST_CHARS for ch in raw_host):
+        return None
+
+    if raw_host.startswith("["):
+        end_idx = raw_host.find("]")
+        if end_idx <= 1:
+            return None
+        ipv6_part = raw_host[1:end_idx]
+        if "%" in ipv6_part:
+            return None
+        try:
+            canonical_v6 = str(ipaddress.IPv6Address(ipv6_part))
+        except ValueError:
+            return None
+        rest = raw_host[end_idx + 1 :]
+        if not rest:
+            return (canonical_v6, None)
+        if not rest.startswith(":"):
+            return None
+        port = _parse_port_str(rest[1:])
+        return (canonical_v6, port) if port is not None else None
+
+    if raw_host.count(":") > 1:
+        return None
+
+    port: Optional[int] = None
+    host_part = raw_host
+    if ":" in raw_host:
+        host_part, port_str = raw_host.split(":", 1)
+        port = _parse_port_str(port_str)
+        if port is None:
+            return None
+
+    lowered = host_part.lower()
+    candidate = lowered[:-1] if (lowered.endswith(".") and len(lowered) > 1) else lowered
+    canonical = _validate_reg_or_ipv4(candidate)
+    if canonical is None:
+        return None
+    return (canonical, port)
+
+
+@dataclass(frozen=True)
+class HostValidationPolicy:
+    """Immutable HTTP Host header validation policy defending against DNS rebinding."""
+
+    enforce: bool = True
+    allowed_hosts: FrozenSet[str] = frozenset(DEFAULT_LOOPBACK_HOSTS)
+    bound_port: Optional[int] = None
+
+    @classmethod
+    def for_bind_address(
+        cls,
+        bind_host: str,
+        bound_port: Optional[int],
+        *,
+        extra_allowed_hosts: Sequence[str] = (),
+    ) -> "HostValidationPolicy":
+        """Build Host policy: auto-enforced on loopback binds, opt-in on wildcard/LAN binds."""
+        normalized_extra = validate_allowed_hosts(extra_allowed_hosts)
+        is_loopback = is_loopback_bind_host(bind_host)
+
+        if not is_loopback and not normalized_extra:
+            return cls(enforce=False, allowed_hosts=frozenset(), bound_port=bound_port)
+
+        allowed: Set[str] = set(normalized_extra)
+        if is_loopback:
+            allowed.update(DEFAULT_LOOPBACK_HOSTS)
+            try:
+                allowed.add(normalize_allowed_host(bind_host))
+            except ValueError as exc:
+                logger.debug("Skipping non-host bind value '%s' for allowlist: %s", bind_host, exc)
+        port_val = bound_port if (bound_port is not None and bound_port > 0) else None
+        return cls(
+            enforce=True,
+            allowed_hosts=frozenset(allowed),
+            bound_port=port_val,
+        )
 
 
 @dataclass(frozen=True)
@@ -324,16 +551,108 @@ class BoundedHTTPRequestHandler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def parse_request(self) -> bool:
-        """Parse HTTP request line/headers and disarm header deadline afterward."""
+        """Parse HTTP request line/headers, disarm header deadline, and validate Host."""
         try:
             parsed = super().parse_request()
         finally:
             self._deadline_reader.end_request_headers()
 
-        if parsed and (self._requests_handled + 1) >= self._http_limits.max_keepalive_requests:
+        if not parsed:
+            return False
+
+        if not self._validate_host_header():
+            return False
+
+        if (self._requests_handled + 1) >= self._http_limits.max_keepalive_requests:
             self.close_connection = True
             self._force_close_header = True
-        return parsed
+        return True
+
+    def _record_host_rejection(self) -> None:
+        """Record a rejected Host header request on the parent server."""
+        recorder = getattr(self.server, "record_host_rejection", None)
+        if callable(recorder):
+            recorder()
+
+    def _send_host_rejection(self, status_code: int, message: str) -> None:
+        """Emit 400/421 JSON rejection with Connection: close, no CORS, and zero body on HEAD."""
+        self.close_connection = True
+        self._force_close_header = True
+        body = json.dumps({"error": message, "status": status_code}).encode("utf-8")
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            if getattr(self, "command", "") != "HEAD":
+                self.wfile.write(body)
+                self.wfile.flush()
+        except _EXPECTED_SOCKET_ERRORS as exc:
+            logger.debug("Failed writing %d Host rejection response: %s", status_code, exc)
+
+    def _validate_host_header(self) -> bool:
+        """Enforce HostValidationPolicy against DNS rebinding and RFC 9112 §3.2 violations."""
+        policy = getattr(self.server, "host_policy", None)
+        if not isinstance(policy, HostValidationPolicy) or not policy.enforce:
+            return True
+
+        host_headers = self.headers.get_all("Host") or []
+        if len(host_headers) == 0:
+            logger.warning(
+                "Rejected HTTP request from %s: missing Host header",
+                self.client_address,
+            )
+            self._record_host_rejection()
+            self._send_host_rejection(400, "Bad Request: missing Host header")
+            return False
+
+        if len(host_headers) > 1:
+            logger.warning(
+                "Rejected HTTP request from %s: duplicate Host headers (%d)",
+                self.client_address,
+                len(host_headers),
+            )
+            self._record_host_rejection()
+            self._send_host_rejection(400, "Bad Request: duplicate Host headers")
+            return False
+
+        raw_host = host_headers[0]
+        parsed_host = parse_host_header(raw_host)
+        if parsed_host is None:
+            logger.warning(
+                "Rejected HTTP request from %s: malformed Host header '%s'",
+                self.client_address,
+                _sanitize_host_for_log(raw_host),
+            )
+            self._record_host_rejection()
+            self._send_host_rejection(400, "Bad Request: malformed Host header")
+            return False
+
+        hostname, port = parsed_host
+        port_mismatch = (
+            port is not None
+            and policy.bound_port is not None
+            and port != policy.bound_port
+        )
+        if hostname not in policy.allowed_hosts or port_mismatch:
+            logger.warning(
+                "Rejected untrusted Host '%s' from %s (DNS rebinding guard)",
+                _sanitize_host_for_log(raw_host),
+                self.client_address,
+            )
+            self._record_host_rejection()
+            self._send_host_rejection(
+                421,
+                "Misdirected Request: untrusted Host header",
+            )
+            return False
+
+        return True
 
     def _record_server_timeout(self) -> None:
         """Record an active request timeout on the parent server at most once per request."""
@@ -445,10 +764,12 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         RequestHandlerClass: Any,
         *,
         http_limits: Optional[HttpLimitsConfig] = None,
+        allowed_hosts: Sequence[str] = (),
         bind_and_activate: bool = True,
     ) -> None:
-        """Initialize bounded server with concurrency semaphores and listen backlog."""
+        """Initialize bounded server with concurrency semaphores, listen backlog, and Host policy."""
         self.http_limits: HttpLimitsConfig = http_limits or HttpLimitsConfig()
+        validated_hosts = validate_allowed_hosts(allowed_hosts)
         self.request_queue_size = self.http_limits.listen_backlog
         self._conn_semaphore = threading.BoundedSemaphore(self.http_limits.max_connections)
         self._reject_semaphore = threading.BoundedSemaphore(self.http_limits.max_reject_workers)
@@ -457,6 +778,7 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         self._peak_connections: int = 0
         self._rejected_connections: int = 0
         self._timed_out_connections: int = 0
+        self._rejected_host_requests: int = 0
         self._overload_503_payload: bytes = _build_overload_503_response(
             self.http_limits.overload_retry_after_sec
         )
@@ -464,6 +786,13 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             server_address,
             RequestHandlerClass,
             bind_and_activate=bind_and_activate,
+        )
+        bound_host = str(self.server_address[0]) if self.server_address else str(server_address[0])
+        bound_port = int(getattr(self, "server_port", server_address[1]))
+        self.host_policy: HostValidationPolicy = HostValidationPolicy.for_bind_address(
+            bind_host=bound_host,
+            bound_port=bound_port,
+            extra_allowed_hosts=validated_hosts,
         )
 
     @property
@@ -495,10 +824,21 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         with self._stats_lock:
             return self._timed_out_connections
 
+    @property
+    def rejected_host_requests(self) -> int:
+        """Return total count of HTTP requests rejected due to untrusted/malformed Host."""
+        with self._stats_lock:
+            return self._rejected_host_requests
+
     def record_timeout(self) -> None:
         """Increment counter of active/Slowloris request timeouts."""
         with self._stats_lock:
             self._timed_out_connections += 1
+
+    def record_host_rejection(self) -> None:
+        """Increment counter of requests rejected by HostValidationPolicy."""
+        with self._stats_lock:
+            self._rejected_host_requests += 1
 
     def _reject_socket_fast_nonblocking(self, request: Any) -> None:
         """Perform zero-blocking best-effort 503 send and immediate teardown."""
@@ -644,10 +984,16 @@ __all__ = [
     "DEFAULT_LISTEN_BACKLOG",
     "DEFAULT_OVERLOAD_RETRY_AFTER_SEC",
     "MAX_HTTP_HEADER_BYTES",
+    "DEFAULT_LOOPBACK_HOSTS",
     "HeaderLimitExceededError",
+    "HostValidationPolicy",
     "HttpLimitsConfig",
     "BoundedHTTPRequestHandler",
     "BoundedHTTPServer",
+    "is_loopback_bind_host",
+    "normalize_allowed_host",
+    "parse_host_header",
+    "validate_allowed_hosts",
     "validate_positive_int",
     "validate_positive_finite_float",
 ]

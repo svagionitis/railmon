@@ -67,10 +67,15 @@ class MetricsRequestHandler(BoundedHTTPRequestHandler):
         self._send_error(405, "Method Not Allowed: Exporter daemon is read-only")
 
     def _add_cors_headers(self) -> None:
-        """Inject permissive CORS headers for browser-based dashboard scraping."""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Accept, Accept-Encoding, Content-Type")
+        """Inject permissive CORS headers only when explicitly enabled in ExporterConfig."""
+        cfg = getattr(self.server, "config", None)
+        if cfg is not None and getattr(cfg, "cors_enabled", False):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Accept, Accept-Encoding, Content-Type",
+            )
 
     def _dispatch(self, is_head: bool = False) -> None:
         """Route request by URL path."""
@@ -292,6 +297,7 @@ class MetricsServer(BoundedHTTPServer):
                 server_address,
                 MetricsRequestHandler,
                 http_limits=http_limits,
+                allowed_hosts=self.config.allowed_hosts,
             )
         except OSError as exc:
             if exc.errno == errno.EADDRINUSE:
@@ -304,9 +310,10 @@ class MetricsServer(BoundedHTTPServer):
             raise
 
         logger.info(
-            "Initialized MetricsServer on %s:%d (gzip=%s, max_conn=%d, timeout=%.1fs)",
+            "Initialized MetricsServer on %s:%d (CORS=%s, gzip=%s, max_conn=%d, timeout=%.1fs)",
             self.server_address[0],
             self.server_port,
+            self.config.cors_enabled,
             self.config.gzip_compression,
             self.http_limits.max_connections,
             self.http_limits.request_timeout_sec,

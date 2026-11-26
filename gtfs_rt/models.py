@@ -32,6 +32,7 @@ from gtfs_rt.wire import (
 from railmon_http import (
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_REQUEST_TIMEOUT_SEC,
+    validate_allowed_hosts,
     validate_positive_finite_float,
     validate_positive_int,
 )
@@ -218,15 +219,18 @@ class GtfsRtConfig:
     port: int = 8085
     refresh_interval_sec: float = 10.0
     gzip_compression: bool = True
-    cors_enabled: bool = True
+    cors_enabled: bool = False
     demo_mode: bool = False
     max_connections: int = DEFAULT_MAX_CONNECTIONS
     request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC
+    allowed_hosts: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate configuration bounds and numeric invariants."""
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
+        if not isinstance(self.cors_enabled, bool):
+            raise ValueError(f"cors_enabled must be a bool, got {self.cors_enabled!r}")
         if not math.isfinite(self.refresh_interval_sec) or self.refresh_interval_sec <= 0.0:
             raise ValueError(f"refresh_interval_sec must be > 0, got {self.refresh_interval_sec}")
         if isinstance(self.delay_alert_min, bool) or self.delay_alert_min < 1:
@@ -240,6 +244,7 @@ class GtfsRtConfig:
             raise ValueError("incoming_proximity_m must be >= station_proximity_m")
         validate_positive_int("max_connections", self.max_connections, minimum=1)
         validate_positive_finite_float("request_timeout_sec", self.request_timeout_sec)
+        object.__setattr__(self, "allowed_hosts", validate_allowed_hosts(self.allowed_hosts))
 
 
 @dataclass(frozen=True)

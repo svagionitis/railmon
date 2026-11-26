@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from railmon_http import (
     DEFAULT_MAX_CONNECTIONS,
+    validate_allowed_hosts,
     validate_positive_finite_float,
     validate_positive_int,
 )
@@ -162,11 +163,16 @@ class ExporterConfig:
     collect_db_stats: bool = True
     scrape_timeout_seconds: float = 10.0
     gzip_compression: bool = True
+    cors_enabled: bool = False
     max_connections: int = DEFAULT_MAX_CONNECTIONS
+    allowed_hosts: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate configuration settings."""
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
+        if not isinstance(self.cors_enabled, bool):
+            raise ValueError(f"cors_enabled must be a bool, got {self.cors_enabled!r}")
         validate_positive_finite_float("scrape_timeout_seconds", self.scrape_timeout_seconds)
         validate_positive_int("max_connections", self.max_connections, minimum=1)
+        object.__setattr__(self, "allowed_hosts", validate_allowed_hosts(self.allowed_hosts))
