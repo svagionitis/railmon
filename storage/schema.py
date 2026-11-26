@@ -4,13 +4,14 @@ Database schema DDL, index definitions, and migration engine.
 
 import logging
 import sqlite3
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger("railmon." + __name__)
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 _SET_USER_VERSION_V1_SQL = "PRAGMA user_version = 1;"
+_SET_USER_VERSION_V2_SQL = "PRAGMA user_version = 2;"
 
 SCHEMA_V1_STATEMENTS: List[str] = [
     # 0. Schema version tracking
@@ -110,38 +111,104 @@ SCHEMA_V1_STATEMENTS: List[str] = [
     "CREATE INDEX IF NOT EXISTS idx_trips_date ON scheduled_trips (service_date, train_number);",
 ]
 
+SCHEMA_V2_INDEX_STATEMENTS: List[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_vehicle_time ON telemetry_history (vehicle_id, recorded_at);",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_epoch ON telemetry_history (recorded_epoch);",
+    "CREATE INDEX IF NOT EXISTS idx_trips_train ON scheduled_trips (train_number);",
+]
+
 
 class SchemaManager:
     """Manages schema creation, version checking, and database migrations."""
 
+    @staticmethod
+    def _table_has_column(cursor: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+        """Return True if table_name already declares column_name."""
+        if table_name not in ("telemetry_history", "scheduled_trips", "trains"):
+            raise ValueError(f"Unsupported table inspection target: {table_name!r}")
+        cursor.execute(f"PRAGMA table_info({table_name});")
+        return any(str(row[1]) == column_name for row in cursor.fetchall())
+
     @classmethod
-    def initialize_schema(cls, conn: sqlite3.Connection) -> int:
-        """Apply pending migrations up to CURRENT_SCHEMA_VERSION and verify database integrity.
+    def _apply_v2_migration(cls, cursor: sqlite3.Cursor) -> None:
+        """Idempotently upgrade a V1 database to V2 (vehicle_id, recorded_epoch, indexes)."""
+        if not cls._table_has_column(cursor, "telemetry_history", "vehicle_id"):
+            cursor.execute("ALTER TABLE telemetry_history ADD COLUMN vehicle_id TEXT;")
+        if not cls._table_has_column(cursor, "telemetry_history", "recorded_epoch"):
+            cursor.execute("ALTER TABLE telemetry_history ADD COLUMN recorded_epoch REAL;")
+        cursor.execute(
+            """
+            UPDATE telemetry_history
+            SET recorded_epoch = (JULIANDAY(recorded_at) - 2440587.5) * 86400.0
+            WHERE recorded_epoch IS NULL AND recorded_at IS NOT NULL;
+            """
+        )
+        for stmt in SCHEMA_V2_INDEX_STATEMENTS:
+            cursor.execute(stmt)
+        cursor.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?);",
+            (2, "V2 schema: add vehicle_id, recorded_epoch, and cascade/epoch indexes"),
+        )
+        cursor.execute(_SET_USER_VERSION_V2_SQL)
+
+    @classmethod
+    def _verify_quick_check(cls, conn: sqlite3.Connection) -> Tuple[bool, List[str]]:
+        """Run fast O(1) PRAGMA quick_check(1) for already-current warm opens."""
+        errors: List[str] = []
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA quick_check(1);")
+            rows = cursor.fetchall()
+            for r in rows:
+                if r[0] != "ok":
+                    errors.append(f"Quick check failure: {r[0]}")
+            return len(errors) == 0, errors
+        finally:
+            cursor.close()
+
+    @classmethod
+    def initialize_schema(
+        cls,
+        conn: sqlite3.Connection,
+        verify_integrity: Optional[bool] = None,
+    ) -> int:
+        """Apply pending migrations up to CURRENT_SCHEMA_VERSION and verify database health.
+
+        Args:
+            conn: Active SQLite connection.
+            verify_integrity: If True, always run full PRAGMA integrity_check +
+                foreign_key_check. If False, skip checks. If None (default), run full
+                integrity check when schema creation/migration ran, and fast
+                PRAGMA quick_check(1) on already-current warm opens.
 
         Returns:
             The schema version of the database after initialization/migration.
 
         Raises:
-            sqlite3.DatabaseError: If PRAGMA integrity_check or foreign_key_check fails.
+            sqlite3.DatabaseError: If integrity/quick check fails.
         """
         conn.execute("PRAGMA foreign_keys = ON;")
         user_v = cls.get_user_version(conn)
         current_v = cls.get_schema_version(conn)
+        migrated = False
 
-        if current_v == 0 or user_v < CURRENT_SCHEMA_VERSION:
+        if current_v < CURRENT_SCHEMA_VERSION or user_v < CURRENT_SCHEMA_VERSION:
             cursor = conn.cursor()
             try:
                 if conn.in_transaction:
                     conn.commit()
                 cursor.execute("BEGIN IMMEDIATE;")
                 try:
-                    for statement in SCHEMA_V1_STATEMENTS:
-                        cursor.execute(statement)
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?);",
-                        (1, "Initial V1 schema setup"),
-                    )
-                    cursor.execute(_SET_USER_VERSION_V1_SQL)
+                    if current_v < 1 or user_v < 1:
+                        for statement in SCHEMA_V1_STATEMENTS:
+                            cursor.execute(statement)
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?);",
+                            (1, "Initial V1 schema setup"),
+                        )
+                        cursor.execute(_SET_USER_VERSION_V1_SQL)
+                    if current_v < 2 or user_v < 2:
+                        cls._apply_v2_migration(cursor)
                 except Exception:
                     if conn.in_transaction:
                         conn.rollback()
@@ -152,12 +219,21 @@ class SchemaManager:
             finally:
                 cursor.close()
             current_v = CURRENT_SCHEMA_VERSION
+            migrated = True
 
-        is_healthy, errors = cls.verify_integrity(conn)
-        if not is_healthy:
-            raise sqlite3.DatabaseError(
-                f"Database integrity check failed: {'; '.join(errors)}"
-            )
+        run_full = (verify_integrity is True) or (verify_integrity is None and migrated)
+        if run_full:
+            is_healthy, errors = cls.verify_integrity(conn)
+            if not is_healthy:
+                raise sqlite3.DatabaseError(
+                    f"Database integrity check failed: {'; '.join(errors)}"
+                )
+        elif verify_integrity is None:
+            is_healthy, errors = cls._verify_quick_check(conn)
+            if not is_healthy:
+                raise sqlite3.DatabaseError(
+                    f"Database integrity check failed: {'; '.join(errors)}"
+                )
 
         return current_v
 

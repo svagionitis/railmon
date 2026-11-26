@@ -279,14 +279,16 @@ class TestStorageDatabase(unittest.TestCase):
                 db.close()
 
     def test_database_startup_sets_user_version_and_verifies_integrity(self):
-        """Database initialization must set PRAGMA user_version = 1 and expose verify_integrity/optimize."""
+        """Database initialization must set PRAGMA user_version = CURRENT_SCHEMA_VERSION and expose verify_integrity/optimize."""
+        from storage.schema import CURRENT_SCHEMA_VERSION
+
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "user_ver.db")
             db = Database(db_path)
             try:
                 with db.connection() as conn:
                     user_ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-                    self.assertEqual(user_ver, 1)
+                    self.assertEqual(user_ver, CURRENT_SCHEMA_VERSION)
                 healthy, errors = db.verify_integrity()
                 self.assertTrue(healthy)
                 self.assertEqual(errors, [])
@@ -298,7 +300,10 @@ class TestStorageDatabase(unittest.TestCase):
             db2 = Database(db_path)
             try:
                 with db2.connection() as conn:
-                    self.assertEqual(conn.execute("PRAGMA user_version;").fetchone()[0], 1)
+                    self.assertEqual(
+                        conn.execute("PRAGMA user_version;").fetchone()[0],
+                        CURRENT_SCHEMA_VERSION,
+                    )
                 healthy, errors = db2.verify_integrity()
                 self.assertTrue(healthy)
                 self.assertEqual(errors, [])
@@ -306,7 +311,7 @@ class TestStorageDatabase(unittest.TestCase):
                 db2.close()
 
     def test_database_startup_fails_fast_on_integrity_violation(self):
-        """Database startup must fail fast with sqlite3.DatabaseError if integrity check fails."""
+        """Database startup must fail fast with sqlite3.DatabaseError when explicit integrity verification fails."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "corrupt_fk.db")
             db = Database(db_path)
@@ -324,7 +329,7 @@ class TestStorageDatabase(unittest.TestCase):
             raw_conn.close()
 
             with self.assertRaises(sqlite3.DatabaseError):
-                Database(db_path)
+                Database(db_path, verify_integrity=True)
 
     def test_posix_database_permissions_0600(self):
         """Database and WAL companion files must have owner-only 0600 permissions on POSIX."""
@@ -449,6 +454,81 @@ class TestStorageDatabase(unittest.TestCase):
                     ro_db.optimize()
             finally:
                 ro_db.close()
+
+    def test_dead_thread_connections_reaped_and_closed_guard(self):
+        """TC-DB-01: Dead worker thread connections are reaped; post-close access raises ProgrammingError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "reap.db")
+            db = Database(db_path)
+            try:
+                def _worker() -> None:
+                    with db.connection() as conn:
+                        conn.execute("SELECT 1;").fetchone()
+
+                threads = [threading.Thread(target=_worker) for _ in range(12)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=5.0)
+
+                # Trigger reap from main thread
+                with db.connection() as conn:
+                    conn.execute("SELECT 1;").fetchone()
+                self.assertEqual(len(db._thread_conns), 1)
+                self.assertEqual(len(db._open_connections), 1)
+            finally:
+                db.close()
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                with db.connection() as conn:
+                    conn.execute("SELECT 1;")
+
+    def test_nested_transaction_savepoint_rollback_isolation(self):
+        """TC-DB-02: Nested db.transaction() uses SAVEPOINT so inner rollback does not commit/abort outer."""
+        db = Database(":memory:")
+        try:
+            with db.transaction() as outer_cur:
+                outer_cur.execute(
+                    "INSERT INTO trains (train_number, first_observed_at, last_observed_at) "
+                    "VALUES ('OUTER', '2026-11-26T10:00:00.000000Z', '2026-11-26T10:00:00.000000Z');"
+                )
+                try:
+                    with db.transaction() as inner_cur:
+                        inner_cur.execute(
+                            "INSERT INTO trains (train_number, first_observed_at, last_observed_at) "
+                            "VALUES ('INNER', '2026-11-26T10:01:00.000000Z', '2026-11-26T10:01:00.000000Z');"
+                        )
+                        raise RuntimeError("abort inner savepoint")
+                except RuntimeError:
+                    pass
+
+            with db.connection() as conn:
+                nums = {r[0] for r in conn.execute("SELECT train_number FROM trains;").fetchall()}
+            self.assertEqual(nums, {"OUTER"})
+        finally:
+            db.close()
+
+    def test_no_umask_mutation_uri_memory_and_wal_checkpoint_tuple(self):
+        """TC-DB-03: No os.umask() call; file::memory: URI works; checkpoint_wal returns 3-tuple."""
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "noumask.db")
+            with patch("os.umask", side_effect=AssertionError("os.umask must not be called")):
+                db = Database(db_path)
+                try:
+                    res = db.checkpoint_wal("PASSIVE")
+                    self.assertIsInstance(res, tuple)
+                    self.assertEqual(len(res), 3)
+                finally:
+                    db.close()
+
+        mem_uri_db = Database("file::memory:?cache=shared")
+        try:
+            with mem_uri_db.connection() as conn:
+                self.assertEqual(conn.execute("SELECT 1;").fetchone()[0], 1)
+        finally:
+            mem_uri_db.close()
 
 
 if __name__ == "__main__":

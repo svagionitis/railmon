@@ -215,6 +215,8 @@ class TelemetryHistoryRow:
     next_station: Optional[str] = None
     corridor: Optional[str] = None
     id: Optional[int] = None
+    vehicle_id: Optional[str] = None
+    recorded_epoch: Optional[float] = None
 
     @classmethod
     def from_db_row(cls, row: Any) -> "TelemetryHistoryRow":
@@ -241,6 +243,16 @@ class TelemetryHistoryRow:
             next_station=row["next_station"] if row["next_station"] is not None else None,
             corridor=row["corridor"] if row["corridor"] is not None else None,
             id=int(row["id"]) if "id" in keys and row["id"] is not None else None,
+            vehicle_id=(
+                str(row["vehicle_id"])
+                if "vehicle_id" in keys and row["vehicle_id"] is not None
+                else None
+            ),
+            recorded_epoch=(
+                float(row["recorded_epoch"])
+                if "recorded_epoch" in keys and row["recorded_epoch"] is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -250,6 +262,9 @@ class TelemetryHistoryRow:
         """Instantiate a database row from a live TrainPosition telemetry entity."""
         raw_ts = recorded_at or pos.timestamp
         timestamp = canonicalize_iso_utc(raw_ts, fallback=iso_utc_now()) if raw_ts else iso_utc_now()
+        parsed_dt = parse_iso_utc_datetime(timestamp)
+        rec_epoch = parsed_dt.timestamp() if parsed_dt is not None else None
+        veh_id = pos.id or pos.locomotive_number or pos.train_number
         return cls(
             train_number=pos.train_number,
             schedule_id=pos.schedule_id,
@@ -267,10 +282,12 @@ class TelemetryHistoryRow:
             dist_to_dest_m=pos.distance_to_destination_m,
             next_station=pos.next_station,
             corridor=pos.corridor,
+            vehicle_id=veh_id,
+            recorded_epoch=rec_epoch,
         )
 
     def to_db_row(self) -> Tuple[Any, ...]:
-        """Convert dataclass to parameter tuple matching INSERT statement."""
+        """Convert dataclass to parameter tuple matching V2 INSERT statement."""
         return (
             self.train_number,
             self.schedule_id,
@@ -288,6 +305,8 @@ class TelemetryHistoryRow:
             self.dist_to_dest_m,
             self.next_station,
             self.corridor,
+            self.vehicle_id,
+            self.recorded_epoch,
         )
 
 

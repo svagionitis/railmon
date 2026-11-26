@@ -152,6 +152,15 @@ class DeadbandFilter:
         return False, None
 
     @staticmethod
+    def _state_key(pos: TrainPosition) -> str:
+        """Return a consist-aware cache key so coupled units sharing train_number stay isolated."""
+        unit_id = (pos.id or "").strip()
+        loco = (pos.locomotive_number or "").strip()
+        if unit_id or loco:
+            return f"{pos.train_number}|{unit_id}|{loco}"
+        return pos.train_number
+
+    @staticmethod
     def _build_state(pos: TrainPosition, current_time: float) -> _LastRecordedState:
         """Construct an internal state snapshot for an admitted TrainPosition."""
         return _LastRecordedState(
@@ -173,24 +182,24 @@ class DeadbandFilter:
         """Purely evaluate a telemetry batch without mutating filter state or counters."""
         current_time = now_epoch if now_epoch is not None else time.time()
         with self._lock:
-            working_states: Dict[str, _LastRecordedState] = {
-                p.train_number: self._states[p.train_number]
-                for p in positions
-                if p.train_number in self._states
-            }
+            working_states: Dict[str, _LastRecordedState] = {}
+            for p in positions:
+                key = self._state_key(p)
+                if key in self._states:
+                    working_states[key] = self._states[key]
 
         admitted: List[TrainPosition] = []
         staged_updates: Dict[str, _LastRecordedState] = {}
         suppressed_count = 0
 
         for pos in positions:
-            train_id = pos.train_number
-            last = working_states.get(train_id)
+            train_key = self._state_key(pos)
+            last = working_states.get(train_key)
             should_save, _ = self._evaluate_position_against_state(pos, last, current_time)
             if should_save:
                 new_state = self._build_state(pos, current_time)
-                working_states[train_id] = new_state
-                staged_updates[train_id] = new_state
+                working_states[train_key] = new_state
+                staged_updates[train_key] = new_state
                 admitted.append(pos)
             else:
                 suppressed_count += 1
@@ -212,8 +221,8 @@ class DeadbandFilter:
         current_time = now_epoch if now_epoch is not None else time.time()
         with self._lock:
             self._prune_stale_locked(current_time=current_time, force=False)
-            for train_id, new_state in evaluation.staged_states:
-                self._states[train_id] = new_state
+            for train_key, new_state in evaluation.staged_states:
+                self._states[train_key] = new_state
             self._total_inspected += evaluation.inspected_count
             self._total_admitted += evaluation.admitted_count
             self._total_suppressed += evaluation.suppressed_count
@@ -230,15 +239,15 @@ class DeadbandFilter:
                               'schedule', 'speed', 'heartbeat', or None if suppressed.
         """
         current_time = now_epoch if now_epoch is not None else time.time()
-        train_id = pos.train_number
+        train_key = self._state_key(pos)
 
         with self._lock:
             self._prune_stale_locked(current_time=current_time, force=False)
             self._total_inspected += 1
-            last = self._states.get(train_id)
+            last = self._states.get(train_key)
             should_save, reason = self._evaluate_position_against_state(pos, last, current_time)
             if should_save:
-                self._admit_locked(train_id, pos, current_time)
+                self._admit_locked(train_key, pos, current_time)
                 return True, reason
 
             self._total_suppressed += 1

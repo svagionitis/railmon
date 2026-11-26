@@ -1255,6 +1255,113 @@ class TestHistoricalRepository(unittest.TestCase):
             self.assertIn("SEARCH", plan_arch)
             self.assertIn("idx_telemetry_time", plan_arch)
 
+    def test_csv_formula_injection_neutralized_and_pathlike_supported(self):
+        """TC-SEC-07: CSV exports escape =/+/-/@/tab/CR string formulas, preserve negative ints, and accept Path."""
+        from pathlib import Path
+
+        with self.db.transaction() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO trains (train_number, first_observed_at, last_observed_at) "
+                "VALUES ('=CMD()', '2026-11-26T09:00:00.000000Z', '2026-11-26T09:00:00.000000Z');"
+            )
+            cur.execute(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, recorded_at, lat, lng, speed, course, delay_min, status, next_station, corridor
+                ) VALUES ('=CMD()', '2026-11-26T09:00:00.000000Z', 38.0, 23.7, 90.0, 0.0, -2, '+EVIL', '  @SUM(1,2)', 'ATH-SKG');
+                """
+            )
+
+        out_path = Path(self.temp_dir) / "sanitized.csv"
+        cnt = self.repo.export_csv("telemetry", out_path, {"train_number": "=CMD()"})
+        self.assertEqual(cnt, 1)
+        with open(out_path, "r", encoding="utf-8", newline="") as f:
+            rows = list(csv.reader(f))
+        self.assertEqual(rows[1][1], "'=CMD()")
+        self.assertEqual(rows[1][10], "-2")  # Numeric negative int stays unquoted
+        self.assertEqual(rows[1][11], "'+EVIL")
+        self.assertEqual(rows[1][15], "'  @SUM(1,2)")
+
+    def test_csv_telemetry_export_streams_via_iter_train_history(self):
+        """TC-SEC-08: export_csv('telemetry') streams via iter_train_history() without calling get_train_history()."""
+        from unittest.mock import patch
+
+        buf = io.StringIO()
+        with patch.object(
+            self.repo,
+            "get_train_history",
+            side_effect=AssertionError("export_csv('telemetry') must stream via iter_train_history"),
+        ):
+            cnt = self.repo.export_csv("telemetry", buf, {"train_number": "1597", "limit": 2})
+        self.assertEqual(cnt, 2)
+
+    def test_get_active_trips_sargable_index_and_archive_v2_columns(self):
+        """TC-STO-23: get_active_trips uses sargable index SEARCH; archive_before preserves V2 columns."""
+        with self.db.transaction() as cur:
+            cur.execute(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, recorded_at, lat, lng, speed, course, corridor, vehicle_id, recorded_epoch
+                ) VALUES ('1597', '2026-09-01T10:00:00.000000Z', 38.0, 23.7, 100.0, 0.0, 'ATH-SKG', 'loco-460103', 1788256800.0);
+                """
+            )
+
+        trips = self.repo.get_active_trips(service_date="2026-09-01", corridor="ATH-SKG")
+        self.assertEqual(len(trips), 1)
+        self.assertEqual(trips[0].train_number, "1597")
+
+        # Verify archive_before preserves V2 vehicle_id and recorded_epoch
+        arch_path = os.path.join(self.temp_dir, "v2_arch.db")
+        moved = self.repo.archive_before("2026-09-02T00:00:00Z", archive_path=arch_path)
+        self.assertEqual(moved, 1)
+        arch_db = Database(arch_path)
+        try:
+            with arch_db.connection() as conn:
+                r = conn.execute(
+                    "SELECT vehicle_id, recorded_epoch FROM telemetry_history WHERE train_number = '1597';"
+                ).fetchone()
+            self.assertEqual(r[0], "loco-460103")
+            self.assertAlmostEqual(float(r[1]), 1788256800.0, places=1)
+        finally:
+            arch_db.close()
+
+    def test_export_trip_geojson_rfc7946_single_point_and_uniform_coords(self):
+        """TC-STO-24: export_trip_geojson falls back to Point on 1 row, enforces uniform 2D/3D, and disallows NaN."""
+        import json
+
+        with self.db.transaction() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO trains (train_number, first_observed_at, last_observed_at) "
+                "VALUES ('SINGLE-1', '2026-11-26T09:00:00.000000Z', '2026-11-26T09:00:00.000000Z');"
+            )
+            cur.execute(
+                "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, altitude) "
+                "VALUES ('SINGLE-1', '2026-11-26T09:00:00.000000Z', 38.0, 23.7, 50.0, 0.0, 120.0);"
+            )
+            cur.execute(
+                "INSERT OR IGNORE INTO trains (train_number, first_observed_at, last_observed_at) "
+                "VALUES ('MIXED-ALT', '2026-11-26T09:00:00.000000Z', '2026-11-26T09:01:00.000000Z');"
+            )
+            cur.executemany(
+                "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, altitude) "
+                "VALUES ('MIXED-ALT', ?, ?, ?, 80.0, 0.0, ?);",
+                [
+                    ("2026-11-26T09:00:00.000000Z", 38.0, 23.7, 100.0),
+                    ("2026-11-26T09:01:00.000000Z", 38.1, 23.8, None),
+                ],
+            )
+
+        single_gj = self.repo.export_trip_geojson("SINGLE-1", feature_type="LineString")
+        self.assertEqual(single_gj["features"][0]["geometry"]["type"], "Point")
+        self.assertEqual(single_gj["features"][0]["properties"]["geometry_note"], "single_point_fallback")
+        json.dumps(single_gj, allow_nan=False)
+
+        mixed_gj = self.repo.export_trip_geojson("MIXED-ALT", feature_type="LineString")
+        coords = mixed_gj["features"][0]["geometry"]["coordinates"]
+        self.assertEqual(mixed_gj["features"][0]["geometry"]["type"], "LineString")
+        self.assertTrue(all(len(c) == 2 for c in coords))
+        json.dumps(mixed_gj, allow_nan=False)
+
 
 if __name__ == "__main__":
     unittest.main()

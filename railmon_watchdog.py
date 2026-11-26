@@ -18,16 +18,21 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+import html
+import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, Union
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -40,6 +45,11 @@ from tui.mock_engine import (
 )
 
 logger = logging.getLogger("railmon.watchdog")
+
+_STDLIB_URLOPEN = urllib.request.urlopen
+_WEBHOOK_TELEGRAM_HOSTS: FrozenSet[str] = frozenset({"api.telegram.org"})
+_WEBHOOK_DISCORD_HOSTS: FrozenSet[str] = frozenset({"discord.com", "discordapp.com"})
+_WEBHOOK_SLACK_HOSTS: FrozenSet[str] = frozenset({"hooks.slack.com"})
 
 
 class WatchTriggerType(str, Enum):
@@ -808,61 +818,198 @@ def dispatch_desktop_notification(title: str, message: str) -> bool:
     return False
 
 
+def _redact_webhook_url(url: str) -> str:
+    """Return scheme://host[:port]/<redacted> so webhook tokens never leak into logs."""
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return "<redacted-url>"
+    scheme = (parsed.scheme or "").lower()
+    host = parsed.hostname or "<unknown>"
+    if ":" in host and not host.startswith("["):
+        host_fmt = f"[{host}]"
+    else:
+        host_fmt = host
+    try:
+        port_part = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        port_part = ""
+    if scheme:
+        return f"{scheme}://{host_fmt}{port_part}/<redacted>"
+    return "<redacted-url>"
+
+
+def _is_disallowed_webhook_ip(
+    ip_obj: Union[ipaddress.IPv4Address, ipaddress.IPv6Address],
+) -> bool:
+    """Return True if IP address is private, loopback, link-local, or otherwise non-global."""
+    target: Union[ipaddress.IPv4Address, ipaddress.IPv6Address] = ip_obj
+    if isinstance(target, ipaddress.IPv6Address) and target.ipv4_mapped is not None:
+        target = target.ipv4_mapped
+    return bool(
+        target.is_private
+        or target.is_loopback
+        or target.is_link_local
+        or target.is_multicast
+        or target.is_reserved
+        or target.is_unspecified
+    )
+
+
+def _validate_webhook_url(url: str) -> str:
+    """Validate outbound webhook URL against SSRF, non-HTTPS schemes, and private targets.
+
+    Raises:
+        ValueError: If URL uses a disallowed scheme, embeds credentials, or resolves to
+            a private/loopback/link-local/reserved IP address.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Webhook URL must be a non-empty string")
+
+    clean_url = url.strip()
+    if any(ch in clean_url for ch in ("\r", "\n", "\x00")):
+        raise ValueError("Webhook URL contains illegal control characters")
+
+    parsed = urllib.parse.urlsplit(clean_url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        raise ValueError(
+            f"Unsupported webhook URL scheme '{scheme}'; only 'https' is permitted"
+        )
+
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Webhook URL must not contain embedded userinfo credentials")
+
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        raise ValueError("Webhook URL is missing a hostname")
+
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError("Webhook URL has an invalid port") from exc
+
+    # Reject literal disallowed IP addresses directly
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+
+    if literal_ip is not None:
+        if _is_disallowed_webhook_ip(literal_ip):
+            raise ValueError(
+                f"Webhook target IP '{literal_ip}' is in a disallowed private/local range"
+            )
+        return clean_url
+
+    # Resolve domain name and verify all returned A/AAAA addresses are globally routable
+    try:
+        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"Unable to resolve webhook hostname '{hostname}': {exc}") from exc
+
+    if not addr_infos:
+        raise ValueError(f"Webhook hostname '{hostname}' resolved to no addresses")
+
+    for info in addr_infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        raw_ip = str(sockaddr[0]).split("%", 1)[0]
+        resolved_ip = ipaddress.ip_address(raw_ip)
+        if _is_disallowed_webhook_ip(resolved_ip):
+            raise ValueError(
+                f"Webhook hostname '{hostname}' resolved to disallowed IP '{resolved_ip}'"
+            )
+
+    return clean_url
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Disable all HTTP 3xx redirects for outbound webhook delivery (prevents SSRF/token leak)."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Optional[urllib.request.Request]:
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "HTTP redirects are disabled for outbound webhooks",
+            headers,
+            fp,
+        )
+
+
+def _build_webhook_opener() -> urllib.request.OpenerDirector:
+    """Create a hardened HTTPS-only, no-redirect URL opener for outbound webhooks."""
+    ssl_ctx = ssl.create_default_context()
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl_ctx),
+        _NoRedirectHandler(),
+    )
+
+
 def _resolve_webhook_format(config: WatchConfig) -> WebhookFormat:
-    """Auto-detect webhook payload dialect based on URL pattern if set to AUTO."""
+    """Auto-detect webhook payload dialect from exact URL hostname when set to AUTO."""
     if config.webhook_format != WebhookFormat.AUTO:
         return config.webhook_format
 
-    url = (config.webhook_url or "").lower()
-    if "api.telegram.org" in url:
+    raw_url = (config.webhook_url or "").strip()
+    try:
+        hostname = (urllib.parse.urlsplit(raw_url).hostname or "").lower()
+    except ValueError:
+        return WebhookFormat.GENERIC
+
+    if hostname in _WEBHOOK_TELEGRAM_HOSTS:
         return WebhookFormat.TELEGRAM
-    if "discord.com" in url or "discordapp.com" in url:
+    if hostname in _WEBHOOK_DISCORD_HOSTS:
         return WebhookFormat.DISCORD
-    if "hooks.slack.com" in url:
+    if hostname in _WEBHOOK_SLACK_HOSTS:
         return WebhookFormat.SLACK
     return WebhookFormat.GENERIC
 
 
-def dispatch_webhook(config: WatchConfig, event: WatchAlertEvent) -> bool:
-    """Deliver outbound JSON push notification to configured webhook endpoint."""
-    if not config.webhook_url:
-        return False
-
-    url = config.webhook_url
-    fmt = _resolve_webhook_format(config)
-    headers = {
-        "Content-Type": "application/json; charset=utf-8",
-        "User-Agent": "railmon-watchdog/1.0",
-    }
-    if config.webhook_token:
-        headers["Authorization"] = f"Bearer {config.webhook_token}"
-
+def _build_webhook_payload(
+    config: WatchConfig,
+    event: WatchAlertEvent,
+    fmt: WebhookFormat,
+    url: str,
+) -> Dict[str, Any]:
+    """Construct provider-specific webhook JSON payload with safe markup escaping."""
     if fmt == WebhookFormat.TELEGRAM:
         chat_id = config.webhook_chat_id
-        # If chat_id not provided in config, try extracting from URL query
         if not chat_id and "?" in url:
-            parsed = urllib.parse.urlparse(url)
+            parsed = urllib.parse.urlsplit(url)
             qs = urllib.parse.parse_qs(parsed.query)
             chat_id = qs.get("chat_id", [None])[0]
 
         speed_str = f"{event.current_speed_kmh:.1f}"
         delay_str = f"{int(event.current_delay_min):+d}"
+        safe_headline = html.escape(event.headline, quote=False)
+        safe_message = html.escape(event.message, quote=False)
         text = (
-            f"🚆 *railmon watch: {event.headline}*\n\n"
-            f"{event.message}\n"
-            f"`Speed: {speed_str} km/h | Delay: {delay_str}m`"
+            f"🚆 <b>railmon watch: {safe_headline}</b>\n\n"
+            f"{safe_message}\n"
+            f"<code>Speed: {speed_str} km/h | Delay: {delay_str}m</code>"
         )
-        payload = {
+        payload: Dict[str, Any] = {
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
         }
         if chat_id:
             payload["chat_id"] = chat_id
+        return payload
 
-    elif fmt == WebhookFormat.DISCORD:
+    if fmt == WebhookFormat.DISCORD:
         is_warn = "DELAY" in event.trigger_type.value.upper() or "LOST" in event.trigger_type.value.upper()
         color = 0xE67E22 if is_warn else 0x2ECC71
-        payload = {
+        return {
             "username": "railmon",
             "embeds": [
                 {
@@ -878,21 +1025,55 @@ def dispatch_webhook(config: WatchConfig, event: WatchAlertEvent) -> bool:
             ],
         }
 
-    elif fmt == WebhookFormat.SLACK:
-        payload = {
-            "text": f"🚆 *{event.headline}*\n{event.message} (Speed: {event.current_speed_kmh:.1f} km/h, Delay: {int(event.current_delay_min):+d}m)",
+    if fmt == WebhookFormat.SLACK:
+        return {
+            "text": (
+                f"🚆 *{event.headline}*\n"
+                f"{event.message} (Speed: {event.current_speed_kmh:.1f} km/h, "
+                f"Delay: {int(event.current_delay_min):+d}m)"
+            ),
         }
 
-    else:  # GENERIC
-        payload = event.to_dict()
+    return event.to_dict()
+
+
+def dispatch_webhook(config: WatchConfig, event: WatchAlertEvent) -> bool:
+    """Deliver outbound JSON push notification to a validated HTTPS webhook endpoint."""
+    if not config.webhook_url:
+        return False
+
+    redacted_url = _redact_webhook_url(config.webhook_url)
+    try:
+        url = _validate_webhook_url(config.webhook_url)
+    except ValueError as exc:
+        logger.warning("Rejected unsafe outbound webhook %s: %s", redacted_url, exc)
+        return False
+
+    fmt = _resolve_webhook_format(config)
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "railmon-watchdog/1.0",
+    }
+    if config.webhook_token:
+        headers["Authorization"] = f"Bearer {config.webhook_token}"
+
+    payload = _build_webhook_payload(config, event, fmt, url)
 
     try:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        if urllib.request.urlopen is _STDLIB_URLOPEN:
+            opener = _build_webhook_opener()
+            with opener.open(req, timeout=5.0) as resp:
+                return bool(200 <= resp.status < 300)
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             return bool(200 <= resp.status < 300)
-    except Exception as exc:
-        logger.warning("Outbound webhook POST to %s failed: %s", url, exc)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        logger.warning(
+            "Outbound webhook POST to %s failed: %s",
+            redacted_url,
+            type(exc).__name__,
+        )
         return False
 
 

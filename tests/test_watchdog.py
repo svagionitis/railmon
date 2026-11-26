@@ -558,3 +558,102 @@ class TestWatchdogFormatters(TestCase):
         self.assertIn("IC 52", ticker)
         self.assertIn("112.5 km/h", ticker)
         self.assertIn("+4m", ticker)
+
+
+class TestWebhookSecurityHardening(unittest.TestCase):
+    """Phase 1 (P1-3) webhook SSRF, redaction, exact-host, HTML escaping, and env var tests."""
+
+    def _sample_event(self, headline: str = "DELAY: IC_52 <ATH>", message: str = "Station *Larissa* [A&B]") -> WatchAlertEvent:
+        return WatchAlertEvent(
+            timestamp="2026-11-26 14:00:00",
+            train_number="IC 52",
+            trigger_type=WatchTriggerType.DELAY_INCREASE,
+            headline=headline,
+            message=message,
+            current_speed_kmh=95.0,
+            current_delay_min=8.0,
+            delay_delta_min=5.0,
+        )
+
+    @patch("urllib.request.urlopen")
+    def test_webhook_rejects_non_https_and_ssrf_targets(self, mock_urlopen: MagicMock) -> None:
+        """TC-SEC-01: Reject file://, ftp://, http://, metadata IP, and private DNS resolutions."""
+        unsafe_urls = [
+            "file:///etc/passwd",
+            "ftp://example.com/hook",
+            "http://hooks.slack.com/services/T0/B0/SECRET",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1/internal",
+            "https://10.0.0.5/hook",
+            "https://user:pass@hooks.slack.com/services/T0/B0/SECRET",
+        ]
+        event = self._sample_event()
+        for url in unsafe_urls:
+            cfg = WatchConfig(train_number="IC 52", webhook_url=url, webhook_token="secret-tok")
+            self.assertFalse(dispatch_webhook(cfg, event), f"Expected rejection for {url}")
+        mock_urlopen.assert_not_called()
+
+        # DNS resolving to private IP must also be rejected
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("169.254.169.254", 443))]):
+            cfg = WatchConfig(train_number="IC 52", webhook_url="https://rebind.example.com/hook")
+            self.assertFalse(dispatch_webhook(cfg, event))
+        mock_urlopen.assert_not_called()
+
+    def test_webhook_no_redirect_redacted_log_and_exact_host_dialect(self) -> None:
+        """TC-SEC-02: Disable 3xx redirects, redact secrets from logs, and require exact hostnames."""
+        from railmon_watchdog import _NoRedirectHandler, _resolve_webhook_format
+        import urllib.error
+        import urllib.request
+
+        # Exact hostname dialect matching (spoofed path/query -> GENERIC)
+        spoof_cfg = WatchConfig(
+            train_number="IC 52",
+            webhook_url="https://evil.example/api.telegram.org/bot999/sendMessage",
+        )
+        self.assertEqual(_resolve_webhook_format(spoof_cfg), WebhookFormat.GENERIC)
+
+        # _NoRedirectHandler must reject 302 redirects
+        handler = _NoRedirectHandler()
+        req = urllib.request.Request("https://hooks.slack.com/services/T0/B0/SECRET")
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(req, None, 302, "Found", {}, "http://169.254.169.254/")
+
+        # Failure logging must redact path/query token
+        secret_url = "https://api.telegram.org/bot987654:SUPERSECRETTOKEN/sendMessage?chat_id=42"
+        cfg = WatchConfig(train_number="IC 52", webhook_url=secret_url)
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("149.154.167.220", 443))]), \
+             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")), \
+             self.assertLogs("railmon.watchdog", level="WARNING") as log_ctx:
+            ok = dispatch_webhook(cfg, self._sample_event())
+        self.assertFalse(ok)
+        joined = "\n".join(log_ctx.output)
+        self.assertNotIn("SUPERSECRETTOKEN", joined)
+        self.assertNotIn("chat_id=42", joined)
+        self.assertIn("https://api.telegram.org/<redacted>", joined)
+
+    @patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("149.154.167.220", 443))])
+    @patch("urllib.request.urlopen")
+    def test_webhook_telegram_html_escaping_and_env_fallbacks(
+        self,
+        mock_urlopen: MagicMock,
+        _mock_dns: MagicMock,
+    ) -> None:
+        """TC-SEC-03: Telegram uses HTML mode with escaped entities; CLI supports RAILMON_WEBHOOK_* env vars."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        cfg = WatchConfig(
+            train_number="IC 52",
+            webhook_url="https://api.telegram.org/bot12345/sendMessage",
+            webhook_chat_id="999888",
+        )
+        ok = dispatch_webhook(cfg, self._sample_event())
+        self.assertTrue(ok)
+        req = mock_urlopen.call_args[0][0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(payload["parse_mode"], "HTML")
+        self.assertIn("&lt;ATH&gt;", payload["text"])
+        self.assertIn("[A&amp;B]", payload["text"])
+        self.assertIn("IC_52", payload["text"])

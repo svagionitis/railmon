@@ -233,6 +233,8 @@ def install_signal_handlers(
 BASE_URL = "https://railway.gov.gr"
 ALLOWED_BASE_SCHEMES: FrozenSet[str] = frozenset({"https"})
 ALLOWED_BASE_HOSTS: FrozenSet[str] = frozenset({"railway.gov.gr"})
+MAX_REST_RESPONSE_BYTES: int = 10 * 1024 * 1024  # 10 MiB hard cap for REST API responses
+_STDLIB_URLOPEN = urllib.request.urlopen
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
     "Accept": "application/json, text/plain, */*",
@@ -873,6 +875,7 @@ def build_player_command(
             "--no-terminal",
             "--force-window=yes",
             "--ontop",
+            "--",
             playlist_url,
         ]
     elif "ffplay" in p_lower:
@@ -887,6 +890,7 @@ def build_player_command(
             "960",
             "-y",
             "540",
+            "-i",
             playlist_url,
         ]
     elif "vlc" in p_lower:
@@ -895,10 +899,11 @@ def build_player_command(
             f"--meta-title={title}",
             "--play-and-exit",
             "--video-on-top",
+            "--",
             playlist_url,
         ]
     else:
-        return [exe, playlist_url]
+        return [exe, "--", playlist_url]
 
 
 def launch_detached_player(
@@ -986,12 +991,79 @@ def launch_cab_stream(
             return (False, player_name, f"Failed to execute '{player_name}': {str(exc)}")
 
 
+def _quote_path_segment(value: str) -> str:
+    """Percent-encode a single dynamic URL path segment (safe='') rejecting empty values."""
+    clean = str(value).strip()
+    if not clean:
+        raise ValueError("URL path segment must be a non-empty string")
+    return urllib.parse.quote(clean, safe="")
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Restrict HTTP 3xx redirects to the exact validated origin of RailwayGovClient."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        parsed = urllib.parse.urlsplit(base_url)
+        self._allowed_origin = (
+            (parsed.scheme or "").lower(),
+            (parsed.hostname or "").lower(),
+            parsed.port or 443,
+        )
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Optional[urllib.request.Request]:
+        resolved = urllib.parse.urljoin(req.full_url, newurl)
+        try:
+            validate_base_url(resolved)
+        except ValueError as exc:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                f"Disallowed redirect target: {exc}",
+                headers,
+                fp,
+            ) from exc
+        parsed_target = urllib.parse.urlsplit(resolved)
+        target_origin = (
+            (parsed_target.scheme or "").lower(),
+            (parsed_target.hostname or "").lower(),
+            parsed_target.port or 443,
+        )
+        if target_origin != self._allowed_origin:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "Disallowed cross-origin redirect",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, resolved)
+
+
 class RailwayGovClient:
     """Client for the Hellenic Railways train-tracker APIs."""
 
     def __init__(self, base_url: str = BASE_URL) -> None:
         self.base_url = validate_base_url(base_url)
         self.ssl_ctx = ssl.create_default_context()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=self.ssl_ctx),
+            _SameOriginRedirectHandler(self.base_url),
+        )
+
+    def _open_url(self, req: urllib.request.Request, timeout: float = 15.0) -> Any:
+        """Open a request via the redirect-validated opener (preserving test urlopen patches)."""
+        if urllib.request.urlopen is _STDLIB_URLOPEN:
+            return self._opener.open(req, timeout=timeout)
+        return urllib.request.urlopen(req, context=self.ssl_ctx, timeout=timeout)
 
     def _get(
         self,
@@ -1009,8 +1081,13 @@ class RailwayGovClient:
         for attempt in range(max_retries + 1):
             req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
             try:
-                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=15) as resp:
-                    content = resp.read().decode("utf-8")
+                with self._open_url(req, timeout=15.0) as resp:
+                    raw = resp.read(MAX_REST_RESPONSE_BYTES + 1)
+                    if len(raw) > MAX_REST_RESPONSE_BYTES:
+                        raise RailwayAPIError(
+                            f"Response from {path} exceeded {MAX_REST_RESPONSE_BYTES} bytes limit"
+                        )
+                    content = raw.decode("utf-8")
                     return json.loads(content)
             except urllib.error.HTTPError as err:
                 if err.code == 429:
@@ -1082,22 +1159,26 @@ class RailwayGovClient:
 
     def get_schedule_by_id(self, schedule_id: str) -> Dict[str, Any]:
         """Fetch full itinerary for a schedule."""
-        res = self._get(f"/api/public/schedules/{schedule_id}")
+        safe_id = _quote_path_segment(schedule_id)
+        res = self._get(f"/api/public/schedules/{safe_id}")
         return res if isinstance(res, dict) else {}
 
     def get_schedule_by_train_number(self, train_number: str) -> Dict[str, Any]:
-        """Fetch schedule by commercial train number (e.g. '1597')."""
-        res = self._get(f"/api/public/train-schedules/by-train-number/{train_number}")
+        """Fetch schedule by commercial train number (e.g. '1597', 'IC 52')."""
+        safe_num = _quote_path_segment(train_number)
+        res = self._get(f"/api/public/train-schedules/by-train-number/{safe_num}")
         return res if isinstance(res, dict) else {}
 
     def get_station(self, station_id: str) -> Dict[str, Any]:
         """Fetch station metadata."""
-        res = self._get(f"/api/public/stations/{station_id}")
+        safe_id = _quote_path_segment(station_id)
+        res = self._get(f"/api/public/stations/{safe_id}")
         return res if isinstance(res, dict) else {}
 
     def get_station_departures(self, station_id: str, limit: int = 15) -> List[Dict[str, Any]]:
         """Fetch departure board for a station."""
-        res = self._get(f"/api/public/stations/{station_id}/departures", {"limit": limit})
+        safe_id = _quote_path_segment(station_id)
+        res = self._get(f"/api/public/stations/{safe_id}/departures", {"limit": limit})
         if isinstance(res, dict):
             deps = res.get("departures", [])
             return deps if isinstance(deps, list) else []
@@ -1105,7 +1186,8 @@ class RailwayGovClient:
 
     def get_station_arrivals(self, station_id: str, limit: int = 15) -> List[Dict[str, Any]]:
         """Fetch arrival board for a station."""
-        res = self._get(f"/api/public/stations/{station_id}/arrivals", {"limit": limit})
+        safe_id = _quote_path_segment(station_id)
+        res = self._get(f"/api/public/stations/{safe_id}/arrivals", {"limit": limit})
         if isinstance(res, dict):
             arrs = res.get("arrivals", [])
             return arrs if isinstance(arrs, list) else []
@@ -1125,14 +1207,22 @@ class RailwayGovClient:
         Returns:
             CabStreamInfo populated with playlist URL and status.
         """
-        clean_id = urllib.parse.quote(str(train_id_or_number).strip())
+        try:
+            clean_id = _quote_path_segment(train_id_or_number)
+        except ValueError as exc:
+            return CabStreamInfo(
+                train_number=str(train_id_or_number),
+                has_stream=False,
+                status="ERROR",
+                error_message=str(exc),
+            )
         try:
             payload = self._get(f"/api/public/trains/{clean_id}/stream")
             if isinstance(payload, dict):
                 return CabStreamInfo.from_dict(payload, default_train_number=train_id_or_number)
             return CabStreamInfo.unavailable(train_id_or_number, "Invalid stream response format.")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
+        except RailwayAPIError as exc:
+            if exc.status_code == 404:
                 return CabStreamInfo.unavailable(
                     train_id_or_number,
                     f"No forward cab camera installed or stream active for train {train_id_or_number}.",
@@ -1141,9 +1231,9 @@ class RailwayGovClient:
                 train_number=str(train_id_or_number),
                 has_stream=False,
                 status="ERROR",
-                error_message=f"HTTP {exc.code}: {exc.reason}",
+                error_message=str(exc),
             )
-        except Exception as exc:
+        except (ValueError, OSError, TimeoutError) as exc:
             return CabStreamInfo(
                 train_number=str(train_id_or_number),
                 has_stream=False,
@@ -2063,7 +2153,7 @@ Examples:
         "--webhook",
         type=str,
         default=None,
-        help="Outbound webhook URL for alert delivery (Telegram, Discord, Slack, or Generic HTTP POST).",
+        help="Outbound HTTPS webhook URL for alert delivery (or set RAILMON_WEBHOOK_URL).",
     )
     p_watch.add_argument(
         "--webhook-format",
@@ -2075,13 +2165,13 @@ Examples:
         "--webhook-chat-id",
         type=str,
         default=None,
-        help="Telegram target chat_id (when using Telegram webhook).",
+        help="Telegram target chat_id (or set RAILMON_WEBHOOK_CHAT_ID).",
     )
     p_watch.add_argument(
         "--webhook-token",
         type=str,
         default=None,
-        help="Bearer authorization token for webhook delivery.",
+        help="Bearer authorization token for webhook delivery (or set RAILMON_WEBHOOK_TOKEN).",
     )
     p_watch.add_argument(
         "--no-bell",
@@ -3697,7 +3787,12 @@ def run_cab_stream_mode(args: argparse.Namespace) -> int:
 
     if url_only:
         if stream_info.has_stream and stream_info.playlist_url:
-            sys.stdout.write(f"{stream_info.playlist_url}\n")
+            try:
+                safe_url = validate_stream_url(stream_info.playlist_url)
+            except ValueError as exc:
+                sys.stderr.write(f"Error: Invalid stream URL for train {train_num}: {exc}\n")
+                return 1
+            sys.stdout.write(f"{safe_url}\n")
             return 0
         else:
             sys.stderr.write(f"No active stream for train {train_num}: {stream_info.error_message or 'Unavailable'}\n")
@@ -4122,14 +4217,18 @@ def run_watch_mode(args: argparse.Namespace) -> int:
     notify_eta = parse_notify_minutes(notify_str)
     notify_dist = float(getattr(args, "distance", 15.0) or 15.0)
     delay_delta = float(getattr(args, "delay_delta", 3.0) or 3.0)
-    webhook_url = getattr(args, "webhook", None)
+    webhook_url = getattr(args, "webhook", None) or os.environ.get("RAILMON_WEBHOOK_URL")
     webhook_format_str = str(getattr(args, "webhook_format", "auto")).lower()
     try:
         wb_fmt = WebhookFormat(webhook_format_str)
     except ValueError:
         wb_fmt = WebhookFormat.AUTO
-    webhook_chat_id = getattr(args, "webhook_chat_id", None)
-    webhook_token = getattr(args, "webhook_token", None)
+    webhook_chat_id = (
+        getattr(args, "webhook_chat_id", None) or os.environ.get("RAILMON_WEBHOOK_CHAT_ID")
+    )
+    webhook_token = (
+        getattr(args, "webhook_token", None) or os.environ.get("RAILMON_WEBHOOK_TOKEN")
+    )
     enable_bell = not bool(getattr(args, "no_bell", False))
     enable_desktop = not bool(getattr(args, "no_desktop", False))
     exit_on_arrival = bool(getattr(args, "once", False))

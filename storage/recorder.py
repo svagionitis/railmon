@@ -567,14 +567,14 @@ class TelemetryRecorder:
                     trip_rows,
                 )
 
-            # 3. Bulk insert telemetry_history
+            # 3. Bulk insert telemetry_history (Schema V2: includes vehicle_id and recorded_epoch)
             cur.executemany(
                 """
                 INSERT INTO telemetry_history (
                     train_number, schedule_id, recorded_at, lat, lng, speed, course,
                     track_heading, altitude, delay_min, status, progress, chainage_m,
-                    dist_to_dest_m, next_station, corridor
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    dist_to_dest_m, next_station, corridor, vehicle_id, recorded_epoch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 history_rows,
             )

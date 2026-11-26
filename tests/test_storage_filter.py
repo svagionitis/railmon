@@ -66,7 +66,7 @@ class TestDeadbandFilter(unittest.TestCase):
 
         self.assertTrue(should_save)
         self.assertEqual(reason, "initial")
-        self.assertIn("IC52", self.filter._states)
+        self.assertIn(DeadbandFilter._state_key(pos), self.filter._states)
 
     def test_stationary_train_under_distance_threshold_suppressed(self):
         """Stationary movement below min_distance_m must be suppressed."""
@@ -227,8 +227,8 @@ class TestDeadbandFilter(unittest.TestCase):
         # At t=1700, IC52 is 700s old (> 600s); IC53 is 200s old (<= 600s)
         evicted = self.filter.prune_stale_states(max_age_sec=600.0, now_epoch=1700.0)
         self.assertEqual(evicted, 1)
-        self.assertNotIn("IC52", self.filter._states)
-        self.assertIn("IC53", self.filter._states)
+        self.assertNotIn(DeadbandFilter._state_key(pos1), self.filter._states)
+        self.assertIn(DeadbandFilter._state_key(pos2), self.filter._states)
         self.assertEqual(self.filter.stats["total_evicted"], 1.0)
         self.assertEqual(self.filter.stats["tracked_trains"], 1.0)
 
@@ -249,9 +249,9 @@ class TestDeadbandFilter(unittest.TestCase):
 
         self.assertTrue(admitted)
         self.assertEqual(reason, "initial")
-        self.assertNotIn("IC52", filt._states)
-        self.assertNotIn("IC53", filt._states)
-        self.assertIn("IC54", filt._states)
+        self.assertNotIn(DeadbandFilter._state_key(pos1), filt._states)
+        self.assertNotIn(DeadbandFilter._state_key(pos2), filt._states)
+        self.assertIn(DeadbandFilter._state_key(pos3), filt._states)
         self.assertEqual(filt.stats["total_evicted"], 2.0)
         self.assertEqual(filt.stats["tracked_trains"], 1.0)
 
@@ -305,8 +305,9 @@ class TestDeadbandFilter(unittest.TestCase):
 
         # Promote post-commit
         self.filter.commit_batch(evaluation, now_epoch=1000.0)
-        self.assertIn("IC52", self.filter._states)
-        self.assertEqual(self.filter._states["IC52"].status, "Στάση")
+        p5_key = DeadbandFilter._state_key(p5)
+        self.assertIn(p5_key, self.filter._states)
+        self.assertEqual(self.filter._states[p5_key].status, "Στάση")
         self.assertEqual(self.filter.stats["total_inspected"], 5.0)
         self.assertEqual(self.filter.stats["total_admitted"], 3.0)
         self.assertEqual(self.filter.stats["total_suppressed"], 2.0)
@@ -315,6 +316,33 @@ class TestDeadbandFilter(unittest.TestCase):
         eval_after = self.filter.evaluate_batch([p5], now_epoch=1005.0)
         self.assertEqual(eval_after.admitted_count, 0)
         self.assertEqual(eval_after.suppressed_count, 1)
+
+    def test_consist_aware_deadband_isolates_coupled_units_sharing_train_number(self):
+        """TC-STO-21: Coupled consists sharing train_number maintain independent deadband baselines."""
+        from dataclasses import replace
+
+        base = _create_sample_position(
+            "2232",
+            lat=38.0000,
+            lng=23.5000,
+            speed=80.0,
+            delay=0,
+            status="Κανονική",
+            next_station="Λειανοκλάδι",
+            schedule_id="SCHED-2232",
+        )
+        unit_a = replace(base, id="unit-a", locomotive_number="460103")
+        unit_b = replace(base, id="unit-b", locomotive_number="460108")
+        # Both units must be admitted as initial despite identical train_number & coordinates
+        ev = self.filter.evaluate_batch([unit_a, unit_b], now_epoch=1000.0)
+        self.assertEqual(ev.admitted_count, 2)
+        self.filter.commit_batch(ev, now_epoch=1000.0)
+        self.assertEqual(len(self.filter._states), 2)
+
+        # Stationary repeats for both units are independently suppressed
+        ev2 = self.filter.evaluate_batch([unit_a, unit_b], now_epoch=1005.0)
+        self.assertEqual(ev2.admitted_count, 0)
+        self.assertEqual(ev2.suppressed_count, 2)
 
 
 if __name__ == "__main__":

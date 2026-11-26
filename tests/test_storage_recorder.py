@@ -10,7 +10,7 @@ import time
 import unittest
 
 from storage.db import Database
-from storage.filter import DeadbandConfig
+from storage.filter import DeadbandConfig, DeadbandFilter
 from storage.recorder import RecorderConfig, TelemetryRecorder
 from train_tracker import TrainPosition
 
@@ -522,24 +522,26 @@ class TestTelemetryRecorder(unittest.TestCase):
         self.recorder.start()
 
         # Enqueue position and wait for post-commit deadband promotion
-        self.recorder.enqueue(_create_sample_position("IC50"))
+        ic50_pos = _create_sample_position("IC50")
+        ic50_key = DeadbandFilter._state_key(ic50_pos)
+        self.recorder.enqueue(ic50_pos)
         commit_deadline = time.monotonic() + 1.5
         while time.monotonic() < commit_deadline:
-            if "IC50" in self.recorder.filter._states:
+            if ic50_key in self.recorder.filter._states:
                 break
             time.sleep(0.01)
 
         # Confirm IC50 was cached post-commit
-        self.assertIn("IC50", self.recorder.filter._states)
+        self.assertIn(ic50_key, self.recorder.filter._states)
 
         # Wait for periodic worker prune
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            if "IC50" not in self.recorder.filter._states:
+            if ic50_key not in self.recorder.filter._states:
                 break
             time.sleep(0.02)
 
-        self.assertNotIn("IC50", self.recorder.filter._states)
+        self.assertNotIn(ic50_key, self.recorder.filter._states)
         self.assertGreaterEqual(self.recorder.filter.stats["total_evicted"], 1.0)
         self.recorder.stop()
 
@@ -730,8 +732,9 @@ class TestTelemetryRecorder(unittest.TestCase):
 
         self.assertEqual(attempts["count"], 3)
         self.assertEqual(rows, 1)
-        self.assertIn("RETRY-OK", self.recorder.filter._states)
-        self.assertEqual(self.recorder.filter._states["RETRY-OK"].delay, 7)
+        retry_key = DeadbandFilter._state_key(_create_sample_position("RETRY-OK"))
+        self.assertIn(retry_key, self.recorder.filter._states)
+        self.assertEqual(self.recorder.filter._states[retry_key].delay, 7)
         self.recorder.stop()
 
     def test_sustained_sqlite_lock_retains_buffer_without_poisoning_deadband(self):
@@ -750,13 +753,14 @@ class TestTelemetryRecorder(unittest.TestCase):
 
         # Commit baseline state first
         base_pos = _create_sample_position("IC52", status="Κανονική", next_station="Λάρισα", delay=0)
+        ic52_key = DeadbandFilter._state_key(base_pos)
         self.recorder.enqueue(base_pos)
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
-            if "IC52" in self.recorder.filter._states:
+            if ic52_key in self.recorder.filter._states:
                 break
             time.sleep(0.02)
-        self.assertEqual(self.recorder.filter._states["IC52"].status, "Κανονική")
+        self.assertEqual(self.recorder.filter._states[ic52_key].status, "Κανονική")
 
         orig_commit = self.recorder._commit_flush_transaction
         fail_remaining = {"n": 2}  # Exhaust all 2 in-flush retries on Cycle 1
@@ -792,7 +796,7 @@ class TestTelemetryRecorder(unittest.TestCase):
         self.assertEqual(persisted_rows[1]["next_station"], "Κατερίνη")
         self.assertEqual(persisted_rows[1]["delay_min"], 15)
         self.assertGreaterEqual(self.recorder.get_stats()["total_flush_failures"], 1)
-        self.assertEqual(self.recorder.filter._states["IC52"].status, "Στάση")
+        self.assertEqual(self.recorder.filter._states[ic52_key].status, "Στάση")
         self.recorder.stop()
 
     def test_pending_buffer_cap_and_non_transient_error_do_not_poison_deadband(self):

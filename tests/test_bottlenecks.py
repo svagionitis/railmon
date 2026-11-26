@@ -243,6 +243,41 @@ class TestBottlenecks(unittest.TestCase):
         self.assertIn("bottlenecks", parsed)
         self.assertGreaterEqual(len(parsed["bottlenecks"]), 2)
 
+    def test_bottlenecks_percentiles_use_dwell_events_population_linear_p90(self) -> None:
+        """TC-STO-22: F-9.1 median/p90 come strictly from dwell_events (min <= median <= p90 <= max, linear p90)."""
+        with self.db.transaction() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO trains (train_number, first_observed_at, last_observed_at) "
+                "VALUES ('P90-T', '2026-11-26T08:00:00.000000Z', '2026-11-26T12:00:00.000000Z');"
+            )
+            # Insert 4 distinct dwell events at StationX with departure delays [2, 4, 6, 20]
+            # plus 50 raw moving breadcrumbs with huge delay=99 that must NOT pollute median/p90!
+            rows = []
+            for idx, dep_dly in enumerate([2, 4, 6, 20]):
+                hour = 8 + idx
+                rows.append(("P90-T", f"2026-11-26T{hour:02d}:00:00.000000Z", 39.6, 22.4, 0.0, 0.0, dep_dly, "StationX", "ATH-SKG"))
+                rows.append(("P90-T", f"2026-11-26T{hour:02d}:01:00.000000Z", 39.6, 22.4, 0.0, 0.0, dep_dly, "StationX", "ATH-SKG"))
+                rows.append(("P90-T", f"2026-11-26T{hour:02d}:02:00.000000Z", 39.6, 22.4, 120.0, 0.0, 99, "StationX", "ATH-SKG"))
+            for sec in range(50):
+                rows.append(("P90-T", f"2026-11-26T11:30:{sec:02d}.000000Z", 39.6, 22.4, 120.0, 0.0, 99, "StationX", "ATH-SKG"))
+            cur.executemany(
+                """
+                INSERT INTO telemetry_history (
+                    train_number, recorded_at, lat, lng, speed, course, delay_min, next_station, corridor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                rows,
+            )
+
+        report = self.repo.get_corridor_bottlenecks(corridor="ATH-SKG", min_trips=2)
+        node = next(n for n in report.nodes if n.name == "StationX")
+        # Dwell departure delays are [2, 4, 6, 20]: median=5.0, linear p90 = 6 + 0.7*(20-6) = 15.8, max=20.0
+        self.assertEqual(node.max_delay_minutes, 20.0)
+        self.assertAlmostEqual(node.median_delay_minutes, 5.0, places=2)
+        self.assertAlmostEqual(node.p90_delay_minutes, 15.8, places=2)
+        self.assertLessEqual(node.median_delay_minutes, node.p90_delay_minutes)
+        self.assertLessEqual(node.p90_delay_minutes, node.max_delay_minutes)
+
 
 if __name__ == "__main__":
     unittest.main()

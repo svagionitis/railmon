@@ -271,6 +271,45 @@ class TestPlayerExecution(unittest.TestCase):
         self.assertEqual(player, "none")
         self.assertIn("No camera installed", msg)
 
+    def test_cab_url_only_validation_and_player_option_delimiters(self) -> None:
+        """TC-SEC-06: --url-only validates stream URL; player commands include '--' / '-i' delimiters."""
+        import argparse
+        import io
+        from contextlib import redirect_stderr
+        from train_tracker import run_cab_stream_mode
+
+        url = "https://stream.railway.gov.gr/hls/live.m3u8"
+        mpv_cmd = build_player_command("mpv", "/usr/bin/mpv", url, "IC52")
+        self.assertEqual(mpv_cmd[-2:], ["--", url])
+
+        vlc_cmd = build_player_command("vlc", "/usr/bin/vlc", url, "IC52")
+        self.assertEqual(vlc_cmd[-2:], ["--", url])
+
+        ffplay_cmd = build_player_command("ffplay", "/usr/bin/ffplay", url, "IC52")
+        self.assertEqual(ffplay_cmd[-2:], ["-i", url])
+
+        bad_info = CabStreamInfo(
+            train_number="IC52",
+            has_stream=True,
+            status="ONLINE",
+            playlist_url="javascript:alert(1)",
+        )
+        args = argparse.Namespace(
+            train_number="IC52",
+            demo=False,
+            player=None,
+            url_only=True,
+            browser=False,
+            json=False,
+            ascii=True,
+        )
+        err_buf = io.StringIO()
+        with patch("train_tracker.RailwayGovClient.get_cab_stream_url", return_value=bad_info), \
+             redirect_stderr(err_buf):
+            rc = run_cab_stream_mode(args)
+        self.assertEqual(rc, 1)
+        self.assertIn("Invalid stream URL", err_buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

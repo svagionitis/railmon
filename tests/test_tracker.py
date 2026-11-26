@@ -704,5 +704,57 @@ class TestRailwayGovClientResilience(unittest.TestCase):
         self.assertEqual(cm.exception.code, 429)
 
 
+class TestRailwayClientSecurityHardening(unittest.TestCase):
+    """Phase 1 (P1-4) path-segment encoding, dead 404 handler, redirect SSRF, and size cap tests."""
+
+    def setUp(self) -> None:
+        self.client = RailwayGovClient()
+
+    @patch("urllib.request.urlopen")
+    def test_url_path_segments_percent_encoded_safe_empty(self, mock_urlopen: MagicMock) -> None:
+        """TC-SEC-04: Spaces ('IC 52') and traversal ('../admin/1') are percent-encoded with safe=''."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"stops": []}'
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        self.client.get_schedule_by_train_number("IC 52")
+        req1 = mock_urlopen.call_args[0][0]
+        self.assertIn("/by-train-number/IC%2052", req1.full_url)
+
+        self.client.get_cab_stream_url("../admin/1")
+        req2 = mock_urlopen.call_args[0][0]
+        self.assertIn("/trains/..%2Fadmin%2F1/stream", req2.full_url)
+
+    def test_cab_404_redirect_ssrf_and_response_size_cap(self) -> None:
+        """TC-SEC-05: 404 returns CabStreamInfo.unavailable; cross-origin redirects & oversized bodies fail."""
+        from train_tracker import MAX_REST_RESPONSE_BYTES, _SameOriginRedirectHandler
+
+        # 1. Dead 404 handler fixed: RailwayAPIError(404) -> unavailable
+        with patch.object(
+            self.client,
+            "_get",
+            side_effect=RailwayAPIError("HTTP 404 Client Error", status_code=404),
+        ):
+            info = self.client.get_cab_stream_url("IC52")
+            self.assertFalse(info.has_stream)
+            self.assertEqual(info.status, "UNAVAILABLE")
+
+        # 2. Cross-origin redirect blocked
+        handler = _SameOriginRedirectHandler("https://railway.gov.gr")
+        req = urllib.request.Request("https://railway.gov.gr/api/public/schedules/upcoming")
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(req, None, 302, "Found", {}, "https://evil.example/steal")
+
+        # 3. Oversized REST body rejected
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"x" * (MAX_REST_RESPONSE_BYTES + 1)
+        mock_resp.__enter__.return_value = mock_resp
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with self.assertRaises(RailwayAPIError) as cm:
+                self.client._get("/api/public/schedules/upcoming", max_retries=0)
+            self.assertIn("exceeded", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

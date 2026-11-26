@@ -491,9 +491,36 @@ def export_in_memory_geojson(
     return {"type": "FeatureCollection", "features": features}
 
 
+_CSV_FORMULA_PREFIXES: Tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+_CSV_LEADING_TRIGGER_CHARS: Tuple[str, ...] = ("=", "+", "-", "@")
+
+
+def _sanitize_csv_cell(value: Any) -> Any:
+    """Neutralize spreadsheet formula injection (CWE-1236) on string CSV cells.
+
+    Numeric types (int/float) and None are returned unchanged so negative numbers
+    remain valid numeric values, while string cells beginning with formula triggers
+    (=, +, -, @, tab, CR, or leading whitespace followed by =/+/-/@) are prefixed
+    with a single quote.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if value[0] in _CSV_FORMULA_PREFIXES or (
+        stripped and stripped[0] in _CSV_LEADING_TRIGGER_CHARS
+    ):
+        return f"'{value}"
+    return value
+
+
+def _sanitize_csv_row(row: Sequence[Any]) -> List[Any]:
+    """Sanitize every cell in a CSV output row against formula injection."""
+    return [_sanitize_csv_cell(cell) for cell in row]
+
+
 def export_in_memory_csv(
     record: Any,
-    target: Union[str, TextIO],
+    target: Union[str, os.PathLike[str], TextIO],
 ) -> int:
     """
     Export an in-memory TrainRecord trajectory directly to a CSV file or file-like stream.
@@ -502,13 +529,13 @@ def export_in_memory_csv(
 
     Args:
         record: TrainRecord containing .trail and .position.
-        target: Destination file path string or open TextIO stream.
+        target: Destination file path string/PathLike or open TextIO stream.
 
     Returns:
         Number of data rows exported.
     """
-    if isinstance(target, str):
-        clean_target = validate_export_path(target)
+    if isinstance(target, (str, os.PathLike)):
+        clean_target = validate_export_path(os.fspath(target))
         with open(clean_target, "w", newline="", encoding="utf-8") as f:
             return _write_in_memory_csv_stream(record, f)
     return _write_in_memory_csv_stream(record, target)
@@ -543,25 +570,27 @@ def _write_in_memory_csv_stream(record: Any, output: TextIO) -> int:
     points = _extract_in_memory_trajectory_points(record)
     for idx, pt in enumerate(points, start=1):
         writer.writerow(
-            [
-                idx,
-                pt["train_number"],
-                pt["schedule_id"],
-                pt["recorded_at"],
-                pt["lat"],
-                pt["lng"],
-                pt["speed"],
-                pt["course"],
-                pt["track_heading"],
-                pt["altitude"],
-                pt["delay_min"],
-                pt["status"],
-                pt["progress"],
-                pt["chainage_m"],
-                pt["dist_to_dest_m"],
-                pt["next_station"],
-                pt["corridor"],
-            ]
+            _sanitize_csv_row(
+                [
+                    idx,
+                    pt["train_number"],
+                    pt["schedule_id"],
+                    pt["recorded_at"],
+                    pt["lat"],
+                    pt["lng"],
+                    pt["speed"],
+                    pt["course"],
+                    pt["track_heading"],
+                    pt["altitude"],
+                    pt["delay_min"],
+                    pt["status"],
+                    pt["progress"],
+                    pt["chainage_m"],
+                    pt["dist_to_dest_m"],
+                    pt["next_station"],
+                    pt["corridor"],
+                ]
+            )
         )
     return len(points)
 
@@ -649,12 +678,19 @@ class HistoricalRepository:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         chunk_size: int = 2000,
+        order: str = "ASC",
+        limit: Optional[int] = None,
     ) -> Generator[TelemetryHistoryRow, None, None]:
         """
         Stream large telemetry sequences using a memory-efficient cursor generator.
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        order_upper = order.upper()
+        if order_upper not in ("ASC", "DESC"):
+            raise ValueError("Order must be 'ASC' or 'DESC'")
+        if limit is not None and limit < 0:
+            raise ValueError("Limit must be non-negative")
 
         canon_expr = _canon_ts_sql("recorded_at")
         where_clauses: List[str] = ["train_number = ?"]
@@ -669,13 +705,18 @@ class HistoricalRepository:
             include_end=True,
         )
 
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(limit)
+
         sql = (
             "SELECT id, train_number, schedule_id, recorded_at, lat, lng, speed, course, "
             "       track_heading, altitude, delay_min, status, progress, chainage_m, "
             "       dist_to_dest_m, next_station, corridor "
             "FROM telemetry_history "
             f"WHERE {' AND '.join(where_clauses)} "
-            f"ORDER BY ({canon_expr}) ASC, id ASC;"
+            f"ORDER BY ({canon_expr}) {order_upper}, id {order_upper}{limit_sql};"
         )
 
         with self.db.connection() as conn:
@@ -954,11 +995,30 @@ class HistoricalRepository:
         if limit < 0:
             raise ValueError("Limit must be non-negative")
 
-        query = """
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if service_date is not None and service_date.strip():
+            day_str = service_date.strip()
+            _append_recorded_at_filters(
+                where_clauses,
+                params,
+                col="th.recorded_at",
+                start_bound=normalize_start_bound(day_str),
+                end_bound=normalize_end_bound(day_str),
+                include_start=True,
+                include_end=True,
+            )
+        if corridor is not None and corridor.strip():
+            where_clauses.append("th.corridor = ?")
+            params.append(corridor.strip())
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        query = f"""
         SELECT 
             th.train_number,
             th.schedule_id,
-            DATE(th.recorded_at) AS service_date,
+            SUBSTR(th.recorded_at, 1, 10) AS service_date,
             th.corridor,
             MIN(th.recorded_at) AS first_seen,
             MAX(th.recorded_at) AS last_seen,
@@ -971,16 +1031,16 @@ class HistoricalRepository:
             st.destination
         FROM telemetry_history th
         LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
-        WHERE (? IS NULL OR DATE(th.recorded_at) = ?)
-          AND (? IS NULL OR th.corridor = ?)
-        GROUP BY th.train_number, DATE(th.recorded_at), th.corridor
+        {where_sql}
+        GROUP BY th.train_number, SUBSTR(th.recorded_at, 1, 10), th.corridor
         ORDER BY first_seen DESC
         LIMIT ?;
         """
+        params.append(limit)
         with self.db.connection() as conn:
             cur = conn.cursor()
             try:
-                cur.execute(query, (service_date, service_date, corridor, corridor, limit))
+                cur.execute(query, params)
                 return [TripSummary.from_db_row(row) for row in cur.fetchall()]
             finally:
                 cur.close()
@@ -1391,52 +1451,42 @@ class HistoricalRepository:
                 )
                 SELECT
                     station_name,
-                    COUNT(*) AS trip_count,
-                    AVG(dwell_seconds) AS avg_dwell,
-                    AVG(dep_delay) AS avg_delay,
-                    AVG(delay_added) AS avg_delay_added,
-                    MAX(dep_delay) AS max_delay
-                FROM dwell_events
-                GROUP BY station_name
-                HAVING COUNT(*) >= ?;
+                    dwell_seconds,
+                    dep_delay,
+                    delay_added
+                FROM dwell_events;
                 """
-                cur.execute(dwell_query, [*base_params, min_trips])
-                station_rows = cur.fetchall()
+                cur.execute(dwell_query, base_params)
+                dwell_rows = cur.fetchall()
 
-                # Also collect delay distribution for percentiles per station
-                station_delays: Dict[str, List[float]] = {}
-                delay_sample_query = f"""
-                SELECT
-                    th.next_station,
-                    COALESCE(th.delay_min, 0)
-                FROM telemetry_history th
-                LEFT JOIN scheduled_trips st ON th.schedule_id = st.schedule_id
-                LEFT JOIN trains t ON th.train_number = t.train_number
-                WHERE th.next_station IS NOT NULL AND th.next_station != ''
-                  AND {where_sql};
-                """
-                cur.execute(delay_sample_query, base_params)
-                for stn, dly in cur.fetchall():
-                    if stn not in station_delays:
-                        station_delays[stn] = []
-                    station_delays[stn].append(float(dly))
+                # Aggregate strictly over the dwell_events population (no raw-telemetry OOM
+                # and guaranteed mathematical consistency: min <= median <= p90 <= max).
+                station_events: Dict[str, List[Tuple[float, float, float]]] = {}
+                for row in dwell_rows:
+                    stn_name = str(row[0])
+                    dwell_sec = float(row[1])
+                    dep_dly = float(row[2])
+                    dly_added = float(row[3])
+                    station_events.setdefault(stn_name, []).append(
+                        (dwell_sec, dep_dly, dly_added)
+                    )
 
                 candidate_nodes: List[Dict[str, Any]] = []
 
-                for row in station_rows:
-                    stn_name = str(row[0])
-                    tr_cnt = int(row[1])
-                    avg_dwell = float(row[2])
-                    avg_dly = float(row[3])
-                    avg_dly_added = float(row[4])
-                    max_dly = float(row[5])
+                for stn_name, events in station_events.items():
+                    tr_cnt = len(events)
+                    if tr_cnt < min_trips:
+                        continue
 
-                    # Compute median and p90 from collected samples
-                    samples = sorted(station_delays.get(stn_name, [avg_dly]))
-                    n_samp = len(samples)
-                    med_dly = samples[n_samp // 2] if n_samp > 0 else avg_dly
-                    p90_idx = min(n_samp - 1, int(n_samp * 0.90)) if n_samp > 0 else 0
-                    p90_dly = samples[p90_idx] if n_samp > 0 else max_dly
+                    dwells = [e[0] for e in events]
+                    dep_delays = sorted(e[1] for e in events)
+                    deltas = [e[2] for e in events]
+
+                    avg_dwell = sum(dwells) / tr_cnt
+                    avg_dly_added = sum(deltas) / tr_cnt
+                    max_dly = dep_delays[-1]
+                    med_dly = float(statistics.median(dep_delays))
+                    p90_dly = _compute_percentile(dep_delays, 0.90)
 
                     # Bottleneck scoring formula:
                     # w1 = 0.50 (delay delta), w2 = 0.30 (dwell), w3 = 0.20 (max delay)
@@ -1864,6 +1914,15 @@ class HistoricalRepository:
     # 5. GIS & Data Export Engine
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _safe_finite(val: Any, default: float = 0.0) -> float:
+        """Return float(val) if finite, otherwise default (ensures allow_nan=False JSON)."""
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            return default
+        return f if math.isfinite(f) else default
+
     def export_trip_geojson(
         self,
         train_number: str,
@@ -1889,48 +1948,70 @@ class HistoricalRepository:
                 f"Unsupported feature_type '{feature_type}': must be 'LineString' or 'Point'"
             )
 
-        rows = self.get_train_history(
+        raw_rows = self.get_train_history(
             train_number=train_number,
             start_time=start_time,
             end_time=end_time,
             order="ASC",
         )
+        rows = [
+            r for r in raw_rows
+            if math.isfinite(r.lat) and math.isfinite(r.lng)
+        ]
 
         if not rows:
             return {"type": "FeatureCollection", "features": []}
 
+        # Enforce uniform coordinate dimensionality (all 3D only if every row has finite altitude)
+        use_3d = all(
+            r.altitude is not None and math.isfinite(r.altitude)
+            for r in rows
+        )
+
         if ft_lower == "linestring":
             coordinates = [
-                [r.lng, r.lat] if r.altitude is None else [r.lng, r.lat, r.altitude]
+                [r.lng, r.lat, r.altitude] if use_3d else [r.lng, r.lat]
                 for r in rows
             ]
+            speeds = [self._safe_finite(r.speed) for r in rows]
+            if len(coordinates) == 1:
+                # RFC 7946 §3.1.4 requires >= 2 positions for LineString; emit valid Point fallback
+                geometry: Dict[str, Any] = {
+                    "type": "Point",
+                    "coordinates": coordinates[0],
+                }
+            else:
+                geometry = {
+                    "type": "LineString",
+                    "coordinates": coordinates,
+                }
+            props: Dict[str, Any] = {
+                "train_number": train_number,
+                "corridor": rows[0].corridor,
+                "start_time": rows[0].recorded_at,
+                "end_time": rows[-1].recorded_at,
+                "total_points": len(rows),
+                "max_speed_kmh": max(speeds),
+                "avg_speed_kmh": round(sum(speeds) / len(speeds), 1),
+                "max_delay_min": max(r.delay_min for r in rows),
+                "timestamps": [r.recorded_at for r in rows],
+                "speeds_kmh": speeds,
+                "delays_min": [r.delay_min for r in rows],
+            }
+            if len(coordinates) == 1:
+                props["geometry_note"] = "single_point_fallback"
             feature = {
                 "type": "Feature",
                 "id": train_number,
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": coordinates,
-                },
-                "properties": {
-                    "train_number": train_number,
-                    "corridor": rows[0].corridor,
-                    "start_time": rows[0].recorded_at,
-                    "end_time": rows[-1].recorded_at,
-                    "total_points": len(rows),
-                    "max_speed_kmh": max(r.speed for r in rows),
-                    "avg_speed_kmh": round(sum(r.speed for r in rows) / len(rows), 1),
-                    "max_delay_min": max(r.delay_min for r in rows),
-                    "timestamps": [r.recorded_at for r in rows],
-                    "speeds_kmh": [r.speed for r in rows],
-                    "delays_min": [r.delay_min for r in rows],
-                },
+                "geometry": geometry,
+                "properties": props,
             }
             return {"type": "FeatureCollection", "features": [feature]}
 
         # Point feature collection
         features = []
         for r in rows:
-            coord = [r.lng, r.lat] if r.altitude is None else [r.lng, r.lat, r.altitude]
+            coord = [r.lng, r.lat, r.altitude] if use_3d else [r.lng, r.lat]
             features.append(
                 {
                     "type": "Feature",
@@ -1941,8 +2022,8 @@ class HistoricalRepository:
                     "properties": {
                         "train_number": r.train_number,
                         "recorded_at": r.recorded_at,
-                        "speed_kmh": r.speed,
-                        "course": r.course,
+                        "speed_kmh": self._safe_finite(r.speed),
+                        "course": self._safe_finite(r.course),
                         "delay_min": r.delay_min,
                         "status": r.status,
                         "next_station": r.next_station,
@@ -1957,7 +2038,7 @@ class HistoricalRepository:
     def export_csv(
         self,
         query_type: str,
-        target: Union[str, TextIO],
+        target: Union[str, os.PathLike[str], TextIO],
         params: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
@@ -1965,7 +2046,7 @@ class HistoricalRepository:
 
         Args:
             query_type: One of 'telemetry', 'trips', 'punctuality', 'dwell'.
-            target: Destination file path string or open TextIO stream.
+            target: Destination file path string/PathLike or open TextIO stream.
             params: Query filter dictionary (e.g. {'train_number': '1597'}).
 
         Returns:
@@ -1974,8 +2055,8 @@ class HistoricalRepository:
         params = params or {}
         qtype = query_type.strip().lower()
 
-        if isinstance(target, str):
-            clean_target = validate_export_path(target)
+        if isinstance(target, (str, os.PathLike)):
+            clean_target = validate_export_path(os.fspath(target))
             with open(clean_target, "w", newline="", encoding="utf-8") as f:
                 return self._write_csv_data(qtype, f, params)
         else:
@@ -1991,7 +2072,7 @@ class HistoricalRepository:
             train_number = params.get("train_number")
             if not train_number:
                 raise ValueError("params['train_number'] is required for telemetry CSV export")
-            rows = self.get_train_history(
+            rows = self.iter_train_history(
                 train_number=str(train_number),
                 start_time=params.get("start_time"),
                 end_time=params.get("end_time"),
@@ -2020,25 +2101,27 @@ class HistoricalRepository:
             writer.writerow(headers)
             for r in rows:
                 writer.writerow(
-                    [
-                        r.id,
-                        r.train_number,
-                        r.schedule_id,
-                        r.recorded_at,
-                        r.lat,
-                        r.lng,
-                        r.speed,
-                        r.course,
-                        r.track_heading,
-                        r.altitude,
-                        r.delay_min,
-                        r.status,
-                        r.progress,
-                        r.chainage_m,
-                        r.dist_to_dest_m,
-                        r.next_station,
-                        r.corridor,
-                    ]
+                    _sanitize_csv_row(
+                        [
+                            r.id,
+                            r.train_number,
+                            r.schedule_id,
+                            r.recorded_at,
+                            r.lat,
+                            r.lng,
+                            r.speed,
+                            r.course,
+                            r.track_heading,
+                            r.altitude,
+                            r.delay_min,
+                            r.status,
+                            r.progress,
+                            r.chainage_m,
+                            r.dist_to_dest_m,
+                            r.next_station,
+                            r.corridor,
+                        ]
+                    )
                 )
                 row_count += 1
 
@@ -2066,21 +2149,23 @@ class HistoricalRepository:
             writer.writerow(headers)
             for t in trips:
                 writer.writerow(
-                    [
-                        t.train_number,
-                        t.service_date,
-                        t.schedule_id,
-                        t.corridor,
-                        t.origin,
-                        t.destination,
-                        t.first_seen,
-                        t.last_seen,
-                        t.total_points,
-                        t.max_delay_min,
-                        t.avg_delay_min,
-                        t.max_speed_kmh,
-                        t.avg_speed_kmh,
-                    ]
+                    _sanitize_csv_row(
+                        [
+                            t.train_number,
+                            t.service_date,
+                            t.schedule_id,
+                            t.corridor,
+                            t.origin,
+                            t.destination,
+                            t.first_seen,
+                            t.last_seen,
+                            t.total_points,
+                            t.max_delay_min,
+                            t.avg_delay_min,
+                            t.max_speed_kmh,
+                            t.avg_speed_kmh,
+                        ]
+                    )
                 )
                 row_count += 1
 
@@ -2107,19 +2192,21 @@ class HistoricalRepository:
             writer.writerow(headers)
             for p in summaries:
                 writer.writerow(
-                    [
-                        p.corridor,
-                        p.total_trips,
-                        p.total_observations,
-                        p.avg_delay_min,
-                        p.max_delay_min,
-                        p.on_time_count,
-                        p.delayed_count,
-                        p.severe_delay_count,
-                        p.punctuality_rate_pct,
-                        p.start_date,
-                        p.end_date,
-                    ]
+                    _sanitize_csv_row(
+                        [
+                            p.corridor,
+                            p.total_trips,
+                            p.total_observations,
+                            p.avg_delay_min,
+                            p.max_delay_min,
+                            p.on_time_count,
+                            p.delayed_count,
+                            p.severe_delay_count,
+                            p.punctuality_rate_pct,
+                            p.start_date,
+                            p.end_date,
+                        ]
+                    )
                 )
                 row_count += 1
 
@@ -2146,15 +2233,17 @@ class HistoricalRepository:
             writer.writerow(headers)
             for d in dwells:
                 writer.writerow(
-                    [
-                        d.train_number,
-                        d.station_name,
-                        d.arrival_time,
-                        d.departure_time,
-                        d.dwell_seconds,
-                        d.arrival_delay_min,
-                        d.departure_delay_min,
-                    ]
+                    _sanitize_csv_row(
+                        [
+                            d.train_number,
+                            d.station_name,
+                            d.arrival_time,
+                            d.departure_time,
+                            d.dwell_seconds,
+                            d.arrival_delay_min,
+                            d.departure_delay_min,
+                        ]
+                    )
                 )
                 row_count += 1
 
@@ -2290,7 +2379,7 @@ class HistoricalRepository:
                     SELECT
                         id, train_number, schedule_id, recorded_at, lat, lng, speed, course,
                         track_heading, altitude, delay_min, status, progress, chainage_m,
-                        dist_to_dest_m, next_station, corridor
+                        dist_to_dest_m, next_station, corridor, vehicle_id, recorded_epoch
                     FROM telemetry_history
                     WHERE {where_sql}
                     ORDER BY ({canon_expr}) ASC, id ASC
@@ -2312,7 +2401,7 @@ class HistoricalRepository:
         normalized_telemetry: List[Tuple[Any, ...]] = [
             (
                 int(r[0]), r[1], r[2], self._iso_or_str(r[3]), r[4], r[5], r[6], r[7],
-                r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16],
+                r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18],
             )
             for r in telemetry_rows
         ]
@@ -2491,8 +2580,8 @@ class HistoricalRepository:
                     INSERT INTO telemetry_history (
                         train_number, schedule_id, recorded_at, lat, lng, speed, course,
                         track_heading, altitude, delay_min, status, progress, chainage_m,
-                        dist_to_dest_m, next_station, corridor
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        dist_to_dest_m, next_station, corridor, vehicle_id, recorded_epoch
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     new_rows,
                 )

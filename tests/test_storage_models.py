@@ -136,7 +136,7 @@ class TestStorageModels(unittest.TestCase):
         self.assertEqual(row.corridor, "PIRAIR")
 
         db_row = row.to_db_row()
-        self.assertEqual(len(db_row), 16)
+        self.assertEqual(len(db_row), 18)
         self.assertEqual(db_row[0], "2232")
         self.assertEqual(db_row[1], "sched-suburban-1")
         self.assertEqual(db_row[2], "2026-11-18T12:00:00.000000Z")
