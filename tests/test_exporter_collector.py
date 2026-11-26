@@ -1,11 +1,14 @@
 """Unit and integration test suite for exporter domain collectors and registry."""
 
+import concurrent.futures
+import math
 import os
+import stat
 import tempfile
 import time
 import unittest
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from exporter.collector import (
     BaseCollector,
@@ -18,6 +21,8 @@ from exporter.collector import (
 )
 from exporter.formatter import MetricsFormatter
 from exporter.models import MetricFamily, MetricType
+from storage.db import Database
+from tests.test_exporter_formatter import validate_openmetrics_100
 from tui.state import (
     ConflictAlert,
     ConflictSeverity,
@@ -198,7 +203,7 @@ class TestTrainTelemetryCollector(unittest.TestCase):
         self.assertEqual(max_speeds["IC52"], 160.0)  # Peak from trail
 
         # 4. Delayed tiers
-        fam_tiers = fam_map["railmon_trains_delayed_total"]
+        fam_tiers = fam_map["railmon_trains_delayed"]
         pathe_tiers = {
             dict(s.labels)["severity"]: s.value
             for s in fam_tiers.samples
@@ -275,7 +280,7 @@ class TestWatchdogMetricsCollector(unittest.TestCase):
 
         fams = self.collector.collect()
         fam_active = [f for f in fams if f.name == "railmon_watchdog_conflicts_active"][0]
-        fam_total = [f for f in fams if f.name == "railmon_watchdog_conflicts_total"][0]
+        fam_total = [f for f in fams if f.name == "railmon_watchdog_conflicts"][0]
 
         self.assertEqual(len(fam_active.samples), 1)
         self.assertEqual(fam_active.samples[0].value, 1.0)
@@ -284,7 +289,7 @@ class TestWatchdogMetricsCollector(unittest.TestCase):
 
         # Second scrape with same alert still active should keep cumulative counter at 1
         fams_second = self.collector.collect()
-        fam_total_second = [f for f in fams_second if f.name == "railmon_watchdog_conflicts_total"][0]
+        fam_total_second = [f for f in fams_second if f.name == "railmon_watchdog_conflicts"][0]
         self.assertEqual(fam_total_second.samples[0].value, 1.0)
 
         # Third scrape with a new alert should increment cumulative counter to 2
@@ -312,7 +317,7 @@ class TestWatchdogMetricsCollector(unittest.TestCase):
         self.store.get_snapshot = MagicMock(return_value=mock_snap2)
 
         fams_third = self.collector.collect()
-        fam_total_third = [f for f in fams_third if f.name == "railmon_watchdog_conflicts_total"][0]
+        fam_total_third = [f for f in fams_third if f.name == "railmon_watchdog_conflicts"][0]
         total_sum = sum(s.value for s in fam_total_third.samples)
         self.assertEqual(total_sum, 2.0)
 
@@ -390,7 +395,7 @@ class TestStreamMetricsCollector(unittest.TestCase):
         # Transition to CONNECTING -> should record 1 reconnect event
         self.store.set_connection_status(ConnectionStatus.CONNECTING, "Connecting...")
         fams1 = self.collector.collect()
-        fam_reconn1 = [f for f in fams1 if f.name == "railmon_stream_reconnects_total"][0]
+        fam_reconn1 = [f for f in fams1 if f.name == "railmon_stream_reconnects"][0]
         self.assertEqual(fam_reconn1.samples[0].value, 1.0)
 
         # Transition to CONNECTED -> connected gauge becomes 1.0
@@ -408,7 +413,7 @@ class TestStreamMetricsCollector(unittest.TestCase):
         fams = self.collector.collect()
         fam_map = {f.name: f for f in fams}
 
-        fam_msgs = fam_map["railmon_stream_messages_total"]
+        fam_msgs = fam_map["railmon_stream_messages"]
         self.assertEqual(fam_msgs.samples[0].value, 1337.0)
 
         fam_lat = fam_map["railmon_stream_latency_seconds"]
@@ -464,11 +469,11 @@ class TestStorageMetricsCollector(unittest.TestCase):
         self.assertEqual(fam_queue.samples[0].value, 42.0)
 
         # Records written
-        fam_rec = fam_map["railmon_db_records_total"]
+        fam_rec = fam_map["railmon_db_records"]
         self.assertEqual(fam_rec.samples[0].value, 10500.0)
 
         # Deadband suppressed
-        fam_dead = fam_map["railmon_db_deadband_suppressed_total"]
+        fam_dead = fam_map["railmon_db_deadband_suppressed"]
         self.assertEqual(fam_dead.samples[0].value, 3500.0)
 
 
@@ -485,7 +490,7 @@ class TestProcessMetricsCollector(unittest.TestCase):
         fam_map = {f.name: f for f in fams}
 
         # Build info
-        fam_info = fam_map["railmon_exporter_build_info"]
+        fam_info = fam_map["railmon_exporter_build"]
         self.assertEqual(fam_info.samples[0].value, 1.0)
         labels = dict(fam_info.samples[0].labels)
         self.assertEqual(labels["version"], "1.2.3")
@@ -496,7 +501,7 @@ class TestProcessMetricsCollector(unittest.TestCase):
         self.assertGreater(fam_uptime.samples[0].value, 0.0)
 
         # Scrapes total
-        fam_scrapes = fam_map["railmon_exporter_scrapes_total"]
+        fam_scrapes = fam_map["railmon_exporter_scrapes"]
         scrapes = {
             (dict(s.labels)["endpoint"], dict(s.labels)["status"]): s.value
             for s in fam_scrapes.samples
@@ -538,8 +543,12 @@ class TestCollectorEndToEndIntegration(unittest.TestCase):
 
         # Serialize into OpenMetrics 1.0.0 text
         open_bytes = MetricsFormatter.format_openmetrics_100(families)
+        self.assertEqual(validate_openmetrics_100(open_bytes), [])
         open_text = open_bytes.decode("utf-8")
-        self.assertIn("# UNIT railmon_active_trains trains", open_text)
+        self.assertIn("# UNIT railmon_train_delay_minutes minutes\n", open_text)
+        self.assertIn("# UNIT railmon_train_speed_kmh kmh\n", open_text)
+        self.assertIn("# UNIT railmon_exporter_uptime_seconds seconds\n", open_text)
+        self.assertNotIn("# UNIT railmon_active_trains", open_text)
         self.assertTrue(open_text.endswith("# EOF\n"))
 
     def test_tc_edge_04_extreme_kinematics_and_none_attributes(self) -> None:
@@ -610,6 +619,362 @@ class TestCollectorEndToEndIntegration(unittest.TestCase):
             collector_garbage = StorageMetricsCollector(db_path=garbage_file)
             fams_garbage = collector_garbage.collect()
             self.assertEqual(len(fams_garbage), 5)
+
+    def test_tc_omx_08_coupled_consist_label_disambiguation(self) -> None:
+        """TC-OMX-08: Coupled multiple-unit consist sharing train_number emits distinct valid series."""
+        store = TrainStateStore()
+        u1 = TrainPosition(
+            id="id-a", train_number="2232", locomotive_number="460103", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA",
+            speed=116.0, course=270.0, track_heading=270.0, lat=38.05, lng=23.72,
+            altitude=50.0, delay=3, progress=0.4, chainage_m=10000, corridor="PROASTIAKOS",
+            distance_to_destination_m=90000, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        u2 = TrainPosition(
+            id="id-b", train_number="2232", locomotive_number="460108", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA",
+            speed=115.0, course=270.0, track_heading=270.0, lat=38.0504, lng=23.7201,
+            altitude=50.0, delay=3, progress=0.4, chainage_m=10050, corridor="PROASTIAKOS",
+            distance_to_destination_m=89950, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        store.update_positions([u1, u2])
+
+        fams = TrainTelemetryCollector(store).collect()
+        fam_map = {f.name: f for f in fams}
+
+        speed_labels = {dict(s.labels)["train_number"]: s.value for s in fam_map["railmon_train_speed_kmh"].samples}
+        max_labels = {dict(s.labels)["train_number"]: s.value for s in fam_map["railmon_train_max_speed_kmh"].samples}
+        self.assertEqual(speed_labels, {"2232/460103": 116.0, "2232/460108": 115.0})
+        self.assertEqual(max_labels, {"2232/460103": 116.0, "2232/460108": 115.0})
+
+        om_bytes = MetricsFormatter.format_openmetrics_100(fams)
+        self.assertEqual(validate_openmetrics_100(om_bytes), [])
+
+    def test_tc_omx_09_switchers_and_modem_handover_disambiguation(self) -> None:
+        """TC-OMX-09: Unassigned switchers, same-loco modem handovers, and unique trains disambiguate cleanly."""
+        store = TrainStateStore()
+        sw1 = TrainPosition(
+            id="id-c", train_number="Unknown", locomotive_number=None, name="Unknown",
+            train_type="SHUNT", service_type="Freight", status="IDLE",
+            origin="", destination="", next_station="", speed=0.0, course=0.0,
+            track_heading=0.0, lat=37.98, lng=23.69, altitude=10.0, delay=0,
+            progress=0.0, chainage_m=0, corridor="PATHE", distance_to_destination_m=0,
+            timestamp="2026-11-26T05:00:00Z", schedule_id=None,
+        )
+        sw2 = TrainPosition(
+            id="id-d", train_number="Unknown", locomotive_number=None, name="Unknown",
+            train_type="SHUNT", service_type="Freight", status="IDLE",
+            origin="", destination="", next_station="", speed=5.0, course=0.0,
+            track_heading=0.0, lat=37.981, lng=23.691, altitude=10.0, delay=0,
+            progress=0.0, chainage_m=0, corridor="PATHE", distance_to_destination_m=0,
+            timestamp="2026-11-26T05:00:00Z", schedule_id=None,
+        )
+        ho_old = _make_train_position("sess-old", "IC52", speed=120.0, delay=2.0, corridor="PATHE")
+        ho_new = _make_train_position("sess-new", "IC52", speed=122.0, delay=2.0, corridor="PATHE")
+        unique_ic54 = _make_train_position("u-54", "IC54", speed=140.0, delay=1.0, corridor="PATHE")
+        store.update_positions([sw1, sw2, ho_old, ho_new, unique_ic54])
+
+        fams = TrainTelemetryCollector(store).collect()
+        fam_speed = [f for f in fams if f.name == "railmon_train_speed_kmh"][0]
+        tns = {dict(s.labels)["train_number"] for s in fam_speed.samples}
+        self.assertEqual(
+            tns,
+            {"Unknown/id-c", "Unknown/id-d", "IC52/120-001#sess-old", "IC52/120-001#sess-new", "IC54"},
+        )
+        self.assertEqual(validate_openmetrics_100(MetricsFormatter.format_openmetrics_100(fams)), [])
+
+    def test_tc_omx_10_max_speed_cross_type_collision_and_non_finite_isolation(self) -> None:
+        """TC-OMX-10: Cross-type same train_number avoids fam_max_speed collision and non-finite delay/speed stays finite."""
+        store = TrainStateStore()
+        p1 = TrainPosition(
+            id="t-1", train_number="50", locomotive_number="120-001", name="50",
+            train_type="IC", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="SKG", next_station="LAR", speed=150.0,
+            course=0.0, track_heading=0.0, lat=38.5, lng=22.8, altitude=50.0,
+            delay=4.0, progress=0.5, chainage_m=200000, corridor="PATHE",
+            distance_to_destination_m=200000, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        p2 = TrainPosition(
+            id="t-2", train_number="50", locomotive_number="460-002", name="50",
+            train_type="PR", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="SKG", next_station="LAR", speed=95.0,
+            course=0.0, track_heading=0.0, lat=38.6, lng=22.8, altitude=50.0,
+            delay=6.0, progress=0.5, chainage_m=210000, corridor="PATHE",
+            distance_to_destination_m=190000, timestamp="2026-11-26T05:00:00Z", schedule_id="s2",
+        )
+        p_nan = TrainPosition(
+            id="t-nan", train_number="99", locomotive_number=None, name="99",
+            train_type="IC", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="SKG", next_station="LAR", speed=float("nan"),
+            course=0.0, track_heading=0.0, lat=38.7, lng=22.8, altitude=50.0,
+            delay=float("nan"), progress=0.5, chainage_m=220000, corridor="PATHE",
+            distance_to_destination_m=180000, timestamp="2026-11-26T05:00:00Z", schedule_id="s3",
+        )
+        p_inf = TrainPosition(
+            id="t-inf", train_number="100", locomotive_number=None, name="100",
+            train_type="IC", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="SKG", next_station="LAR", speed=float("inf"),
+            course=0.0, track_heading=0.0, lat=38.8, lng=22.8, altitude=50.0,
+            delay=float("-inf"), progress=0.5, chainage_m=225000, corridor="PATHE",
+            distance_to_destination_m=175000, timestamp="2026-11-26T05:00:00Z", schedule_id="s4",
+        )
+        store.update_positions([p1, p2, p_nan])
+        with store._lock:
+            store._trains["t-inf"] = TrainRecord(position=p_inf)
+
+        fams = TrainTelemetryCollector(store).collect()
+        fam_map = {f.name: f for f in fams}
+        max_keys = [s.labels for s in fam_map["railmon_train_max_speed_kmh"].samples]
+        self.assertEqual(len(max_keys), len(set(max_keys)))
+        avg_delay = fam_map["railmon_corridor_average_delay_minutes"].samples[0].value
+        self.assertTrue(math.isfinite(avg_delay))
+        self.assertAlmostEqual(avg_delay, (4.0 + 6.0 + 0.0 + 0.0) / 4.0)
+        self.assertEqual(validate_openmetrics_100(MetricsFormatter.format_openmetrics_100(fams)), [])
+
+    def test_tc_omx_11_real_sqlite_storage_metrics_collector(self) -> None:
+        """TC-OMX-11: StorageMetricsCollector queries real SQLite DB via repo.get_database_stats()."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "real_metrics.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T05:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T06:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at) "
+                        "VALUES ('IC52', 'IC', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z')"
+                    )
+                    for idx in range(5):
+                        cur.execute(
+                            "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor) "
+                            "VALUES ('IC52', ?, 38.0, 23.7, 120.0, 0.0, 2, 'PATHE')",
+                            (f"2026-11-26T05:00:0{idx}.000000Z",),
+                        )
+            finally:
+                db.close()
+
+            collector = StorageMetricsCollector(db_path=db_path)
+            fams = collector.collect()
+            fam_map = {f.name: f for f in fams}
+
+            self.assertEqual(fam_map["railmon_db_records"].samples[0].value, 5.0)
+            self.assertEqual(fam_map["railmon_db_sessions"].samples[0].value, 2.0)
+            file_sizes = {dict(s.labels)["file_type"]: s.value for s in fam_map["railmon_db_file_size_bytes"].samples}
+            self.assertGreater(file_sizes["main"], 0.0)
+
+            om_bytes = MetricsFormatter.format_openmetrics_100(fams)
+            self.assertEqual(validate_openmetrics_100(om_bytes), [])
+            om_text = om_bytes.decode("utf-8")
+            self.assertIn('railmon_db_records_total{table="telemetry_history"} 5\n', om_text)
+            self.assertIn('railmon_db_sessions_total{mode="sqlite"} 2\n', om_text)
+
+    def test_tc_omx_12_storage_collector_active_wal_and_readonly_file(self) -> None:
+        """TC-OMX-12: StorageMetricsCollector reads under active WAL writer and chmod read-only file with special path chars."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sub = os.path.join(tmpdir, "railmon metrics #1 100%")
+            os.makedirs(sub)
+            db_path = os.path.join(sub, "live #wal.db")
+            writer = Database(db_path)
+            try:
+                with writer.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T05:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at) "
+                        "VALUES ('IC52', 'IC', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z')"
+                    )
+                    cur.execute(
+                        "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor) "
+                        "VALUES ('IC52', '2026-11-26T05:00:00.000000Z', 38.0, 23.7, 130.0, 0.0, 1, 'PATHE')"
+                    )
+
+                # Scrape while writer connection is still open with active WAL
+                collector_live = StorageMetricsCollector(db_path=db_path)
+                fams_live = {f.name: f for f in collector_live.collect()}
+                self.assertEqual(fams_live["railmon_db_records"].samples[0].value, 1.0)
+                self.assertEqual(fams_live["railmon_db_sessions"].samples[0].value, 1.0)
+            finally:
+                writer.checkpoint_wal("TRUNCATE")
+                writer.close()
+
+            # Mark database read-only and verify scrape succeeds without mutation
+            os.chmod(db_path, stat.S_IREAD)
+            try:
+                collector_ro = StorageMetricsCollector(db_path=db_path)
+                fams_ro = {f.name: f for f in collector_ro.collect()}
+                self.assertEqual(fams_ro["railmon_db_records"].samples[0].value, 1.0)
+                self.assertEqual(fams_ro["railmon_db_sessions"].samples[0].value, 1.0)
+            finally:
+                os.chmod(db_path, stat.S_IREAD | stat.S_IWRITE)
+
+    def test_tc_omx_13_storage_collector_non_poisoning_cache_and_thread_safety(self) -> None:
+        """TC-OMX-13: Transient fetch failures preserve last-known-good cached stats and concurrent scrapes are safe."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "cache_test.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T05:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at) "
+                        "VALUES ('IC52', 'IC', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z')"
+                    )
+                    for idx in range(3):
+                        cur.execute(
+                            "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor) "
+                            "VALUES ('IC52', ?, 38.0, 23.7, 120.0, 0.0, 0, 'PATHE')",
+                            (f"2026-11-26T05:00:0{idx}.000000Z",),
+                        )
+            finally:
+                db.close()
+
+            collector = StorageMetricsCollector(db_path=db_path, stats_cache_ttl_seconds=0.0)
+            fams_ok = {f.name: f for f in collector.collect()}
+            self.assertEqual(fams_ok["railmon_db_records"].samples[0].value, 3.0)
+
+            # Simulate transient error on next TTL refresh -> prior cached stats MUST be preserved
+            with patch.object(collector, "_fetch_db_stats", return_value=None):
+                fams_err = {f.name: f for f in collector.collect()}
+                self.assertEqual(fams_err["railmon_db_records"].samples[0].value, 3.0)
+                self.assertEqual(fams_err["railmon_db_sessions"].samples[0].value, 1.0)
+
+            # Concurrent scrapes across 8 threads
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(collector.collect) for _ in range(16)]
+                results = [fut.result(timeout=5.0) for fut in futures]
+            self.assertEqual(len(results), 16)
+            for fam_list in results:
+                fm = {f.name: f for f in fam_list}
+                self.assertEqual(fm["railmon_db_records"].samples[0].value, 3.0)
+
+    def test_tc_omx_15_full_five_collector_kitchen_sink_openmetrics_and_prometheus_parity(self) -> None:
+        """TC-OMX-15: Full 5-collector scrape passes strict OpenMetrics 1.0.0 validation and matches Prometheus sample names."""
+        from train_tracker import GhostTrain
+
+        store = TrainStateStore()
+        store.set_connection_status(ConnectionStatus.CONNECTED, "Live")
+        u1 = TrainPosition(
+            id="id-a", train_number="2232", locomotive_number="460103", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA",
+            speed=180.0, course=270.0, track_heading=270.0, lat=38.05, lng=23.72,
+            altitude=50.0, delay=3, progress=0.4, chainage_m=10000, corridor="PROASTIAKOS",
+            distance_to_destination_m=90000, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        u2 = TrainPosition(
+            id="id-b", train_number="2232", locomotive_number="460108", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA",
+            speed=115.0, course=270.0, track_heading=270.0, lat=38.0504, lng=23.7201,
+            altitude=50.0, delay=20, progress=0.4, chainage_m=10050, corridor="PROASTIAKOS",
+            distance_to_destination_m=89950, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        sw1 = TrainPosition(
+            id="id-c", train_number="Unknown", locomotive_number=None, name="Unknown",
+            train_type="SHUNT", service_type="Freight", status="IDLE",
+            origin="", destination="", next_station="", speed=0.0, course=0.0,
+            track_heading=0.0, lat=37.98, lng=23.69, altitude=10.0, delay=0,
+            progress=0.0, chainage_m=0, corridor="PATHE", distance_to_destination_m=0,
+            timestamp="2026-11-26T05:00:00Z", schedule_id=None,
+        )
+        sw2 = TrainPosition(
+            id="id-d", train_number="Unknown", locomotive_number=None, name="Unknown",
+            train_type="SHUNT", service_type="Freight", status="IDLE",
+            origin="", destination="", next_station="", speed=5.0, course=0.0,
+            track_heading=0.0, lat=37.981, lng=23.691, altitude=10.0, delay=0,
+            progress=0.0, chainage_m=0, corridor="PATHE", distance_to_destination_m=0,
+            timestamp="2026-11-26T05:00:00Z", schedule_id=None,
+        )
+        store.update_positions([u1, u2, sw1, sw2])
+        store.update_ghost_trains([
+            GhostTrain(
+                id="schedule:g-1", train_number="IC56", schedule_id="g-1",
+                schedule_number="IC56-20261126", name="IC56",
+                service_type="InterCity", category="InterCity",
+                origin="Athens", destination="Thessaloniki", corridor="PATHE",
+                scheduled_departure="2026-11-26T05:00:00.000Z",
+                scheduled_arrival="2026-11-26T09:15:00.000Z",
+                delay=0, progress=0.1, timestamp="2026-11-26T05:10:00.000Z",
+            )
+        ])
+        store.record_stream_event("trainPositionsUx")
+        store.record_stream_event("scheduleCards")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "kitchen_sink.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T05:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at) "
+                        "VALUES ('IC52', 'IC', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z')"
+                    )
+                    cur.execute(
+                        "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor) "
+                        "VALUES ('IC52', '2026-11-26T05:00:00.000000Z', 38.0, 23.7, 120.0, 0.0, 2, 'PATHE')"
+                    )
+            finally:
+                db.close()
+
+            reg = MetricRegistry()
+            reg.register(TrainTelemetryCollector(store))
+            reg.register(WatchdogMetricsCollector(store))
+            reg.register(StreamMetricsCollector(store))
+            reg.register(StorageMetricsCollector(db_path=db_path))
+            proc = ProcessMetricsCollector(version="2.0.0")
+            proc.record_scrape(0.004, "/metrics", 200)
+            reg.register(proc)
+
+            # Verify uptime remains non-negative even if wall clock jumps backward
+            with patch("exporter.collector.time.time", return_value=0.0):
+                families = reg.collect_all()
+
+            om_bytes = MetricsFormatter.format_openmetrics_100(families)
+            prom_bytes = MetricsFormatter.format_prometheus_004(families)
+            self.assertEqual(validate_openmetrics_100(om_bytes), [])
+
+            # Extract sample lines (ignoring comments/EOF) and verify exact sample-name parity
+            om_sample_names = {
+                line.split("{", 1)[0].split(" ", 1)[0]
+                for line in om_bytes.decode("utf-8").splitlines()
+                if line and not line.startswith("#")
+            }
+            prom_sample_names = {
+                line.split("{", 1)[0].split(" ", 1)[0]
+                for line in prom_bytes.decode("utf-8").splitlines()
+                if line and not line.startswith("#")
+            }
+            self.assertEqual(om_sample_names, prom_sample_names)
+            self.assertIn("railmon_db_records_total", om_sample_names)
+            self.assertIn("railmon_db_sessions_total", om_sample_names)
+            self.assertIn("railmon_trains_delayed", om_sample_names)
+            self.assertNotIn("railmon_trains_delayed_total", om_sample_names)
+
+    def test_tc_omx_18_empty_initialized_sqlite_db_reports_zero_counts(self) -> None:
+        """TC-OMX-18: Valid empty initialized SQLite DB exports 0 rows and 0 sessions cleanly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "empty_schema.db")
+            db = Database(db_path)
+            db.close()
+
+            collector = StorageMetricsCollector(db_path=db_path)
+            fams = collector.collect()
+            fam_map = {f.name: f for f in fams}
+            self.assertEqual(fam_map["railmon_db_records"].samples[0].value, 0.0)
+            self.assertEqual(fam_map["railmon_db_sessions"].samples[0].value, 0.0)
+            self.assertEqual(validate_openmetrics_100(MetricsFormatter.format_openmetrics_100(fams)), [])
 
 
 if __name__ == "__main__":

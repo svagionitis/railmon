@@ -247,6 +247,7 @@ class TestPackagingAndVersioning(unittest.TestCase):
             "signal",
             "socket",
             "socketserver",
+            "sqlite3",
             "sys",
             "threading",
             "time",

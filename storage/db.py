@@ -5,6 +5,7 @@ Database connection factory and transaction manager.
 import contextlib
 import logging
 import os
+from pathlib import Path
 import sqlite3
 import threading
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
@@ -20,6 +21,11 @@ _WAL_CHECKPOINT_SQL: Dict[str, str] = {
     "RESTART": "PRAGMA wal_checkpoint(RESTART);",
     "TRUNCATE": "PRAGMA wal_checkpoint(TRUNCATE);",
 }
+
+
+def _build_readonly_sqlite_uri(db_path: str) -> str:
+    """Build a percent-encoded RFC 3986 SQLite read-only URI for local filesystem paths."""
+    return f"{Path(os.path.abspath(db_path)).as_uri()}?mode=ro"
 
 
 def _convert_timestamp(val: bytes) -> Any:
@@ -41,9 +47,20 @@ class Database:
     Configures Write-Ahead Logging (WAL) and memory pragmas for high-throughput ingestion.
     """
 
-    def __init__(self, db_path: str = "railway_history.db", auto_migrate: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str = "railway_history.db",
+        auto_migrate: bool = True,
+        read_only: bool = False,
+    ) -> None:
         self.db_path = db_path
+        self.read_only = bool(read_only)
         self._is_memory = (db_path == ":memory:") or db_path.startswith("file::memory:")
+
+        if self.read_only and self._is_memory:
+            raise ValueError("Cannot open an in-memory SQLite database in read-only mode")
+        if self.read_only and auto_migrate:
+            raise ValueError("auto_migrate=True is incompatible with read_only=True")
 
         self._local = threading.local()
         self._conn_lock = threading.Lock()
@@ -63,11 +80,19 @@ class Database:
                 self.close()
                 raise
 
-        self._ensure_secure_permissions()
+        if not self.read_only:
+            self._ensure_secure_permissions()
+
+    def _assert_writable(self, operation: str) -> None:
+        """Raise sqlite3.OperationalError when mutating operations target a read-only handle."""
+        if self.read_only:
+            raise sqlite3.OperationalError(
+                f"Cannot perform '{operation}': database handle is opened in read-only mode"
+            )
 
     def _ensure_secure_permissions(self) -> None:
         """Enforce owner-only permissions (0600) on POSIX database and WAL companion files."""
-        if self._is_memory or os.name == "nt":
+        if self._is_memory or self.read_only or os.name == "nt":
             return
 
         abs_path = os.path.abspath(self.db_path)
@@ -83,6 +108,7 @@ class Database:
 
     def init_schema(self) -> int:
         """Explicitly initialize all required database tables, indices, and verify integrity."""
+        self._assert_writable("init_schema")
         with self.connection() as conn:
             return SchemaManager.initialize_schema(conn)
 
@@ -93,11 +119,38 @@ class Database:
 
     def optimize(self) -> None:
         """Run PRAGMA optimize on the active connection."""
+        self._assert_writable("optimize")
         with self.connection() as conn:
             SchemaManager.optimize(conn)
 
+    def _create_readonly_connection(self) -> sqlite3.Connection:
+        """Create a lightweight, strictly read-only SQLite URI connection."""
+        conn = sqlite3.connect(
+            _build_readonly_sqlite_uri(self.db_path),
+            uri=True,
+            timeout=2.0,
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA query_only = ON;")
+            cursor.execute("PRAGMA busy_timeout = 2000;")
+            cursor.execute("PRAGMA temp_store = MEMORY;")
+            cursor.execute("PRAGMA cache_size = -4000;")  # Lightweight 4MB read cache
+        except Exception:
+            cursor.close()
+            conn.close()
+            raise
+        else:
+            cursor.close()
+        return conn
+
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new SQLite connection configured with optimal ingestion pragmas."""
+        if self.read_only:
+            return self._create_readonly_connection()
         if not self._is_memory and os.name != "nt":
             old_umask = os.umask(0o077)
             try:
@@ -176,6 +229,7 @@ class Database:
     @contextlib.contextmanager
     def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
         """Context manager for atomic write transactions using BEGIN IMMEDIATE."""
+        self._assert_writable("transaction")
         with self.connection() as conn:
             cursor = conn.cursor()
             try:
@@ -196,6 +250,7 @@ class Database:
 
     def checkpoint_wal(self, mode: str = "PASSIVE") -> None:
         """Trigger WAL checkpoint to write changes to base file (PASSIVE, FULL, RESTART, TRUNCATE)."""
+        self._assert_writable("checkpoint_wal")
         if not isinstance(mode, str):
             raise ValueError(f"Invalid WAL checkpoint mode: {mode!r}")
 

@@ -795,6 +795,8 @@ class TestMultiplexedGtfsAndMetrics(unittest.TestCase):
 
     def test_tc_f101_21_prometheus_ghost_gauge_and_multiplexed_event_counter(self) -> None:
         """TC-F101-21: Exporter reports railmon_ghost_trains and railmon_stream_events_total."""
+        from exporter.formatter import MetricsFormatter
+
         store = TrainStateStore()
         store.update_positions([_make_live_pos(tid="live-1", corridor="PATHE")])
         store.update_ghost_trains([_make_ghost(corridor="PIRAIR")])
@@ -809,15 +811,24 @@ class TestMultiplexedGtfsAndMetrics(unittest.TestCase):
         self.assertEqual(active_samples, {"PATHE": 1.0})
         self.assertEqual(ghost_samples, {"PIRAIR": 1.0})
 
-        s_fams = {f.name: f for f in StreamMetricsCollector(store).collect()}
+        stream_fams_list = StreamMetricsCollector(store).collect()
+        s_fams = {f.name: f for f in stream_fams_list}
         evt_samples = {
             dict(s.labels)["event_type"]: s.value
-            for s in s_fams["railmon_stream_events_total"].samples
+            for s in s_fams["railmon_stream_events"].samples
         }
         self.assertEqual(evt_samples["trainHistory"], 1.0)
         self.assertEqual(evt_samples["scheduleCards"], 1.0)
         self.assertEqual(evt_samples["delayUpdates"], 1.0)
         self.assertEqual(evt_samples["trainPositionsUx"], 1.0)
+
+        # Verify wire outputs in both OpenMetrics 1.0.0 and Prometheus 0.0.4 emit _total sample names
+        om_text = MetricsFormatter.format_openmetrics_100(stream_fams_list).decode("utf-8")
+        prom_text = MetricsFormatter.format_prometheus_004(stream_fams_list).decode("utf-8")
+        self.assertIn("# TYPE railmon_stream_events counter\n", om_text)
+        self.assertIn('railmon_stream_events_total{event_type="trainHistory"} 1\n', om_text)
+        self.assertIn("# TYPE railmon_stream_events_total counter\n", prom_text)
+        self.assertIn('railmon_stream_events_total{event_type="trainHistory"} 1\n', prom_text)
 
 
 if __name__ == "__main__":

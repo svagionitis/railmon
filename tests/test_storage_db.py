@@ -392,6 +392,64 @@ class TestStorageDatabase(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_tc_omx_14_read_only_database_contract(self):
+        """TC-OMX-14: Database(read_only=True) reads WAL DBs safely, blocks writes, and handles special paths."""
+        # Incompatible constructor combinations must fail loud
+        with self.assertRaises(ValueError):
+            Database(":memory:", auto_migrate=False, read_only=True)
+        with self.assertRaises(ValueError):
+            Database("unused.db", auto_migrate=True, read_only=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Nonexistent file must fail on read without creating a file
+            missing_path = os.path.join(tmpdir, "does_not_exist.db")
+            ro_missing = Database(missing_path, auto_migrate=False, read_only=True)
+            try:
+                with self.assertRaises(sqlite3.OperationalError):
+                    with ro_missing.connection() as conn:
+                        conn.execute("SELECT 1;")
+                self.assertFalse(os.path.exists(missing_path))
+            finally:
+                ro_missing.close()
+
+            # Populated DB under special path characters (#, %, spaces)
+            special_dir = os.path.join(tmpdir, "rail #1 100% dir")
+            os.makedirs(special_dir)
+            db_path = os.path.join(special_dir, "history #test.db")
+            rw_db = Database(db_path)
+            try:
+                with rw_db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO trains (train_number, first_observed_at, last_observed_at) "
+                        "VALUES ('IC52', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z');"
+                    )
+            finally:
+                rw_db.close()
+
+            ro_db = Database(db_path, auto_migrate=False, read_only=True)
+            try:
+                with ro_db.connection() as conn:
+                    self.assertEqual(conn.execute("PRAGMA query_only;").fetchone()[0], 1)
+                    cnt = conn.execute("SELECT COUNT(*) FROM trains;").fetchone()[0]
+                    self.assertEqual(cnt, 1)
+                    with self.assertRaises(sqlite3.OperationalError):
+                        conn.execute(
+                            "INSERT INTO trains (train_number, first_observed_at, last_observed_at) "
+                            "VALUES ('IC99', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z');"
+                        )
+
+                with self.assertRaises(sqlite3.OperationalError):
+                    with ro_db.transaction() as cur:
+                        cur.execute("SELECT 1;")
+                with self.assertRaises(sqlite3.OperationalError):
+                    ro_db.checkpoint_wal("PASSIVE")
+                with self.assertRaises(sqlite3.OperationalError):
+                    ro_db.init_schema()
+                with self.assertRaises(sqlite3.OperationalError):
+                    ro_db.optimize()
+            finally:
+                ro_db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

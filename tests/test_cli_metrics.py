@@ -346,6 +346,80 @@ class TestWebDaemonCrossExposing(unittest.TestCase):
         body = resp.read().decode("utf-8")
         self.assertIn("railmon_active_trains", body)
 
+    def test_tc_omx_17_web_daemon_openmetrics_strict_validation(self) -> None:
+        """TC-OMX-17: WebMapServer /metrics passes strict OpenMetrics 1.0.0 validation with coupled consists and SQLite DB."""
+        from storage.db import Database
+        from tests.test_exporter_formatter import validate_openmetrics_100
+
+        store = TrainStateStore()
+        u1 = TrainPosition(
+            id="web-a", train_number="2232", locomotive_number="460103", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA", speed=110.0,
+            course=270.0, track_heading=270.0, lat=38.05, lng=23.72, altitude=50.0,
+            delay=2, progress=0.4, chainage_m=10000, corridor="PROASTIAKOS",
+            distance_to_destination_m=90000, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        u2 = TrainPosition(
+            id="web-b", train_number="2232", locomotive_number="460108", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA", speed=109.0,
+            course=270.0, track_heading=270.0, lat=38.0503, lng=23.7201, altitude=50.0,
+            delay=2, progress=0.4, chainage_m=10050, corridor="PROASTIAKOS",
+            distance_to_destination_m=89950, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        store.update_positions([u1, u2])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "web_omx.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T05:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at) "
+                        "VALUES ('2232', 'DES', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z')"
+                    )
+                    cur.execute(
+                        "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor) "
+                        "VALUES ('2232', '2026-11-26T05:00:00.000000Z', 38.05, 23.72, 110.0, 270.0, 2, 'PROASTIAKOS')"
+                    )
+            finally:
+                db.close()
+
+            srv = WebMapServer(
+                server_address=("127.0.0.1", 0),
+                store=store,
+                broadcaster=SSEBroadcaster(),
+                config=ServerConfig(
+                    host="127.0.0.1",
+                    port=8080,
+                    cors_enabled=True,
+                    demo_mode=True,
+                    db_path=db_path,
+                    record_enabled=True,
+                ),
+            )
+            srv.start(background=True)
+            try:
+                opener = build_opener(ProxyHandler({}))
+                req = Request(
+                    url=f"http://127.0.0.1:{srv.server_port}/metrics",
+                    headers={"Accept": "application/openmetrics-text; version=1.0.0"},
+                )
+                with opener.open(req, timeout=5.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                    raw = resp.read()
+                    self.assertEqual(validate_openmetrics_100(raw), [])
+                    text = raw.decode("utf-8")
+                    self.assertIn('train_number="2232/460103"', text)
+                    self.assertIn('train_number="2232/460108"', text)
+                    self.assertIn('railmon_db_records_total{table="telemetry_history"} 1\n', text)
+            finally:
+                srv.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

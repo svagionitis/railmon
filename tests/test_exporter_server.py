@@ -4,7 +4,9 @@ import concurrent.futures
 import gzip
 import json
 import logging
+import os
 import socket
+import tempfile
 import time
 import unittest
 from typing import Any, List, Optional
@@ -15,13 +17,21 @@ from exporter.collector import (
     BaseCollector,
     MetricRegistry,
     ProcessMetricsCollector,
+    StorageMetricsCollector,
+    StreamMetricsCollector,
+    TrainTelemetryCollector,
+    WatchdogMetricsCollector,
 )
 from exporter.models import ExporterConfig, MetricFamily, MetricType
 from exporter.server import MetricsRequestHandler, MetricsServer
+from storage.db import Database
+from tests.test_exporter_formatter import validate_openmetrics_100
+from train_tracker import TrainPosition
+from tui.state import ConnectionStatus, TrainStateStore
 
 
 class SyntheticDummyCollector(BaseCollector):
-    """Dummy collector returning deterministic metrics for server tests."""
+    """Dummy collector returning deterministic OpenMetrics-compliant metrics for server tests."""
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -32,18 +42,24 @@ class SyntheticDummyCollector(BaseCollector):
             "railmon_test_gauge",
             "Synthetic test gauge for server verification",
             MetricType.GAUGE,
-            unit="units",
         )
         fam.add_sample(labels={"corridor": "PATHE"}, value=42.0)
+
+        duration_fam = MetricFamily(
+            "railmon_test_duration_seconds",
+            "Synthetic test duration gauge for unit verification",
+            MetricType.GAUGE,
+            unit="seconds",
+        )
+        duration_fam.add_sample(labels={"corridor": "PATHE"}, value=1.5)
 
         counter_fam = MetricFamily(
             "railmon_test_counter",
             "Synthetic test counter for server verification",
             MetricType.COUNTER,
-            unit="events",
         )
         counter_fam.add_sample(labels={"corridor": "PATHE"}, value=float(self.call_count))
-        return [fam, counter_fam]
+        return [fam, duration_fam, counter_fam]
 
 
 class TestExporterServer(unittest.TestCase):
@@ -119,11 +135,13 @@ class TestExporterServer(unittest.TestCase):
             self.assertIn("application/openmetrics-text", ct)
             self.assertIn("version=1.0.0", ct)
 
-            body = resp.read().decode("utf-8")
+            raw_body = resp.read()
+            self.assertEqual(validate_openmetrics_100(raw_body), [])
+            body = raw_body.decode("utf-8")
             self.assertIn("# HELP railmon_test_gauge", body)
             self.assertIn("# TYPE railmon_test_gauge gauge", body)
-            self.assertIn("# UNIT railmon_test_gauge units", body)
-            # OpenMetrics counter must have _total suffix
+            self.assertIn("# UNIT railmon_test_duration_seconds seconds", body)
+            # OpenMetrics counter must have _total suffix on samples
             self.assertIn("railmon_test_counter_total", body)
             # Mandatory terminal line
             self.assertTrue(body.rstrip().endswith("# EOF"))
@@ -304,8 +322,8 @@ class TestExporterServer(unittest.TestCase):
         families = self.process_collector.collect()
         fam_map = {f.name: f for f in families}
 
-        self.assertIn("railmon_exporter_scrapes_total", fam_map)
-        scrapes_fam = fam_map["railmon_exporter_scrapes_total"]
+        self.assertIn("railmon_exporter_scrapes", fam_map)
+        scrapes_fam = fam_map["railmon_exporter_scrapes"]
         scrape_samples = {s.labels: s.value for s in scrapes_fam.samples}
 
         # Should have at least 2 successful scrapes recorded
@@ -375,6 +393,83 @@ class TestExporterServer(unittest.TestCase):
         with self._open(req) as resp:
             self.assertEqual(resp.status, 200)
             self.assertIn("text/plain", resp.headers.get("Content-Type", ""))
+
+    def test_tc_omx_16_live_metrics_server_full_openmetrics_scrape(self) -> None:
+        """TC-OMX-16: Live MetricsServer with all 5 real collectors + coupled consist + SQLite DB passes OpenMetrics 1.0.0."""
+        store = TrainStateStore()
+        store.set_connection_status(ConnectionStatus.CONNECTED, "Live")
+        u1 = TrainPosition(
+            id="id-a", train_number="2232", locomotive_number="460103", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA", speed=116.0,
+            course=270.0, track_heading=270.0, lat=38.05, lng=23.72, altitude=50.0,
+            delay=3, progress=0.4, chainage_m=10000, corridor="PROASTIAKOS",
+            distance_to_destination_m=90000, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        u2 = TrainPosition(
+            id="id-b", train_number="2232", locomotive_number="460108", name="2232",
+            train_type="DES", service_type="Passenger", status="RUNNING",
+            origin="ATH", destination="KIA", next_station="SKA", speed=115.0,
+            course=270.0, track_heading=270.0, lat=38.0504, lng=23.7201, altitude=50.0,
+            delay=3, progress=0.4, chainage_m=10050, corridor="PROASTIAKOS",
+            distance_to_destination_m=89950, timestamp="2026-11-26T05:00:00Z", schedule_id="s1",
+        )
+        store.update_positions([u1, u2])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "live_srv.db")
+            db = Database(db_path)
+            try:
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO recording_sessions (started_at, mode) VALUES ('2026-11-26T05:00:00.000000Z', 'live')"
+                    )
+                    cur.execute(
+                        "INSERT INTO trains (train_number, train_type, first_observed_at, last_observed_at) "
+                        "VALUES ('2232', 'DES', '2026-11-26T05:00:00.000000Z', '2026-11-26T05:00:00.000000Z')"
+                    )
+                    cur.execute(
+                        "INSERT INTO telemetry_history (train_number, recorded_at, lat, lng, speed, course, delay_min, corridor) "
+                        "VALUES ('2232', '2026-11-26T05:00:00.000000Z', 38.05, 23.72, 116.0, 270.0, 3, 'PROASTIAKOS')"
+                    )
+            finally:
+                db.close()
+
+            full_reg = MetricRegistry()
+            full_reg.register(TrainTelemetryCollector(store))
+            full_reg.register(WatchdogMetricsCollector(store))
+            full_reg.register(StreamMetricsCollector(store))
+            full_reg.register(StorageMetricsCollector(db_path=db_path))
+            full_reg.register(ProcessMetricsCollector(version="2.0.0"))
+
+            srv = MetricsServer(
+                server_address=("127.0.0.1", 0),
+                registry=full_reg,
+                config=ExporterConfig(host="127.0.0.1", port=9100, gzip_compression=False),
+            )
+            srv.start(background=True)
+            try:
+                prom_accept = (
+                    "application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.6,"
+                    "application/openmetrics-text;version=0.0.1;q=0.4,"
+                    "text/plain;version=0.0.4;q=0.3,*/*;q=0.1"
+                )
+                req = Request(f"{srv.server_url}metrics", headers={"Accept": prom_accept})
+                with self._open(req) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(
+                        resp.headers.get("Content-Type"),
+                        "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                    )
+                    raw = resp.read()
+                    self.assertEqual(validate_openmetrics_100(raw), [])
+                    text = raw.decode("utf-8")
+                    self.assertIn('train_number="2232/460103"', text)
+                    self.assertIn('train_number="2232/460108"', text)
+                    self.assertIn('railmon_db_records_total{table="telemetry_history"} 1\n', text)
+                    self.assertIn('railmon_db_sessions_total{mode="sqlite"} 1\n', text)
+            finally:
+                srv.stop()
 
 
 if __name__ == "__main__":

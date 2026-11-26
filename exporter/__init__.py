@@ -21,10 +21,13 @@ from exporter.formatter import (
     negotiate_metrics_format,
 )
 from exporter.models import (
+    RE_UNIT,
+    RESERVED_GAUGE_SUFFIXES,
     ExporterConfig,
     MetricFamily,
     MetricType,
     Sample,
+    canonical_family_base_name,
 )
 from exporter.server import (
     MetricsRequestHandler,
@@ -37,6 +40,9 @@ __author__: str = train_tracker.__author__
 __all__: List[str] = [
     "__version__",
     "__author__",
+    "RE_UNIT",
+    "RESERVED_GAUGE_SUFFIXES",
+    "canonical_family_base_name",
     "MetricType",
     "Sample",
     "MetricFamily",

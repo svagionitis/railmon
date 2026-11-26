@@ -136,11 +136,62 @@ class TestExporterModels(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ExporterConfig(port=p)
 
-        invalid_timeouts = [0.0, -0.5, -10.0]
+        invalid_timeouts = [0.0, -0.5, -10.0, float("nan"), float("inf"), float("-inf")]
         for t in invalid_timeouts:
             with self.subTest(timeout=t):
                 with self.assertRaises(ValueError):
                     ExporterConfig(scrape_timeout_seconds=t)
+
+    def test_tc_omx_01_metric_family_unit_and_suffix_validation(self) -> None:
+        """TC-OMX-01: MetricFamily rejects illegal units, suffix mismatches, and gauge _total."""
+        # Valid physical/suffixed units must succeed
+        valid_cases = [
+            ("railmon_train_speed_kmh", MetricType.GAUGE, "kmh"),
+            ("railmon_train_delay_minutes", MetricType.GAUGE, "minutes"),
+            ("railmon_corridor_punctuality_ratio", MetricType.GAUGE, "ratio"),
+            ("railmon_db_file_size_bytes", MetricType.GAUGE, "bytes"),
+            ("railmon_exporter_uptime_seconds", MetricType.COUNTER, "seconds"),
+            ("railmon_exporter_uptime_seconds_total", MetricType.COUNTER, "seconds"),
+            ("railmon_active_trains", MetricType.GAUGE, None),
+            ("railmon_active_trains", MetricType.GAUGE, ""),
+        ]
+        for name, mtype, unit in valid_cases:
+            with self.subTest(valid=(name, mtype, unit)):
+                fam = MetricFamily(name=name, documentation="doc", metric_type=mtype, unit=unit)
+                if unit == "":
+                    self.assertIsNone(fam.unit)
+
+        # Invalid units / types / reserved gauge suffixes must raise ValueError
+        invalid_cases = [
+            ("railmon_train_speed_kmh", MetricType.GAUGE, "km/h"),
+            ("railmon_watchdog_conflicts_active", MetricType.GAUGE, "alerts"),
+            ("railmon_stream_connected", MetricType.GAUGE, "boolean"),
+            ("railmon_db_write_queue_depth", MetricType.GAUGE, "rows"),
+            ("railmon_exporter_build", MetricType.INFO, "seconds"),
+            ("railmon_legacy_seconds", MetricType.UNTYPED, "seconds"),
+            ("railmon_legacy_seconds", MetricType.UNKNOWN, "seconds"),
+            ("railmon_trains_delayed_total", MetricType.GAUGE, None),
+            ("railmon_some_gauge_info", MetricType.GAUGE, None),
+            ("railmon_some_gauge_created", MetricType.GAUGE, None),
+            ("railmon_some_gauge_bucket", MetricType.GAUGE, None),
+            ("railmon_some_gauge_sum", MetricType.GAUGE, None),
+            ("railmon_some_gauge_count", MetricType.GAUGE, None),
+        ]
+        for name, mtype, unit in invalid_cases:
+            with self.subTest(invalid=(name, mtype, unit)):
+                with self.assertRaises(ValueError):
+                    MetricFamily(name=name, documentation="doc", metric_type=mtype, unit=unit)
+
+    def test_tc_omx_02_sample_duplicate_labels_and_unknown_type(self) -> None:
+        """TC-OMX-02: Sample rejects duplicate label keys and MetricType.UNKNOWN is supported."""
+        self.assertEqual(MetricType.UNKNOWN.value, "unknown")
+        with self.assertRaises(ValueError) as ctx:
+            Sample(
+                name="railmon_train_speed_kmh",
+                labels=(("corridor", "PATHE"), ("corridor", "PROASTIAKOS")),
+                value=100.0,
+            )
+        self.assertIn("Duplicate label name", str(ctx.exception))
 
 
 if __name__ == "__main__":
