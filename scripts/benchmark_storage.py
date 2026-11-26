@@ -14,7 +14,7 @@ import statistics
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 # Ensure repository root is on sys.path for direct script execution
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,7 +67,7 @@ def _make_bench_position(
 
 def run_write_benchmark(
     num_records: int = 10000,
-    batch_sizes: List[int] = [10, 50, 100, 500],
+    batch_sizes: Sequence[int] = (10, 50, 100, 500),
 ) -> List[Dict[str, Any]]:
     """Benchmark write throughput across various batch commit sizes."""
     results = []

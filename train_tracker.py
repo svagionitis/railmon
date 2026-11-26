@@ -3222,7 +3222,8 @@ def run_record_mode(
             duration = time.time() - start_time
             stats = recorder.get_stats()
             filter_stats = stats.get("filter") or {}
-            suppressed = filter_stats.get("suppressed_count", 0)
+            raw_suppressed = filter_stats.get("total_suppressed", 0)
+            suppressed = int(raw_suppressed) if isinstance(raw_suppressed, (int, float)) and not isinstance(raw_suppressed, bool) else 0
             ratio = filter_stats.get("suppression_ratio_pct", 0.0)
             db_size = _safe_file_size(db_path)
 

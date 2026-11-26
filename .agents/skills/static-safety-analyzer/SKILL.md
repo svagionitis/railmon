@@ -10,10 +10,10 @@ description: >-
 
 # Static Safety Analyzer (MISRA / AUTOSAR / NASA JPL Gate)
 
-Enforces deterministic, safety-critical coding standards across [`train_tracker.py`](../../../train_tracker.py), [`storage/`](../../../storage), [`tui/`](../../../tui), and [`tests/`](../../../tests), verifying compliance with [`.agents/rules/misra-autosar-python.md`](../../rules/misra-autosar-python.md).
+Enforces deterministic, safety-critical coding standards across [`train_tracker.py`](../../../train_tracker.py), [`railmon_watchdog.py`](../../../railmon_watchdog.py), [`railmon_http.py`](../../../railmon_http.py), [`storage/`](../../../storage), [`tui/`](../../../tui), [`server/`](../../../server), [`exporter/`](../../../exporter), [`gtfs_rt/`](../../../gtfs_rt), [`scripts/`](../../../scripts), and [`tests/`](../../../tests), verifying compliance with [`.agents/rules/misra-autosar-python.md`](../../rules/misra-autosar-python.md).
 
 ## When to Apply
-- After authoring or refactoring any production module (`train_tracker.py`, `storage/*.py`, `tui/*.py`).
+- After authoring or refactoring any production module (`train_tracker.py`, `railmon_watchdog.py`, `railmon_http.py`, `storage/*.py`, `tui/*.py`, `server/*.py`, `exporter/*.py`, `gtfs_rt/*.py`, `scripts/*.py`).
 - Before committing changes, cutting a release, or signing off on a safety/quality review.
 - When diagnosing resource leaks, unhandled exceptions, float precision bugs, or high cyclomatic complexity.
 
@@ -28,8 +28,11 @@ Execute the built-in AST safety verifier script [`safety_ast_audit.py`](./script
 # Standard audit (fails on any ERROR violation):
 python3 .agents/skills/static-safety-analyzer/scripts/safety_ast_audit.py
 
-# Strict audit (fails on any ERROR or WARNING violation):
+# Strict audit (fails on any ERROR or WARNING violation across all 108 repo Python files):
 python3 .agents/skills/static-safety-analyzer/scripts/safety_ast_audit.py --strict
+
+# Advisory complexity report (flags McCabe CC > 15 without changing default --strict CI gate):
+python3 .agents/skills/static-safety-analyzer/scripts/safety_ast_audit.py --advisory
 ```
 
 #### Rules Checked by `safety_ast_audit.py`:
@@ -52,7 +55,7 @@ python3 .agents/skills/static-safety-analyzer/scripts/safety_ast_audit.py --stri
 When `mypy` is installed in the development environment, run strict type checking using the configuration in [`pyproject.toml`](../../../pyproject.toml):
 
 ```bash
-mypy train_tracker.py storage/ tui/ tests/
+mypy train_tracker.py railmon_watchdog.py railmon_http.py storage/ tui/ server/ exporter/ gtfs_rt/ scripts/ tests/
 ```
 
 **Pass Criteria:** Zero type errors across all modules.
@@ -64,11 +67,11 @@ When optional dev tools (`ruff`, `flake8`, `bandit`) are installed in the active
 
 ```bash
 # Ruff (checks flake8-bugbear, bandit, blind-except, return consistency, mccabe, pylint rules):
-ruff check train_tracker.py storage/ tui/ tests/
+ruff check train_tracker.py railmon_watchdog.py railmon_http.py storage/ tui/ server/ exporter/ gtfs_rt/ scripts/ tests/
 
 # Or Flake8 + Bandit:
-flake8 train_tracker.py storage/ tui/ tests/
-bandit -r train_tracker.py storage/ tui/ -ll
+flake8 train_tracker.py railmon_watchdog.py railmon_http.py storage/ tui/ server/ exporter/ gtfs_rt/ scripts/ tests/
+bandit -r train_tracker.py railmon_watchdog.py railmon_http.py storage/ tui/ server/ exporter/ gtfs_rt/ scripts/ -ll
 ```
 
 ---

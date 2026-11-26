@@ -23,13 +23,26 @@ import re
 import sys
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-DEFAULT_PRODUCTION_TARGETS: Tuple[str, ...] = ("train_tracker.py", "storage", "tui")
+DEFAULT_PRODUCTION_TARGETS: Tuple[str, ...] = (
+    "train_tracker.py",
+    "railmon_watchdog.py",
+    "railmon_http.py",
+    "storage",
+    "tui",
+    "server",
+    "exporter",
+    "gtfs_rt",
+    "scripts",
+)
 DEFAULT_TEST_TARGETS: Tuple[str, ...] = ("tests",)
 
 FORBIDDEN_CALLS: Dict[str, str] = {
     "eval": "Dynamic code execution via eval() is prohibited",
+    "builtins.eval": "Dynamic code execution via eval() is prohibited",
     "exec": "Dynamic code execution via exec() is prohibited",
+    "builtins.exec": "Dynamic code execution via exec() is prohibited",
     "compile": "Dynamic code compilation via compile() is prohibited",
+    "builtins.compile": "Dynamic code compilation via compile() is prohibited",
     "pickle.load": "Untrusted deserialization via pickle.load() is prohibited",
     "pickle.loads": "Untrusted deserialization via pickle.loads() is prohibited",
     "marshal.load": "Untrusted deserialization via marshal.load() is prohibited",
@@ -88,6 +101,16 @@ def _get_call_name(node: ast.Call) -> str:
     return ""
 
 
+def _is_wildcard_case(case: ast.match_case) -> bool:
+    """Return True if a match_case is an unguarded wildcard catch-all (`case _:`)."""
+    return (
+        case.guard is None
+        and isinstance(case.pattern, ast.MatchAs)
+        and case.pattern.pattern is None
+        and case.pattern.name is None
+    )
+
+
 def _compute_mccabe_complexity(func_node: ast.AST) -> int:
     """Compute standard McCabe cyclomatic complexity (compatible with flake8-mccabe / ruff C901)."""
     complexity = 1
@@ -106,45 +129,45 @@ def _compute_mccabe_complexity(func_node: ast.AST) -> int:
             complexity += 1
         elif isinstance(child, ast.comprehension):
             complexity += 1 + len(child.ifs)
+        elif isinstance(child, ast.Match):
+            complexity += sum(1 for case in child.cases if not _is_wildcard_case(case))
     return complexity
 
 
 def _compute_max_nesting_depth(node: ast.AST, current_depth: int = 0) -> int:
-    """Compute maximum control-flow nesting depth inside a function body (flat elif chains count at the same level)."""
+    """Compute maximum control-flow nesting depth iteratively (flat elif chains share one level)."""
     max_d = current_depth
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        if isinstance(child, ast.If):
-            # Body of if increments depth; elif in orelse stays at current_depth + 1
-            next_depth = current_depth + 1
-            for stmt in child.body:
-                d = _compute_max_nesting_depth(stmt, next_depth)
-                if d > max_d:
-                    max_d = d
-            for stmt in child.orelse:
-                if isinstance(stmt, ast.If):
-                    d = _compute_max_nesting_depth(stmt, current_depth)
-                else:
-                    d = _compute_max_nesting_depth(stmt, next_depth)
-                if d > max_d:
-                    max_d = d
-            continue
-        is_branch = isinstance(
-            child,
-            (
-                ast.For,
-                ast.AsyncFor,
-                ast.While,
-                ast.Try,
-                ast.With,
-                ast.AsyncWith,
-            ),
-        )
-        next_depth = current_depth + (1 if is_branch else 0)
-        child_max = _compute_max_nesting_depth(child, next_depth)
-        if child_max > max_d:
-            max_d = child_max
+    branch_types = (
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.Try,
+        ast.With,
+        ast.AsyncWith,
+        ast.Match,
+    )
+    stack: List[Tuple[ast.AST, int]] = [(node, current_depth)]
+
+    while stack:
+        curr, depth = stack.pop()
+        if depth > max_d:
+            max_d = depth
+        for child in ast.iter_child_nodes(curr):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(child, ast.If):
+                next_depth = depth + 1
+                if next_depth > max_d:
+                    max_d = next_depth
+                for stmt in child.body:
+                    stack.append((stmt, next_depth))
+                for stmt in child.orelse:
+                    branch_depth = depth if isinstance(stmt, ast.If) else next_depth
+                    stack.append((stmt, branch_depth))
+                continue
+            next_depth = depth + (1 if isinstance(child, branch_types) else 0)
+            stack.append((child, next_depth))
+
     return max_d
 
 
@@ -174,24 +197,42 @@ def _is_silent_pass_body(body: Sequence[ast.stmt]) -> bool:
     return False
 
 
+def _extract_broad_exception_name(exc_type: ast.expr) -> Optional[str]:
+    """Return 'Exception' or 'BaseException' if exc_type catches a broad base class (directly or in a tuple)."""
+    if isinstance(exc_type, ast.Name) and exc_type.id in ("Exception", "BaseException"):
+        return exc_type.id
+    if isinstance(exc_type, ast.Tuple):
+        for elt in exc_type.elts:
+            if isinstance(elt, ast.Name) and elt.id in ("Exception", "BaseException"):
+                return elt.id
+    return None
+
+
+def _is_none_constant(node: ast.AST) -> bool:
+    """Return True if an AST expression is the literal None constant."""
+    return isinstance(node, ast.Constant) and node.value is None
+
+
 def _collect_direct_returns(func_node: ast.AST) -> List[ast.Return]:
-    """Collect all Return statements belonging directly to func_node (excluding nested functions)."""
+    """Collect all Return statements belonging directly to func_node iteratively (excluding nested functions)."""
     returns: List[ast.Return] = []
+    stack: List[ast.AST] = list(ast.iter_child_nodes(func_node))
 
-    def _visit(node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            if isinstance(child, ast.Return):
-                returns.append(child)
-            _visit(child)
+    while stack:
+        curr = stack.pop()
+        if isinstance(curr, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(curr, ast.Return):
+            returns.append(curr)
+        stack.extend(ast.iter_child_nodes(curr))
 
-    _visit(func_node)
     return returns
 
 
-def _is_direct_recursive(func_node: ast.FunctionDef, in_class: bool) -> bool:
-    """Check if a function calls itself directly."""
+def _is_direct_recursive(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool
+) -> bool:
+    """Check if a sync or async function calls itself directly."""
     func_name = func_node.name
     for child in ast.walk(func_node):
         if child is func_node:
@@ -221,7 +262,7 @@ class SafetyASTVisitor(ast.NodeVisitor):
         max_complexity: int = 25,
         warn_complexity: int = 15,
         max_nesting: int = 5,
-    ):
+    ) -> None:
         self.filepath = filepath
         self.source_lines = source_lines
         self.is_test_file = is_test_file
@@ -231,6 +272,7 @@ class SafetyASTVisitor(ast.NodeVisitor):
         self.violations: List[SafetyViolation] = []
         self._class_stack: List[str] = []
         self._func_stack: List[str] = []
+        self._import_aliases: Dict[str, str] = {}
 
     def _is_ignored(self, line: int, rule_id: str) -> bool:
         """Check if source line has a `# safety: ignore` pragma covering rule_id."""
@@ -278,11 +320,17 @@ class SafetyASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         self._class_stack.pop()
 
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            bound = alias.asname if alias.asname else alias.name
+            self._import_aliases[bound] = alias.name
+        self.generic_visit(node)
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # PY-MISRA-10: No wildcard imports
+        # PY-MISRA-10: No wildcard imports + track import aliases
+        mod = node.module or ""
         for alias in node.names:
             if alias.name == "*":
-                mod = node.module or ""
                 self._add(
                     "PY-MISRA-10",
                     "ERROR",
@@ -290,7 +338,21 @@ class SafetyASTVisitor(ast.NodeVisitor):
                     f"from {mod} import *",
                     "Wildcard imports ('import *') are prohibited; import explicit symbols.",
                 )
+            elif mod:
+                bound = alias.asname if alias.asname else alias.name
+                self._import_aliases[bound] = f"{mod}.{alias.name}"
         self.generic_visit(node)
+
+    def _resolve_call_name(self, call_name: str) -> str:
+        """Resolve an AST call name through tracked import aliases."""
+        if not call_name:
+            return ""
+        if call_name in self._import_aliases:
+            return self._import_aliases[call_name]
+        head, sep, tail = call_name.partition(".")
+        if sep and head in self._import_aliases:
+            return f"{self._import_aliases[head]}.{tail}"
+        return call_name
 
     def visit_Assert(self, node: ast.Assert) -> None:
         # PY-MISRA-10: No runtime assert in production code
@@ -335,21 +397,26 @@ class SafetyASTVisitor(ast.NodeVisitor):
             return True
         return False
 
-    def visit_Call(self, node: ast.Call) -> None:
-        call_name = _get_call_name(node)
-
+    def _check_forbidden_and_shell(self, node: ast.Call, resolved_name: str) -> None:
         # PY-MISRA-01: Forbidden dynamic execution / deserialization
-        if call_name in FORBIDDEN_CALLS:
+        if resolved_name in FORBIDDEN_CALLS:
             self._add(
                 "PY-MISRA-01",
                 "ERROR",
                 node,
-                call_name,
-                FORBIDDEN_CALLS[call_name],
+                resolved_name,
+                FORBIDDEN_CALLS[resolved_name],
             )
 
         # PY-MISRA-01: subprocess with shell=True
-        if call_name.startswith("subprocess.") or call_name in ("Popen", "run", "call", "check_output", "check_call"):
+        is_subproc = resolved_name.startswith("subprocess.") or resolved_name in (
+            "Popen",
+            "run",
+            "call",
+            "check_output",
+            "check_call",
+        )
+        if is_subproc:
             for kw in node.keywords:
                 if (
                     kw.arg == "shell"
@@ -360,48 +427,66 @@ class SafetyASTVisitor(ast.NodeVisitor):
                         "PY-MISRA-01",
                         "ERROR",
                         node,
-                        f"{call_name}(shell=True)",
+                        f"{resolved_name}(shell=True)",
                         "Subprocess execution with shell=True is prohibited.",
                     )
 
+    def _check_queue_bound(self, node: ast.Call, resolved_name: str) -> None:
         # PY-MISRA-02: queue.Queue must specify maxsize > 0
-        if not self.is_test_file and call_name in QUEUE_CONSTRUCTORS:
-            has_maxsize = False
-            if node.args:
+        if self.is_test_file or resolved_name not in QUEUE_CONSTRUCTORS:
+            return
+        has_maxsize = False
+        if node.args:
+            has_maxsize = True
+            arg0 = node.args[0]
+            if isinstance(arg0, ast.Constant) and isinstance(arg0.value, int) and arg0.value <= 0:
+                has_maxsize = False
+        for kw in node.keywords:
+            if kw.arg == "maxsize":
                 has_maxsize = True
-                arg0 = node.args[0]
-                if isinstance(arg0, ast.Constant) and isinstance(arg0.value, int) and arg0.value <= 0:
+                if (
+                    isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, int)
+                    and kw.value.value <= 0
+                ):
                     has_maxsize = False
-            for kw in node.keywords:
-                if kw.arg == "maxsize":
-                    has_maxsize = True
-                    if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int) and kw.value.value <= 0:
-                        has_maxsize = False
-            if not has_maxsize:
-                self._add(
-                    "PY-MISRA-02",
-                    "ERROR",
-                    node,
-                    call_name,
-                    "Inter-thread Queue must specify an explicit positive 'maxsize' bound.",
-                )
+        if not has_maxsize:
+            self._add(
+                "PY-MISRA-02",
+                "ERROR",
+                node,
+                resolved_name,
+                "Inter-thread Queue must specify an explicit positive 'maxsize' bound.",
+            )
 
-        # PY-MISRA-09: urlopen() and sqlite3.connect() must pass explicit timeout=...
-        if not self.is_test_file and call_name in TIMEOUT_REQUIRED_CALLS:
-            has_timeout = any(kw.arg == "timeout" for kw in node.keywords)
-            if not has_timeout and len(node.args) >= 3 and "urlopen" in call_name:
-                has_timeout = True
-            if not has_timeout and len(node.args) >= 2 and call_name == "sqlite3.connect":
-                has_timeout = True
-            if not has_timeout:
-                self._add(
-                    "PY-MISRA-09",
-                    "ERROR",
-                    node,
-                    call_name,
-                    f"Blocking I/O call '{call_name}()' must specify an explicit 'timeout=...' argument.",
-                )
+    def _check_io_timeout(self, node: ast.Call, resolved_name: str) -> None:
+        # PY-MISRA-09: urlopen() and sqlite3.connect() must pass explicit non-None timeout=...
+        if self.is_test_file or resolved_name not in TIMEOUT_REQUIRED_CALLS:
+            return
+        has_valid_timeout = False
+        for kw in node.keywords:
+            if kw.arg == "timeout":
+                has_valid_timeout = not _is_none_constant(kw.value)
+                break
+        if not has_valid_timeout and "urlopen" in resolved_name and len(node.args) >= 3:
+            has_valid_timeout = not _is_none_constant(node.args[2])
+        if not has_valid_timeout and resolved_name == "sqlite3.connect" and len(node.args) >= 2:
+            has_valid_timeout = not _is_none_constant(node.args[1])
+        if not has_valid_timeout:
+            self._add(
+                "PY-MISRA-09",
+                "ERROR",
+                node,
+                resolved_name,
+                f"Blocking I/O call '{resolved_name}()' must specify an explicit non-None 'timeout=...' argument.",
+            )
 
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = _get_call_name(node)
+        resolved_name = self._resolve_call_name(call_name)
+        self._check_forbidden_and_shell(node, resolved_name)
+        self._check_queue_bound(node, resolved_name)
+        self._check_io_timeout(node, resolved_name)
         self.generic_visit(node)
 
     def visit_Try(self, node: ast.Try) -> None:
@@ -419,18 +504,15 @@ class SafetyASTVisitor(ast.NodeVisitor):
                     "Bare 'except:' clause is prohibited; catch specific exception types.",
                 )
             elif not self.is_test_file and not is_cleanup_method:
-                # PY-MISRA-03: Silent broad except Exception: pass
-                is_broad = isinstance(handler.type, ast.Name) and handler.type.id in (
-                    "Exception",
-                    "BaseException",
-                )
-                if is_broad and _is_silent_pass_body(handler.body):
+                # PY-MISRA-03: Silent broad except Exception / (Exception, ...): pass
+                broad_name = _extract_broad_exception_name(handler.type)
+                if broad_name is not None and _is_silent_pass_body(handler.body):
                     self._add(
                         "PY-MISRA-03",
                         "WARNING",
                         handler,
-                        f"except {handler.type.id}: pass",
-                        f"Silent 'except {handler.type.id}: pass' swallows errors without diagnostic logging or specific exception narrowing.",
+                        f"except {broad_name}: pass",
+                        f"Silent 'except {broad_name}: pass' swallows errors without diagnostic logging or specific exception narrowing.",
                     )
 
         self.generic_visit(node)
@@ -548,8 +630,8 @@ class SafetyASTVisitor(ast.NodeVisitor):
                     f"Control-flow nesting depth is {nesting} (exceeds threshold of {self.max_nesting}).",
                 )
 
-        # PY-MISRA-10: No direct recursion
-        if isinstance(node, ast.FunctionDef) and _is_direct_recursive(node, in_class):
+        # PY-MISRA-10: No direct recursion (sync or async)
+        if _is_direct_recursive(node, in_class):
             self._add(
                 "PY-MISRA-10",
                 "ERROR",
@@ -575,15 +657,31 @@ def collect_python_files(paths: Sequence[str]) -> List[Path]:
     return sorted(set(files))
 
 
+def _classify_test_file(filepath: Path, base_dir: Optional[Path] = None) -> bool:
+    """Classify whether filepath is a test file using repo/base-dir relative path segments."""
+    if filepath.name.startswith("test_"):
+        return True
+    rel_path = filepath
+    anchor = base_dir if base_dir is not None else (Path.cwd() if filepath.is_absolute() else None)
+    if anchor is not None:
+        try:
+            rel_path = filepath.resolve().relative_to(anchor.resolve())
+        except ValueError:
+            return False
+    return bool(rel_path.parts) and rel_path.parts[0] == "tests"
+
+
 def audit_file(
     filepath: Path,
     max_complexity: int = 25,
     warn_complexity: int = 15,
     max_nesting: int = 5,
+    base_dir: Optional[Path] = None,
+    is_test_file: Optional[bool] = None,
 ) -> List[SafetyViolation]:
     """Parse and audit a single Python file against PY-MISRA rules."""
     rel_str = str(filepath)
-    is_test = "tests" in filepath.parts or filepath.name.startswith("test_")
+    is_test = is_test_file if is_test_file is not None else _classify_test_file(filepath, base_dir)
     source = filepath.read_text(encoding="utf-8")
     source_lines = source.splitlines()
 
@@ -616,18 +714,24 @@ def audit_file(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entry point for the MISRA/AUTOSAR Python AST Safety Auditor."""
+    default_desc = ", ".join(DEFAULT_PRODUCTION_TARGETS + DEFAULT_TEST_TARGETS)
     parser = argparse.ArgumentParser(
         description="MISRA C++ / AUTOSAR C++14 / NASA JPL Static Safety AST Auditor for Python."
     )
     parser.add_argument(
         "targets",
         nargs="*",
-        help="Files or directories to audit (defaults to train_tracker.py, storage, tui, tests).",
+        help=f"Files or directories to audit (defaults to {default_desc}).",
     )
     parser.add_argument(
         "--strict",
         action="store_true",
         help="Treat warnings as errors (exit code 1 on any warning or error).",
+    )
+    parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help="Enable advisory McCabe complexity warnings at CC > 15 (equivalent to --warn-complexity 15).",
     )
     parser.add_argument(
         "--max-complexity",
@@ -639,7 +743,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--warn-complexity",
         type=int,
         default=25,
-        help="Warning threshold for McCabe cyclomatic complexity (default: 25; set to 15 for advisory report).",
+        help="Warning threshold for McCabe cyclomatic complexity (default: 25; use --advisory or 15 for advisory report).",
     )
     parser.add_argument(
         "--max-nesting",
@@ -649,6 +753,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    effective_warn = min(args.warn_complexity, 15) if args.advisory else args.warn_complexity
     targets = (
         list(args.targets)
         if args.targets
@@ -662,7 +767,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             audit_file(
                 fpath,
                 max_complexity=args.max_complexity,
-                warn_complexity=args.warn_complexity,
+                warn_complexity=effective_warn,
                 max_nesting=args.max_nesting,
             )
         )

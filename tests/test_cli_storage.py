@@ -371,6 +371,46 @@ class TestSignalHandlingAndDaemonShutdown(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_run_record_mode_shutdown_summary_reports_total_suppressed_count(self):
+        """TC-REC-01: run_record_mode prints integer deadband total_suppressed from float stats."""
+        import shutil
+        import threading
+        from storage.recorder import TelemetryRecorder
+        from train_tracker import run_record_mode
+
+        temp_dir = tempfile.mkdtemp()
+        db_path = os.path.join(temp_dir, "deadband_summary.db")
+        try:
+            stop_event = threading.Event()
+            stop_event.set()
+            fake_stats = {
+                "total_records_written": 120,
+                "filter": {
+                    "total_inspected": 162.0,
+                    "total_admitted": 120.0,
+                    "total_suppressed": 42.0,
+                    "total_evicted": 0.0,
+                    "suppression_ratio_pct": 25.93,
+                    "tracked_trains": 5.0,
+                },
+            }
+            stdout_buf = io.StringIO()
+            with patch.object(TelemetryRecorder, "get_stats", return_value=fake_stats):
+                with patch("sys.stdout", stdout_buf):
+                    rc = run_record_mode(
+                        db_path=db_path,
+                        demo=True,
+                        enable_deadband=True,
+                        quiet=True,
+                        stop_event=stop_event,
+                    )
+
+            self.assertEqual(rc, 0)
+            output = stdout_buf.getvalue()
+            self.assertIn("Positions Filtered (Deadband): 42 (25.9% compression ratio)", output)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_run_plain_stream_mode_graceful_shutdown_on_sigterm(self):
         """run_plain_stream_mode must exit cleanly on SIGTERM and finalize background recorder."""
         import shutil
