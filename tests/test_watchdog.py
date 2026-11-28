@@ -81,6 +81,11 @@ class TestWatchdogMatchingAndHelpers(TestCase):
         self.assertTrue(matches_train_number(None, "IC-52", "IC 52"))
         self.assertFalse(matches_train_number("884", "t-884", "IC52"))
         self.assertFalse(matches_train_number("", "", "1597"))
+        # TC-CLI-10: Strict/anchored matching rejects substring & cross-prefix collisions
+        self.assertFalse(matches_train_number("5", "t-5", "IC52"))
+        self.assertFalse(matches_train_number("2", "t-2", "IC52"))
+        self.assertFalse(matches_train_number("IC520", "t-520", "IC52"))
+        self.assertFalse(matches_train_number("R52", "t-r52", "IC52"))
 
     def test_parse_notify_minutes(self) -> None:
         self.assertEqual(parse_notify_minutes("15m"), 15.0)

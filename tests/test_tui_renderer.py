@@ -659,6 +659,7 @@ class TestTUIRendererComponents(unittest.TestCase):
         selected = snapshot.selected_train
         assert selected is not None
         self.store._trains[selected.position.id].last_updated = time.time() - 300.0
+        self.store.run_maintenance_tick()
         snapshot_stale = self.store.get_snapshot()
 
         win_stale = MockCursesWindow(14, 40)

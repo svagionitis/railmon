@@ -556,16 +556,17 @@ class GeoProjector:
         """Compute kilometers per terminal column cell at current viewport center latitude.
 
         Uses the conformal equirectangular cell resolution formula:
-            km_per_cell = (2.0 / (S_x * cos(phi_0))) * 111.32
-        where S_x is the horizontal scale in sub-pixels per degree longitude and
-        phi_0 is the current viewport center latitude in degrees.
+            km_per_cell = (2.0 / S_x) * (cos(phi_center) / cos(phi_0)) * 111.32
+        where S_x is the horizontal scale in sub-pixels per degree longitude,
+        phi_center is the viewport center latitude, and phi_0 is the reference latitude.
 
         Returns:
             Kilometers per horizontal character cell (positive float).
         """
         scale_x = max(1e-6, self.get_scale_x())
-        cos_phi0 = max(0.05, abs(math.cos(math.radians(self.viewport.center.lat))))
-        return (2.0 / (scale_x * cos_phi0)) * KM_PER_DEGREE_LAT
+        cos_center = max(0.05, abs(math.cos(math.radians(self.viewport.center.lat))))
+        cos_ref = max(0.05, self._cos_phi0)
+        return (2.0 / scale_x) * (cos_center / cos_ref) * KM_PER_DEGREE_LAT
 
     def compute_scale_bar(
         self,
@@ -717,10 +718,54 @@ class BrailleCanvas:
         mask = DOT_MASKS[sub_x][sub_y]
         return bool(self.buffer[idx] & mask)
 
-    def draw_line(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """Rasterize a line between two sub-pixel points using Bresenham's algorithm.
+    @staticmethod
+    def _clip_line_liang_barsky(
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        xmin: int,
+        ymin: int,
+        xmax: int,
+        ymax: int,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """Clip a line segment to [xmin..xmax, ymin..ymax] in O(1) via Liang-Barsky."""
+        dx = float(x1 - x0)
+        dy = float(y1 - y0)
+        t0 = 0.0
+        t1 = 1.0
+        checks = (
+            (-dx, float(x0 - xmin)),
+            (dx, float(xmax - x0)),
+            (-dy, float(y0 - ymin)),
+            (dy, float(ymax - y0)),
+        )
+        for p, q in checks:
+            if abs(p) < 1e-12:
+                if q < 0.0:
+                    return None
+            else:
+                r = q / p
+                if p < 0.0:
+                    if r > t1:
+                        return None
+                    if r > t0:
+                        t0 = r
+                else:
+                    if r < t0:
+                        return None
+                    if r < t1:
+                        t1 = r
+        nx0 = int(round(x0 + t0 * dx))
+        ny0 = int(round(y0 + t0 * dy))
+        nx1 = int(round(x0 + t1 * dx))
+        ny1 = int(round(y0 + t1 * dy))
+        return nx0, ny0, nx1, ny1
 
-        Points outside canvas boundaries are clipped safely without errors.
+    def draw_line(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        """Rasterize a line between two sub-pixel points using Liang-Barsky clipped Bresenham.
+
+        Points outside canvas boundaries are clipped in O(1) before stepping.
 
         Args:
             x0: Start sub-pixel X coordinate.
@@ -728,6 +773,15 @@ class BrailleCanvas:
             x1: End sub-pixel X coordinate.
             y1: End sub-pixel Y coordinate.
         """
+        if self.sub_width <= 0 or self.sub_height <= 0:
+            return
+        clipped = self._clip_line_liang_barsky(
+            x0, y0, x1, y1, 0, 0, self.sub_width - 1, self.sub_height - 1
+        )
+        if clipped is None:
+            return
+        x0, y0, x1, y1 = clipped
+
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
         sx = 1 if x0 < x1 else -1
@@ -1922,7 +1976,17 @@ DEFAULT_STATION_DWELL_RADIUS_M: float = 350.0
 DEFAULT_SENSOR_FREEZE_THRESHOLD_SEC: float = 60.0
 DEFAULT_SENSOR_FREEZE_MIN_SPEED_KMH: float = 5.0
 DEFAULT_SENSOR_FREEZE_MAX_PACKET_AGE_SEC: float = 15.0
-TERMINAL_STATION_IDS: Set[str] = {"ath", "skg", "ska", "lian", "lar", "dom", "kth"}
+TERMINAL_STATION_IDS: Set[str] = {
+    "ath",
+    "skg",
+    "ska",
+    "lia",
+    "lar",
+    "dom",
+    "cor",
+    "kia",
+    "pir",
+}
 
 
 def compute_tunnel_grace_sec(
@@ -2130,6 +2194,8 @@ def evaluate_sensor_health(
     station_dwell_radius_m: float = DEFAULT_STATION_DWELL_RADIUS_M,
     terminal_dwell_radius_m: float = DEFAULT_TERMINAL_DWELL_RADIUS_M,
     displacement_epsilon_m: float = 10.0,
+    previous_state: Optional[SensorHealthState] = None,
+    freeze_clear_displacement_m: float = 50.0,
 ) -> Tuple[SensorHealthAssessment, Optional[GeoPoint], float, Optional[float]]:
     """Evaluate kinematic continuity, telemetry freshness, and station dwell.
 
@@ -2232,14 +2298,19 @@ def evaluate_sensor_health(
         )
         return assessment, last_moved_pt, last_moved_time, station_dwell_start
 
-    # 4. Kinematic Displacement & Anchor Update
+    # 4. Kinematic Displacement & Anchor Update (with FROZEN hysteresis)
+    effective_disp_threshold = (
+        max(displacement_epsilon_m, freeze_clear_displacement_m)
+        if previous_state == SensorHealthState.FROZEN
+        else displacement_epsilon_m
+    )
     if last_moved_pt is None:
         new_anchor_pt = point
         new_anchor_time = ref_now
         disp_m = 0.0
     else:
         disp_m = haversine_distance_km(point, last_moved_pt) * 1000.0
-        if disp_m > displacement_epsilon_m:
+        if disp_m > effective_disp_threshold:
             new_anchor_pt = point
             new_anchor_time = ref_now
         else:
@@ -2255,7 +2326,7 @@ def evaluate_sensor_health(
 
         if (
             spd >= sensor_freeze_min_speed_kmh
-            and disp_m <= displacement_epsilon_m
+            and disp_m <= effective_disp_threshold
             and static_dur >= sensor_freeze_threshold_sec
         ):
             # Candidate for sensor freeze: speed >= min_speed, coordinates static
@@ -3209,6 +3280,93 @@ def _evaluate_headway_conflict(
     )
 
 
+# Shared double-track trunk overrides: branch_cid -> (trunk_cid, min_lat, max_lat)
+SHARED_DOUBLE_TRACK_TRUNKS: Dict[str, Tuple[str, float, float]] = {
+    "proastiakos-chalkida": ("pathe-mainline", 38.07, 38.32),
+}
+
+# Shared single-track trunk pairs evaluated across corridor boundaries
+SHARED_SINGLE_TRACK_TRUNKS: Tuple[Tuple[str, str, float, float], ...] = (
+    ("northern-corridor", "thessaloniki-idomeni", 40.63, 40.98),
+    ("northern-corridor", "western-macedonia", 40.55, 40.70),
+)
+
+
+def _extract_corridor_polylines(
+    tracks_data: Optional[Dict[str, Any]],
+) -> Dict[str, List[List[Tuple[float, float]]]]:
+    """Extract corridor_id -> list of polylines [(lat, lng), ...] from tracks_data."""
+    polylines: Dict[str, List[List[Tuple[float, float]]]] = {}
+    if not tracks_data:
+        return polylines
+    raw_corridors = tracks_data.get("corridors")
+    if isinstance(raw_corridors, list):
+        for c in raw_corridors:
+            if not isinstance(c, dict) or "id" not in c:
+                continue
+            cid = str(c["id"])
+            segs: List[List[Tuple[float, float]]] = []
+            for seg in c.get("segments", []):
+                if isinstance(seg, list) and len(seg) >= 2:
+                    pts = [(float(p[0]), float(p[1])) for p in seg if len(p) >= 2]
+                    if len(pts) >= 2:
+                        segs.append(pts)
+            if segs:
+                polylines[cid] = segs
+    return polylines
+
+
+def project_point_to_corridor_chainage(
+    point: GeoPoint,
+    cid: str,
+    tracks_data: Optional[Dict[str, Any]],
+) -> Optional[Tuple[float, float, float]]:
+    """Project a GeoPoint onto a corridor polyline.
+
+    Returns:
+        (chainage_km, lateral_dist_m, tangent_deg) or None if corridor geometry unavailable.
+    """
+    polylines = _extract_corridor_polylines(tracks_data)
+    segs = polylines.get(cid)
+    if not segs:
+        return None
+
+    lat0 = math.radians(point.lat)
+    kx = 111320.0 * math.cos(lat0)
+    ky = 110540.0
+    px, py = point.lng * kx, point.lat * ky
+
+    best_dist_m = float("inf")
+    best_chainage_km = 0.0
+    best_tangent = 0.0
+
+    for pts in segs:
+        cum_km = 0.0
+        for i in range(len(pts) - 1):
+            lat1, lon1 = pts[i]
+            lat2, lon2 = pts[i + 1]
+            seg_len_km = haversine_distance_km(
+                GeoPoint(lat=lat1, lng=lon1), GeoPoint(lat=lat2, lng=lon2)
+            )
+            x1, y1 = lon1 * kx, lat1 * ky
+            x2, y2 = lon2 * kx, lat2 * ky
+            dx, dy = x2 - x1, y2 - y1
+            denom = dx * dx + dy * dy
+            t = 0.0 if denom <= 0.0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / denom))
+            proj_lat = lat1 + t * (lat2 - lat1)
+            proj_lon = lon1 + t * (lon2 - lon1)
+            dist_m = haversine_distance_km(point, GeoPoint(lat=proj_lat, lng=proj_lon)) * 1000.0
+            if dist_m < best_dist_m:
+                best_dist_m = dist_m
+                best_chainage_km = cum_km + t * seg_len_km
+                best_tangent = (math.degrees(math.atan2(dx, dy)) + 360.0) % 360.0
+            cum_km += seg_len_km
+
+    if not math.isfinite(best_dist_m):
+        return None
+    return best_chainage_km, best_dist_m, best_tangent
+
+
 def _evaluate_corridor_pair_conflict(
     t1: Any,
     t2: Any,
@@ -3220,6 +3378,7 @@ def _evaluate_corridor_pair_conflict(
     eval_time: float,
     t1_ts: Optional[float] = None,
     t2_ts: Optional[float] = None,
+    tracks_data: Optional[Dict[str, Any]] = None,
 ) -> Optional[ConflictAlert]:
     """Evaluate kinematic conflict between a single pair of trains on the same corridor."""
     p1 = GeoPoint(lat=float(t1.lat), lng=float(t1.lng))
@@ -3228,6 +3387,21 @@ def _evaluate_corridor_pair_conflict(
     max_check_dist = max(cfg.opposing_warning_distance_km, cfg.headway_warning_distance_km)
     if dist_km > max_check_dist:
         return None
+
+    # Along-track chainage & tangent refinement when corridor polyline is available
+    proj1 = project_point_to_corridor_chainage(p1, cid, tracks_data)
+    proj2 = project_point_to_corridor_chainage(p2, cid, tracks_data)
+    use_chainage = (
+        proj1 is not None
+        and proj2 is not None
+        and proj1[1] <= cfg.max_corridor_snap_distance_m
+        and proj2[1] <= cfg.max_corridor_snap_distance_m
+    )
+    if use_chainage and proj1 is not None and proj2 is not None:
+        chainage_dist_km = abs(proj1[0] - proj2[0])
+        if chainage_dist_km > max_check_dist:
+            return None
+        dist_km = max(dist_km, chainage_dist_km)
 
     spd1 = float(getattr(t1, "speed", 0.0) or 0.0)
     spd2 = float(getattr(t2, "speed", 0.0) or 0.0)
@@ -3240,6 +3414,21 @@ def _evaluate_corridor_pair_conflict(
 
     heading_delta = compute_relative_heading_delta(c1, c2)
     closing_spd = compute_closing_velocity_kmh(p1, spd1, c1, p2, spd2, c2)
+    if use_chainage and proj1 is not None and proj2 is not None:
+        # Refine closing speed along track tangent for S-curve approaches
+        d1_fwd = compute_relative_heading_delta(c1, proj1[2]) <= 90.0
+        d2_fwd = compute_relative_heading_delta(c2, proj2[2]) <= 90.0
+        v1_signed = spd1 if d1_fwd else -spd1
+        v2_signed = spd2 if d2_fwd else -spd2
+        if proj1[0] < proj2[0]:
+            chainage_closing = v1_signed - v2_signed
+        else:
+            chainage_closing = v2_signed - v1_signed
+        if d1_fwd != d2_fwd:
+            heading_delta = max(heading_delta, 180.0)
+            closing_spd = max(closing_spd, max(0.0, chainage_closing))
+        else:
+            closing_spd = max(closing_spd, max(0.0, chainage_closing))
     ttc_sec: Optional[float] = (dist_km / closing_spd) * 3600.0 if closing_spd > 1.0 else None
 
     meet_stn = find_station_passing_meet(
@@ -3378,9 +3567,17 @@ def evaluate_train_conflicts(
         )
         if not cid or cid == "unassigned":
             continue
+        # Re-bucket branch trains currently traversing a shared double-track trunk
+        trunk_spec = SHARED_DOUBLE_TRACK_TRUNKS.get(cid)
+        if trunk_spec is not None:
+            trunk_cid, min_lat, max_lat = trunk_spec
+            pos_lat = float(getattr(pos, "lat", 0.0))
+            if min_lat <= pos_lat <= max_lat:
+                cid = trunk_cid
         corridor_buckets.setdefault(cid, []).append((pos, obs_ts))
 
     alerts: List[ConflictAlert] = []
+    seen_pairs: Set[Tuple[str, str]] = set()
 
     # 2. Iterate pairwise within each corridor
     for cid, train_entries in corridor_buckets.items():
@@ -3395,6 +3592,10 @@ def evaluate_train_conflicts(
             t1, t1_ts = train_entries[i]
             for j in range(i + 1, n):
                 t2, t2_ts = train_entries[j]
+                id1 = str(getattr(t1, "id", "t1"))
+                id2 = str(getattr(t2, "id", "t2"))
+                pair_id = (min(id1, id2), max(id1, id2))
+                seen_pairs.add(pair_id)
                 conflict = _evaluate_corridor_pair_conflict(
                     t1,
                     t2,
@@ -3406,6 +3607,44 @@ def evaluate_train_conflicts(
                     eval_time,
                     t1_ts=t1_ts,
                     t2_ts=t2_ts,
+                    tracks_data=tracks_data,
+                )
+                if conflict is not None:
+                    alerts.append(conflict)
+
+    # 3. Evaluate cross-corridor pairs on shared single-track trunk sections
+    for cid_a, cid_b, min_lat, max_lat in SHARED_SINGLE_TRACK_TRUNKS:
+        entries_a = corridor_buckets.get(cid_a, [])
+        entries_b = corridor_buckets.get(cid_b, [])
+        if not entries_a or not entries_b:
+            continue
+        c_display = CORRIDOR_DISPLAY_NAMES.get(cid_a, cid_a.replace("-", " ").title())
+        for t1, t1_ts in entries_a:
+            lat1 = float(getattr(t1, "lat", 0.0))
+            if not (min_lat <= lat1 <= max_lat):
+                continue
+            for t2, t2_ts in entries_b:
+                lat2 = float(getattr(t2, "lat", 0.0))
+                if not (min_lat <= lat2 <= max_lat):
+                    continue
+                id1 = str(getattr(t1, "id", "t1"))
+                id2 = str(getattr(t2, "id", "t2"))
+                pair_id = (min(id1, id2), max(id1, id2))
+                if pair_id in seen_pairs:
+                    continue
+                seen_pairs.add(pair_id)
+                conflict = _evaluate_corridor_pair_conflict(
+                    t1,
+                    t2,
+                    cid_a,
+                    c_display,
+                    True,
+                    cfg,
+                    stations,
+                    eval_time,
+                    t1_ts=t1_ts,
+                    t2_ts=t2_ts,
+                    tracks_data=tracks_data,
                 )
                 if conflict is not None:
                     alerts.append(conflict)

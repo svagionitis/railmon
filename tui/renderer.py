@@ -1210,6 +1210,12 @@ def safe_addstr(
 
     try:
         win.addstr(y, x, text, attr)
+    except UnicodeEncodeError:
+        ascii_safe = text.encode("ascii", errors="replace").decode("ascii")
+        try:
+            win.addstr(y, x, ascii_safe, attr)
+        except curses.error:
+            pass
     except curses.error:
         # Curses raises error when writing to bottom-right cell; safely ignore
         pass

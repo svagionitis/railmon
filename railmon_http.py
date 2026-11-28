@@ -208,6 +208,49 @@ def validate_allowed_hosts(hosts: Sequence[str]) -> Tuple[str, ...]:
     return tuple(normalized)
 
 
+def accepts_gzip(accept_encoding_header: Optional[str]) -> bool:
+    """Parse RFC 9110 Accept-Encoding header with case-insensitive q= weights for gzip."""
+    if not accept_encoding_header:
+        return False
+    gzip_q: Optional[float] = None
+    wildcard_q: Optional[float] = None
+    for raw_item in accept_encoding_header.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        parts = [p.strip() for p in item.split(";")]
+        coding = parts[0].lower()
+        q_val = 1.0
+        for param in parts[1:]:
+            if param.lower().startswith("q="):
+                try:
+                    q_val = float(param[2:].strip())
+                except ValueError:
+                    q_val = 0.0
+                break
+        if coding in ("gzip", "x-gzip"):
+            gzip_q = q_val
+        elif coding == "*":
+            wildcard_q = q_val
+    if gzip_q is not None:
+        return gzip_q > 0.0
+    if wildcard_q is not None:
+        return wildcard_q > 0.0
+    return False
+
+
+def format_representation_etag(base_etag: str, gzip_encoded: bool) -> str:
+    """Scope an HTTP ETag to its Content-Encoding representation (RFC 9110 §8.8.3)."""
+    if not gzip_encoded:
+        return base_etag
+    stripped = base_etag.strip()
+    if stripped.startswith('W/"') and stripped.endswith('"'):
+        return f'W/"{stripped[3:-1]}-gz"'
+    if stripped.startswith('"') and stripped.endswith('"'):
+        return f'"{stripped[1:-1]}-gz"'
+    return f"{stripped}-gz"
+
+
 def parse_host_header(raw_host: Any) -> Optional[Tuple[str, Optional[int]]]:
     """Parse an HTTP Host header strictly per RFC 9110 §7.2 (uri-host [ ':' port ]).
 
@@ -779,6 +822,8 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         self._rejected_connections: int = 0
         self._timed_out_connections: int = 0
         self._rejected_host_requests: int = 0
+        self._serving_started = threading.Event()
+        self._serve_thread_id: Optional[int] = None
         self._overload_503_payload: bytes = _build_overload_503_response(
             self.http_limits.overload_retry_after_sec
         )
@@ -794,6 +839,29 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             bound_port=bound_port,
             extra_allowed_hosts=validated_hosts,
         )
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        """Record serving thread identity before entering BaseServer.serve_forever."""
+        self._serve_thread_id = threading.get_ident()
+        self._serving_started.set()
+        try:
+            super().serve_forever(poll_interval=poll_interval)
+        finally:
+            self._serve_thread_id = None
+
+    def safe_shutdown(self) -> None:
+        """Stop serve_forever() without deadlocking if unstarted or called on the serving thread."""
+        if not self._serving_started.is_set():
+            return
+        if threading.get_ident() == self._serve_thread_id:
+            helper = threading.Thread(
+                target=self.shutdown,
+                name=f"{type(self).__name__}ShutdownHelper",
+                daemon=True,
+            )
+            helper.start()
+            return
+        self.shutdown()
 
     @property
     def max_connections(self) -> int:

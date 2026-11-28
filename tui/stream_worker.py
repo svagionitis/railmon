@@ -145,7 +145,7 @@ class StreamWorker:
                     if self._stop_event.is_set():
                         break
 
-                    if self.store.get_snapshot().connection_status != ConnectionStatus.CONNECTED:
+                    if self.store.get_connection_status() != ConnectionStatus.CONNECTED:
                         self.store.set_connection_status(ConnectionStatus.CONNECTED, "Live stream active")
                     backoff = self.base_backoff_sec  # Reset backoff upon successful data frame
 
@@ -158,9 +158,19 @@ class StreamWorker:
                     self._dispatch_stream_item(batch)
                     self._check_prune()
 
-                # If generator completed normally without error
+                # If generator completed normally without error, back off to prevent tight EOF spin
                 self._check_prune()
                 if self._stop_event.is_set():
+                    break
+                if not self._pause_event.is_set():
+                    continue
+                eof_wait = min(backoff * random.uniform(0.8, 1.2), self.max_backoff_sec)
+                backoff = min(backoff * 2.0, self.max_backoff_sec)
+                self.store.set_connection_status(
+                    ConnectionStatus.RECONNECTING,
+                    f"Stream ended (EOF). Reconnecting in {eof_wait:.1f}s...",
+                )
+                if self._stop_event.wait(timeout=eof_wait):
                     break
 
             except Exception as exc:

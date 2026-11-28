@@ -102,8 +102,8 @@ class TestPointInTunnelDetection(unittest.TestCase):
         self.assertAlmostEqual(ratio, 0.50, delta=0.15)
 
     def test_detect_train_inside_othrys_tunnel(self) -> None:
-        # Mid-tunnel coordinate along Mount Othrys
-        query_pt = GeoPoint(lat=39.0050, lng=22.3680)
+        # Mid-tunnel coordinate along Mount Othrys (aligned to PATHE mainline track)
+        query_pt = GeoPoint(lat=39.004028, lng=22.362577)
         res = detect_train_tunnel(query_pt, self.tunnels)
         self.assertIsNotNone(res)
         assert res is not None

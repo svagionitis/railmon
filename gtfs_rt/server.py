@@ -162,38 +162,49 @@ class GtfsRtHandler(BoundedHTTPRequestHandler):
     ) -> None:
         """Build or reuse cached GTFS-RT payload and emit with ETag/gzip support."""
         snapshot = self.server.store.get_snapshot()
+        from railmon_http import accepts_gzip, format_representation_etag
+
         cached = self.server.feed_cache.get_or_build(snapshot, feed_kind)
 
         if fmt == OutputFormat.JSON:
             body = cached.json_bytes
-            etag = cached.etag_json
+            base_etag = cached.etag_json
             content_type = "application/json; charset=utf-8"
         else:
             body = cached.pb_bytes
-            etag = cached.etag_pb
+            base_etag = cached.etag_pb
             content_type = "application/x-protobuf"
 
-        if etag_matches(self.headers.get("If-None-Match"), etag):
+        want_gzip = (
+            self.server.config.gzip_compression
+            and len(body) > 256
+            and accepts_gzip(self.headers.get("Accept-Encoding"))
+        )
+        etag = format_representation_etag(base_etag, want_gzip)
+
+        if etag_matches(self.headers.get("If-None-Match"), etag) or etag_matches(
+            self.headers.get("If-None-Match"), base_etag
+        ):
             self.send_response(304)
             self._add_cors()
             self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept, Accept-Encoding")
             self.send_header("Cache-Control", "public, max-age=5")
             self.send_header("X-GTFS-RT-Version", GTFS_RT_VERSION)
-            self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
         encoding: Optional[str] = None
-        if self.server.config.gzip_compression and len(body) > 256:
-            if "gzip" in self.headers.get("Accept-Encoding", ""):
-                body = gzip.compress(body, compresslevel=6)
-                encoding = "gzip"
+        if want_gzip:
+            body = gzip.compress(body, compresslevel=6)
+            encoding = "gzip"
 
         self.send_response(200)
         self._add_cors()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("ETag", etag)
+        self.send_header("Vary", "Accept, Accept-Encoding")
         self.send_header("Cache-Control", "public, max-age=5")
         self.send_header("X-GTFS-RT-Version", GTFS_RT_VERSION)
         self.send_header("X-Entity-Count", str(cached.entity_count))
@@ -284,17 +295,22 @@ class GtfsRtHandler(BoundedHTTPRequestHandler):
             self.wfile.write(body)
 
     def _send_err(self, status_code: int, message: str) -> None:
-        """Emit structured JSON HTTP error payload."""
+        """Emit structured JSON HTTP error payload (RFC 9110 Allow/close on 405, bodyless HEAD)."""
         try:
             body = json.dumps({"error": message, "status": status_code}).encode("utf-8")
+            if status_code == 405:
+                self.close_connection = True
             self.send_response(status_code)
             self._add_cors()
+            if status_code == 405:
+                self.send_header("Allow", "GET, HEAD, OPTIONS")
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             if self.close_connection:
                 self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(body)
+            if getattr(self, "command", "GET") != "HEAD":
+                self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             logger.debug("Failed sending error response to disconnected GTFS-RT client")
 
@@ -389,7 +405,7 @@ class GtfsRtServer(BoundedHTTPServer):
             return
         self._shutdown_event.set()
         try:
-            self.shutdown()
+            self.safe_shutdown()
             self.server_close()
         except Exception as exc:
             logger.warning("Error during GtfsRtServer shutdown: %s", exc)

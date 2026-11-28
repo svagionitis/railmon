@@ -8,7 +8,8 @@ from enum import Enum, auto
 import logging
 import threading
 import time
-from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+from types import MappingProxyType
+from typing import Any, Deque, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from train_tracker import DelayUpdate, GhostTrain, TrainHistoryPoint, TrainPosition
 from tui.geo import (
@@ -709,8 +710,13 @@ class TrainStateStore:
         except (OSError, ValueError, KeyError, TypeError):
             self._tracks_data = None
         self._active_conflicts: Dict[str, ConflictAlert] = {}
-        self._previous_conflict_keys: Set[str] = set()
+        self._previous_conflict_keys: Set[Tuple[str, ConflictSeverity]] = set()
         self._new_conflict_bell_pending: bool = False
+        self._cumulative_conflicts: Dict[Tuple[str, str, str], int] = {}
+        self._total_reconnects: int = 0
+        self._published_snapshot: Optional[StateSnapshot] = None
+        self._published_version: int = -1
+        self._last_maintenance_mono: float = 0.0
 
     # ------------------------------------------------------------------
     # Telemetry Ingestion (Called by StreamWorker / ReplayWorker Thread)
@@ -749,6 +755,9 @@ class TrainStateStore:
                 sensor_freeze_threshold_sec=self._sensor_freeze_threshold_sec,
                 sensor_freeze_min_speed_kmh=self._sensor_freeze_min_speed_kmh,
                 sensor_freeze_max_packet_age_sec=self._sensor_freeze_max_packet_age_sec,
+                previous_state=(
+                    rec.sensor_health.state if rec.sensor_health is not None else None
+                ),
             )
             rec.last_moved_pt = new_moved_pt
             rec.last_moved_time = new_moved_time
@@ -978,20 +987,20 @@ class TrainStateStore:
 
     @staticmethod
     def _delay_update_matches_live(upd: DelayUpdate, pos: TrainPosition) -> bool:
-        """Determine whether a DelayUpdate applies to a live TrainPosition."""
-        if upd.train_id and pos.id == upd.train_id:
-            return True
-        if upd.schedule_id and pos.schedule_id and pos.schedule_id == upd.schedule_id:
-            return True
+        """Determine whether a DelayUpdate applies to a live TrainPosition (strict ID precedence)."""
+        if upd.train_id:
+            return pos.id == upd.train_id
+        if upd.schedule_id:
+            return bool(pos.schedule_id and pos.schedule_id == upd.schedule_id)
         if upd.train_number and pos.train_number:
             return pos.train_number.strip().upper() == upd.train_number.strip().upper()
         return False
 
     @staticmethod
     def _delay_update_matches_ghost(upd: DelayUpdate, ghost: GhostTrain) -> bool:
-        """Determine whether a DelayUpdate applies to a GhostTrain."""
-        if upd.schedule_id and ghost.schedule_id and ghost.schedule_id == upd.schedule_id:
-            return True
+        """Determine whether a DelayUpdate applies to a GhostTrain (strict ID precedence)."""
+        if upd.schedule_id:
+            return bool(ghost.schedule_id and ghost.schedule_id == upd.schedule_id)
         if upd.train_number and ghost.train_number:
             return ghost.train_number.strip().upper() == upd.train_number.strip().upper()
         return False
@@ -1028,6 +1037,23 @@ class TrainStateStore:
                 self._version += 1
             return modified
 
+    @staticmethod
+    def _is_higher_priority_conflict(
+        candidate: ConflictAlert,
+        current: Optional[ConflictAlert],
+    ) -> bool:
+        """Return True if candidate outranks current (higher severity, then nearer distance)."""
+        if current is None:
+            return True
+        rank = {
+            ConflictSeverity.CRITICAL: 0,
+            ConflictSeverity.WARNING: 1,
+            ConflictSeverity.ADVISORY: 2,
+        }
+        cand_key = (rank.get(candidate.severity, 99), candidate.distance_km)
+        curr_key = (rank.get(current.severity, 99), current.distance_km)
+        return cand_key < curr_key
+
     def _recompute_conflicts(self, now: float) -> None:
         """Evaluate and cache pairwise conflicts across all active trains (caller holds self._lock)."""
         active_records = list(self._trains.values())
@@ -1045,27 +1071,34 @@ class TrainStateStore:
         for alert in alerts:
             new_conflicts_by_id[alert.alert_id] = alert
             if alert.train_id_1 in self._trains:
-                if (
-                    self._trains[alert.train_id_1].active_conflict is None
-                    or alert.severity == ConflictSeverity.CRITICAL
+                if self._is_higher_priority_conflict(
+                    alert, self._trains[alert.train_id_1].active_conflict
                 ):
                     self._trains[alert.train_id_1].active_conflict = alert
             if alert.train_id_2 in self._trains:
-                if (
-                    self._trains[alert.train_id_2].active_conflict is None
-                    or alert.severity == ConflictSeverity.CRITICAL
+                if self._is_higher_priority_conflict(
+                    alert, self._trains[alert.train_id_2].active_conflict
                 ):
                     self._trains[alert.train_id_2].active_conflict = alert
 
-        # Check for newly elevated conflicts (edge-triggered bell latch)
+        # Check for newly elevated conflicts (edge-triggered bell latch keyed on (alert_id, severity))
+        new_keys: Set[Tuple[str, ConflictSeverity]] = set()
         for aid, alert in new_conflicts_by_id.items():
-            if aid not in self._previous_conflict_keys and alert.severity in (
-                ConflictSeverity.CRITICAL,
-                ConflictSeverity.WARNING,
-            ):
-                self._new_conflict_bell_pending = True
+            key = (aid, alert.severity)
+            new_keys.add(key)
+            if key not in self._previous_conflict_keys:
+                sev_label = alert.severity.name.lower()
+                ctype_label = alert.conflict_type.name.lower()
+                corr_label = str(alert.corridor_name or alert.corridor_id or "UNKNOWN")
+                ckey = (sev_label, ctype_label, corr_label)
+                self._cumulative_conflicts[ckey] = self._cumulative_conflicts.get(ckey, 0) + 1
+                if alert.severity in (
+                    ConflictSeverity.CRITICAL,
+                    ConflictSeverity.WARNING,
+                ):
+                    self._new_conflict_bell_pending = True
 
-        self._previous_conflict_keys = set(new_conflicts_by_id.keys())
+        self._previous_conflict_keys = new_keys
         self._active_conflicts = new_conflicts_by_id
 
     def consume_conflict_bell(self) -> bool:
@@ -1235,6 +1268,8 @@ class TrainStateStore:
         """
         explicit_cutoff = float(max_age_sec) if max_age_sec is not None else None
         with self._lock:
+            if explicit_cutoff is None and self._connection_status == ConnectionStatus.PAUSED:
+                return 0
             if now is not None:
                 ref_now = float(now)
             elif self._is_replay and self._replay_virtual_time is not None:
@@ -1290,7 +1325,9 @@ class TrainStateStore:
             ]
             for cid in orphaned_conflict_keys:
                 del self._active_conflicts[cid]
-                self._previous_conflict_keys.discard(cid)
+            self._previous_conflict_keys = {
+                key for key in self._previous_conflict_keys if key[0] not in orphaned_conflict_keys
+            }
 
             # Re-evaluate conflicts across remaining active trains
             self._recompute_conflicts(ref_now)
@@ -1303,10 +1340,32 @@ class TrainStateStore:
     def set_connection_status(self, status: ConnectionStatus, message: str = "") -> None:
         """Update stream connectivity status and descriptive status message."""
         with self._lock:
+            prev_status = self._connection_status
+            if prev_status != status and status in (
+                ConnectionStatus.CONNECTING,
+                ConnectionStatus.RECONNECTING,
+            ):
+                if prev_status != ConnectionStatus.DISCONNECTED or self._total_messages > 0:
+                    self._total_reconnects += 1
             self._connection_status = status
             if message:
                 self._status_message = message
             self._version += 1
+
+    def get_connection_status(self) -> ConnectionStatus:
+        """Return current connection status in O(1) without constructing a StateSnapshot."""
+        with self._lock:
+            return self._connection_status
+
+    def get_cumulative_conflicts(self) -> Dict[Tuple[str, str, str], int]:
+        """Return a copy of store-tracked cumulative conflict counts by (severity, type, corridor)."""
+        with self._lock:
+            return dict(self._cumulative_conflicts)
+
+    def get_total_reconnects(self) -> int:
+        """Return store-tracked cumulative stream reconnection count."""
+        with self._lock:
+            return self._total_reconnects
 
     def set_recording_status(self, is_recording: bool, db_path: Optional[str] = None) -> None:
         """Update background telemetry persistence status and database path."""
@@ -1468,11 +1527,8 @@ class TrainStateStore:
     # UI State & Cursor Navigation (Called by UI Thread)
     # ------------------------------------------------------------------
 
-    def get_snapshot(self, now: Optional[float] = None) -> StateSnapshot:
-        """
-        Produce a frozen, consistent point-in-time snapshot for UI rendering.
-        Operates with minimal lock hold duration.
-        """
+    def run_maintenance_tick(self, now: Optional[float] = None) -> bool:
+        """Re-evaluate sensor health and pairwise conflicts, bumping _version on any transition."""
         with self._lock:
             if now is not None:
                 ref_now = float(now)
@@ -1480,7 +1536,10 @@ class TrainStateStore:
                 ref_now = self._replay_virtual_time
             else:
                 ref_now = time.time()
+
+            changed = False
             for rec in self._trains.values():
+                prev_state = rec.sensor_health.state if rec.sensor_health is not None else None
                 pt = GeoPoint(lat=rec.position.lat, lng=rec.position.lng)
                 health, new_moved_pt, new_moved_time, new_dwell_start = evaluate_sensor_health(
                     point=pt,
@@ -1496,13 +1555,54 @@ class TrainStateStore:
                     sensor_freeze_threshold_sec=self._sensor_freeze_threshold_sec,
                     sensor_freeze_min_speed_kmh=self._sensor_freeze_min_speed_kmh,
                     sensor_freeze_max_packet_age_sec=self._sensor_freeze_max_packet_age_sec,
+                    previous_state=prev_state,
                 )
                 rec.last_moved_pt = new_moved_pt
                 rec.last_moved_time = new_moved_time
                 rec.station_dwell_start = new_dwell_start
                 rec.sensor_health = health
+                if prev_state != health.state:
+                    changed = True
 
+            prev_conflict_sig = {
+                (aid, alert.severity) for aid, alert in self._active_conflicts.items()
+            }
             self._recompute_conflicts(ref_now)
+            curr_conflict_sig = {
+                (aid, alert.severity) for aid, alert in self._active_conflicts.items()
+            }
+            if curr_conflict_sig != prev_conflict_sig:
+                changed = True
+
+            self._last_maintenance_mono = time.monotonic()
+            if changed:
+                self._version += 1
+            return changed
+
+    def get_snapshot(self, now: Optional[float] = None) -> StateSnapshot:
+        """
+        Return a copy-on-write immutable point-in-time snapshot for UI/daemon consumers.
+        Returns cached snapshot in O(1) when version is unchanged within the 1 Hz maintenance window.
+        """
+        with self._lock:
+            now_mono = time.monotonic()
+            if now is not None:
+                self.run_maintenance_tick(now=now)
+            elif (
+                self._published_snapshot is not None
+                and self._published_version == self._version
+                and len(self._published_snapshot.trains) == len(self._trains)
+                and (now_mono - self._last_maintenance_mono) < 1.0
+            ):
+                return self._published_snapshot
+            elif (now_mono - self._last_maintenance_mono) >= 1.0:
+                self.run_maintenance_tick(now=None)
+                if (
+                    self._published_snapshot is not None
+                    and self._published_version == self._version
+                    and len(self._published_snapshot.trains) == len(self._trains)
+                ):
+                    return self._published_snapshot
 
             trains_copy = {tid: rec.clone() for tid, rec in self._trains.items()}
             filtered = self._compute_filtered_list(trains_copy)
@@ -1544,8 +1644,8 @@ class TrainStateStore:
                 self._active_conflicts
             )
 
-            return StateSnapshot(
-                trains=trains_copy,
+            snap = StateSnapshot(
+                trains=MappingProxyType(trains_copy),  # type: ignore[arg-type]
                 filtered_trains=tuple(filtered),
                 selected_train=selected_record,
                 selected_index=sel_idx,
@@ -1590,7 +1690,7 @@ class TrainStateStore:
                 advisory_conflict_count=advisory_conflicts,
                 selected_conflict=sel_conflict,
                 duplicate_train_numbers=duplicate_train_numbers,
-                ghost_trains=ghost_trains_copy,
+                ghost_trains=MappingProxyType(ghost_trains_copy),  # type: ignore[arg-type]
                 filtered_ghosts=tuple(filtered_ghosts),
                 selected_ghost=selected_ghost,
                 ghost_visibility_mode=self._ghost_visibility_mode,
@@ -1599,17 +1699,23 @@ class TrainStateStore:
                 delay_updates_applied=self._delay_updates_applied,
                 stream_event_counts=tuple(sorted(self._stream_event_counts.items())),
             )
+            if now is None:
+                self._published_snapshot = snap
+                self._published_version = self._version
+            return snap
 
     def get_train(self, train_id: str) -> Optional[TrainRecord]:
-        """Retrieve a specific train record by ID, or None if not present."""
+        """Retrieve a defensive copy of a specific train record by ID, or None if not present."""
         with self._lock:
-            return self._trains.get(train_id)
+            rec = self._trains.get(train_id)
+            return rec.clone() if rec is not None else None
 
     def get_selected_train(self) -> Optional[TrainRecord]:
-        """Retrieve currently selected train record, or None if none selected."""
+        """Retrieve a defensive copy of the currently selected train record, or None."""
         with self._lock:
             if self._selected_id:
-                return self._trains.get(self._selected_id)
+                rec = self._trains.get(self._selected_id)
+                return rec.clone() if rec is not None else None
             return None
 
     def _combined_roster_ids(self) -> List[str]:

@@ -122,10 +122,11 @@ class MetricsRequestHandler(BoundedHTTPRequestHandler):
             else:
                 body = MetricsFormatter.format_prometheus_004(families)
 
+            from railmon_http import accepts_gzip
+
             content_encoding: Optional[str] = None
             if self.server.config.gzip_compression and len(body) > 256:
-                accept_encoding = self.headers.get("Accept-Encoding", "")
-                if "gzip" in accept_encoding:
+                if accepts_gzip(self.headers.get("Accept-Encoding")):
                     body = gzip.compress(body, compresslevel=6)
                     content_encoding = "gzip"
 
@@ -133,6 +134,7 @@ class MetricsRequestHandler(BoundedHTTPRequestHandler):
             self._add_cors_headers()
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Vary", "Accept, Accept-Encoding")
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             if content_encoding:
                 self.send_header("Content-Encoding", content_encoding)
@@ -242,19 +244,24 @@ class MetricsRequestHandler(BoundedHTTPRequestHandler):
             self.wfile.write(body)
 
     def _send_error(self, status_code: int, message: str) -> None:
-        """Emit structured JSON error response."""
+        """Emit structured JSON error response (RFC 9110 Allow/close on 405, bodyless HEAD)."""
         try:
             payload = {"error": message, "status": status_code}
             body = json.dumps(payload).encode("utf-8")
+            if status_code == 405:
+                self.close_connection = True
 
             self.send_response(status_code)
             self._add_cors_headers()
+            if status_code == 405:
+                self.send_header("Allow", "GET, HEAD, OPTIONS")
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             if self.close_connection:
                 self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(body)
+            if getattr(self, "command", "GET") != "HEAD":
+                self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             logger.debug("Failed sending error response to disconnected client")
 
@@ -364,7 +371,7 @@ class MetricsServer(BoundedHTTPServer):
         self._shutdown_event.set()
         logger.info("Shutting down MetricsServer daemon...")
         try:
-            self.shutdown()
+            self.safe_shutdown()
             self.server_close()
         except Exception as exc:
             logger.warning("Error during MetricsServer shutdown: %s", exc)

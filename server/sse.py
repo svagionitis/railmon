@@ -95,8 +95,13 @@ class SSEBroadcaster:
         )
         return conn
 
-    def unregister_client(self, client_id: str) -> Optional[ClientConnection]:
-        """Unregister an SSE client and purge its remaining queue."""
+    def unregister_client(
+        self,
+        client_id: str,
+        *,
+        notify_close: bool = False,
+    ) -> Optional[ClientConnection]:
+        """Unregister an SSE client, purge its queue, and optionally push a wake-up sentinel."""
         with self._lock:
             conn = self._clients.pop(client_id, None)
             client_count = len(self._clients)
@@ -108,16 +113,31 @@ class SSEBroadcaster:
                 conn.frames_sent,
                 client_count,
             )
-            # Drain remaining items in queue to release memory
             while not conn.queue.empty():
                 try:
                     conn.queue.get_nowait()
                 except queue.Empty:
                     break
+            if notify_close:
+                try:
+                    conn.queue.put_nowait(None)  # type: ignore[arg-type]
+                except queue.Full:
+                    pass
         return conn
+
+    def shutdown(self) -> int:
+        """Unregister all active SSE clients and wake their blocked handler threads."""
+        with self._lock:
+            client_ids = list(self._clients.keys())
+        for cid in client_ids:
+            self.unregister_client(cid, notify_close=True)
+        return len(client_ids)
 
     def broadcast(self, event_name: str, payload_json: str) -> int:
         """Broadcast an event frame to all registered subscriber queues.
+
+        Does NOT call conn.touch() on enqueue so dead/stalled consumers are still evicted
+        when their handler threads fail to flush.
 
         Returns:
             Number of clients the event was successfully enqueued for.
@@ -131,7 +151,6 @@ class SSEBroadcaster:
             try:
                 conn.queue.put_nowait((event_name, payload_json))
                 conn.frames_sent += 1
-                conn.touch()
                 enqueued_count += 1
                 with self._lock:
                     self._total_frames_sent += 1
@@ -146,7 +165,6 @@ class SSEBroadcaster:
                     conn.queue.put_nowait((event_name, payload_json))
                     conn.frames_sent += 1
                     conn.frames_dropped += 1
-                    conn.touch()
                     enqueued_count += 1
                     with self._lock:
                         self._total_frames_sent += 1

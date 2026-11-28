@@ -310,8 +310,11 @@ class TrainTelemetryCollector(BaseCollector):
 class WatchdogMetricsCollector(BaseCollector):
     """Collects safety conflict alerts, sensor freeze, and telemetry drop metrics."""
 
+    _MAX_FALLBACK_CONFLICT_KEYS: int = 4096
+
     def __init__(self, store: TrainStateStore) -> None:
         self.store = store
+        self._lock = threading.Lock()
         self._cumulative_conflicts: Dict[Tuple[str, str, str], int] = {}
         self._seen_conflict_ids: Set[str] = set()
 
@@ -345,6 +348,10 @@ class WatchdogMetricsCollector(BaseCollector):
         )
 
         active_counts: Dict[Tuple[str, str, str], int] = {}
+        store_cum_fn = getattr(self.store, "get_cumulative_conflicts", None)
+        store_cum = store_cum_fn() if callable(store_cum_fn) else None
+        use_store_cum = isinstance(store_cum, dict) and len(store_cum) > 0
+
         for conflict in snap.active_conflicts:
             sev = conflict.severity.name.lower()
             ctype = getattr(conflict, "conflict_type", "collision")
@@ -360,18 +367,28 @@ class WatchdogMetricsCollector(BaseCollector):
             key = (sev, str(ctype), str(corr))
             active_counts[key] = active_counts.get(key, 0) + 1
 
-            cid = getattr(
-                conflict,
-                "alert_id",
-                getattr(
+            if not use_store_cum:
+                cid = getattr(
                     conflict,
-                    "conflict_id",
-                    f"{sev}_{ctype}_{corr}_{getattr(conflict, 'train_id_1', getattr(conflict, 'train1_id', ''))}",
-                ),
-            )
-            if cid not in self._seen_conflict_ids:
-                self._seen_conflict_ids.add(cid)
-                self._cumulative_conflicts[key] = self._cumulative_conflicts.get(key, 0) + 1
+                    "alert_id",
+                    getattr(
+                        conflict,
+                        "conflict_id",
+                        f"{sev}_{ctype}_{corr}_{getattr(conflict, 'train_id_1', getattr(conflict, 'train1_id', ''))}",
+                    ),
+                )
+                with self._lock:
+                    if cid not in self._seen_conflict_ids:
+                        if len(self._seen_conflict_ids) >= self._MAX_FALLBACK_CONFLICT_KEYS:
+                            self._seen_conflict_ids.clear()
+                        self._seen_conflict_ids.add(cid)
+                        self._cumulative_conflicts[key] = self._cumulative_conflicts.get(key, 0) + 1
+
+        if use_store_cum and isinstance(store_cum, dict):
+            cum_snapshot = dict(store_cum)
+        else:
+            with self._lock:
+                cum_snapshot = dict(self._cumulative_conflicts)
 
         for (sev, ctype, corr), count in sorted(active_counts.items()):
             fam_conflicts_active.add_sample(
@@ -379,7 +396,7 @@ class WatchdogMetricsCollector(BaseCollector):
                 value=count,
             )
 
-        for (sev, ctype, corr), cum_count in sorted(self._cumulative_conflicts.items()):
+        for (sev, ctype, corr), cum_count in sorted(cum_snapshot.items()):
             fam_conflicts_total.add_sample(
                 labels={"severity": sev, "conflict_type": ctype, "corridor": corr},
                 value=cum_count,
@@ -429,6 +446,7 @@ class StreamMetricsCollector(BaseCollector):
     def __init__(self, store: TrainStateStore, endpoint: str = "railway.gov.gr") -> None:
         self.store = store
         self.endpoint = endpoint
+        self._lock = threading.Lock()
         self._prev_status: Optional[str] = None
         self._reconnects_total: int = 0
 
@@ -461,12 +479,21 @@ class StreamMetricsCollector(BaseCollector):
         fam_conn.add_sample(labels={"endpoint": self.endpoint}, value=is_conn)
 
         curr_status = getattr(snap.connection_status, "name", str(snap.connection_status))
-        if self._prev_status is not None and self._prev_status != curr_status:
-            if curr_status in ("CONNECTING", "RECONNECTING"):
-                self._reconnects_total += 1
-        self._prev_status = curr_status
+        with self._lock:
+            if self._prev_status is not None and self._prev_status != curr_status:
+                if curr_status in ("CONNECTING", "RECONNECTING"):
+                    self._reconnects_total += 1
+            self._prev_status = curr_status
+            fallback_reconnects = self._reconnects_total
 
-        fam_reconn.add_sample(labels={"endpoint": self.endpoint}, value=self._reconnects_total)
+        store_reconn_fn = getattr(self.store, "get_total_reconnects", None)
+        store_reconn = store_reconn_fn() if callable(store_reconn_fn) else None
+        effective_reconnects = (
+            max(int(store_reconn), fallback_reconnects)
+            if isinstance(store_reconn, int) and not isinstance(store_reconn, bool)
+            else fallback_reconnects
+        )
+        fam_reconn.add_sample(labels={"endpoint": self.endpoint}, value=effective_reconnects)
         fam_msgs.add_sample(
             labels={"event_type": "trainPositionsUx"},
             value=float(snap.total_messages_received),

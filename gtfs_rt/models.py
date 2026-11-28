@@ -1152,6 +1152,10 @@ class FeedEntity:
         return data
 
 
+MAX_PROTO_ENTITIES: int = 50_000
+MAX_PROTO_REPEATED_ITEMS: int = 10_000
+
+
 @dataclass(frozen=True)
 class FeedMessage:
     """Top-level GTFS-RT FeedMessage container (tags 1..2)."""
@@ -1167,14 +1171,18 @@ class FeedMessage:
         return b"".join(parts)
 
     @classmethod
-    def from_proto(cls, buf: bytes) -> "FeedMessage":
-        """Decode FeedMessage from proto2 binary bytes."""
+    def from_proto(cls, buf: bytes, max_entities: int = MAX_PROTO_ENTITIES) -> "FeedMessage":
+        """Decode FeedMessage from proto2 binary bytes with bounded entity cap."""
         header: Optional[FeedHeader] = None
         entities: List[FeedEntity] = []
         for fno, wt, raw in iter_wire_fields(buf):
             if fno == 1:
                 header = FeedHeader.from_proto(_expect_bytes(wt, raw, 1))
             elif fno == 2:
+                if len(entities) >= max_entities:
+                    raise WireDecodeError(
+                        f"FeedMessage exceeds maximum allowed entity count ({max_entities})"
+                    )
                 entities.append(FeedEntity.from_proto(_expect_bytes(wt, raw, 2)))
         if header is None:
             raise WireDecodeError("FeedMessage missing required field 1 (header)")

@@ -94,6 +94,7 @@ class TestCliConflicts(unittest.TestCase):
             critical_only=False,
             json=False,
             ascii=False,
+            demo=True,
         )
 
         captured_stdout = io.StringIO()
@@ -116,6 +117,7 @@ class TestCliConflicts(unittest.TestCase):
             critical_only=False,
             json=True,
             ascii=False,
+            demo=True,
         )
 
         captured_stdout = io.StringIO()

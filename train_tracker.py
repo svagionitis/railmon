@@ -9,11 +9,14 @@ import contextlib
 from datetime import datetime, timezone
 import email.utils
 from enum import Enum
+import http.client
+import io
 import json
 import logging
 import logging.handlers
 import math
 import os
+import queue
 import random
 import re
 import shutil
@@ -206,11 +209,10 @@ def install_signal_handlers(
     previous_handlers: Dict[int, Any] = {}
 
     def _handle_signal(signum: int, _frame: Any) -> None:
-        try:
-            sig_name = signal.Signals(signum).name
-        except ValueError:
-            sig_name = str(signum)
-        logger.info("Received signal %s (%d); initiating graceful shutdown...", sig_name, signum)
+        # Strictly async-signal-safe: never acquire logging locks inside a signal handler.
+        if event.is_set() and signum == signal.SIGINT:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            raise KeyboardInterrupt
         event.set()
 
     for sig in signals_to_trap:
@@ -1477,7 +1479,7 @@ class RailwayGovClient:
             return wait_time, 0
 
         jitter = random.uniform(0.8, 1.2)
-        wait_time = min(reconnect_delay * (2 ** attempt) * jitter, 60.0)
+        wait_time = min(reconnect_delay * (2 ** min(attempt, 20)) * jitter, 60.0)
         if isinstance(err, urllib.error.HTTPError) and 500 <= err.code < 600:
             log_fn(
                 "%s server error (HTTP %d %s): %s. Reconnecting in %.1fs...",
@@ -1496,28 +1498,78 @@ class RailwayGovClient:
             )
         return wait_time, attempt + 1
 
+    @staticmethod
+    def _iter_bounded_sse_lines(
+        resp: Any,
+        stop_event: Optional[threading.Event],
+    ) -> Generator[Optional[bytes], None, None]:
+        """Yield raw SSE lines bounded to MAX_SSE_FRAME_BYTES; yields None to mark an oversized line."""
+        readline_fn = getattr(resp, "readline", None)
+        # Avoid MagicMock auto-created attributes by verifying readline returns real bytes
+        use_readline = callable(readline_fn) and isinstance(
+            resp, (io.IOBase, http.client.HTTPResponse)
+        )
+        if not use_readline:
+            for raw_line in resp:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                if isinstance(raw_line, (bytes, bytearray)):
+                    yield bytes(raw_line)
+            return
+
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return
+            raw_line = readline_fn(MAX_SSE_FRAME_BYTES + 1)
+            if not raw_line or not isinstance(raw_line, (bytes, bytearray)):
+                return
+            if len(raw_line) > MAX_SSE_FRAME_BYTES and not raw_line.endswith((b"\n", b"\r")):
+                yield None
+                while raw_line and not raw_line.endswith((b"\n", b"\r")):
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    raw_line = readline_fn(MAX_SSE_FRAME_BYTES + 1)
+                continue
+            yield bytes(raw_line)
+
     def _iter_sse_frames(
         self,
         resp: Any,
         stop_event: Optional[threading.Event],
         include_raw_positions: bool = False,
+        last_event_id_box: Optional[List[Optional[str]]] = None,
     ) -> Generator[SSEFrame, None, None]:
-        """Iterate over raw SSE HTTP response lines and yield bounded multiplexed SSEFrames."""
+        """Iterate over raw SSE HTTP response lines with bounded reads and WHATWG framing."""
         current_event = "message"
         data_buffer: List[str] = []
         buffered_bytes: int = 0
         oversized_frame: bool = False
+        first_line: bool = True
 
-        for raw_line in resp:
-            if stop_event is not None and stop_event.is_set():
-                return
+        for raw_line in self._iter_bounded_sse_lines(resp, stop_event):
+            if raw_line is None:
+                if not oversized_frame:
+                    logger.warning(
+                        "Dropping oversized SSE '%s' line exceeding %d bytes.",
+                        current_event,
+                        MAX_SSE_FRAME_BYTES,
+                    )
+                oversized_frame = True
+                data_buffer = []
+                continue
 
-            line = raw_line.decode("utf-8", errors="ignore").strip()
+            decoded = raw_line.decode("utf-8", errors="ignore")
+            if first_line:
+                first_line = False
+                if decoded.startswith("\ufeff"):
+                    decoded = decoded[1:]
+            line = decoded.rstrip("\r\n")
+
             if not line:
                 if data_buffer and not oversized_frame:
                     frame = self._decode_sse_frame(
                         event_name=current_event,
-                        payload_str="".join(data_buffer),
+                        payload_str="\n".join(data_buffer),
                         include_raw_positions=include_raw_positions,
                         now=time.time(),
                     )
@@ -1527,24 +1579,29 @@ class RailwayGovClient:
                 buffered_bytes = 0
                 oversized_frame = False
                 current_event = "message"
-            elif line.startswith(":"):
-                continue  # W3C SSE comment / keep-alive heartbeat
-            elif line.startswith("event:"):
-                current_event = line.split(":", 1)[1].strip()
-            elif line.startswith("data:"):
-                chunk = line.split(":", 1)[1].strip()
-                buffered_bytes += len(chunk.encode("utf-8", errors="ignore"))
-                if buffered_bytes > MAX_SSE_FRAME_BYTES:
-                    if not oversized_frame:
-                        logger.warning(
-                            "Dropping oversized SSE '%s' frame exceeding %d bytes.",
-                            current_event,
-                            MAX_SSE_FRAME_BYTES,
-                        )
-                    oversized_frame = True
-                    data_buffer = []
-                elif not oversized_frame:
-                    data_buffer.append(chunk)
+            elif line.startswith(":") or ":" not in line:
+                continue
+            else:
+                field_name, field_value = line.split(":", 1)
+                if field_value.startswith(" "):
+                    field_value = field_value[1:]
+                if field_name == "event":
+                    current_event = field_value.strip() or "message"
+                elif field_name == "id" and "\x00" not in field_value and last_event_id_box is not None:
+                    last_event_id_box[0] = field_value
+                elif field_name == "data":
+                    buffered_bytes += len(field_value.encode("utf-8", errors="ignore")) + 1
+                    if buffered_bytes > MAX_SSE_FRAME_BYTES:
+                        if not oversized_frame:
+                            logger.warning(
+                                "Dropping oversized SSE '%s' frame exceeding %d bytes.",
+                                current_event,
+                                MAX_SSE_FRAME_BYTES,
+                            )
+                        oversized_frame = True
+                        data_buffer = []
+                    elif not oversized_frame:
+                        data_buffer.append(field_value)
 
     def _iter_sse_payloads(
         self,
@@ -1580,19 +1637,24 @@ class RailwayGovClient:
             timeout: Socket read timeout in seconds (default: 10.0).
         """
         stream_url = f"{self.base_url}/api/train-stream"
-        headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
+        base_headers = {**DEFAULT_HEADERS, "Accept": "text/event-stream"}
         attempt = 0
         disconnect_time: Optional[float] = None
         consecutive_failures: int = 0
+        last_event_id_box: List[Optional[str]] = [None]
 
         while stop_event is None or not stop_event.is_set():
             try:
-                req = urllib.request.Request(stream_url, headers=headers)
+                req_headers = dict(base_headers)
+                if last_event_id_box[0]:
+                    req_headers["Last-Event-ID"] = last_event_id_box[0]
+                req = urllib.request.Request(stream_url, headers=req_headers)
                 with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=timeout) as resp:
                     for frame in self._iter_sse_frames(
                         resp=resp,
                         stop_event=stop_event,
                         include_raw_positions=include_raw_positions,
+                        last_event_id_box=last_event_id_box,
                     ):
                         if consecutive_failures > 0 and disconnect_time is not None:
                             logger.info(
@@ -1609,7 +1671,23 @@ class RailwayGovClient:
                     if reconnect_delay <= 0.0:
                         return
 
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                    # Clean EOF: apply exponential backoff to prevent 100% CPU reconnect storm
+                    if consecutive_failures == 0:
+                        disconnect_time = time.monotonic()
+                    wait_time, attempt = self._compute_sse_reconnect_wait(
+                        EOFError("Upstream SSE stream closed cleanly (EOF)"),
+                        reconnect_delay,
+                        attempt,
+                        consecutive_failures,
+                    )
+                    consecutive_failures += 1
+                    if stop_event is not None:
+                        if stop_event.wait(timeout=wait_time):
+                            return
+                    else:
+                        time.sleep(wait_time)
+
+            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
                 if stop_event is not None and stop_event.is_set():
                     return
                 if reconnect_delay <= 0.0:
@@ -4026,6 +4104,30 @@ def run_slow_orders_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_audit_positions(args: argparse.Namespace) -> List[TrainPosition]:
+    """Fetch a single fleet telemetry snapshot from live SSE or MockTelemetryEngine (--demo)."""
+    if bool(getattr(args, "demo", False)):
+        from tui.mock_engine import MockTelemetryEngine
+
+        engine = MockTelemetryEngine()
+        return engine.step(1.0)
+
+    verify_ssl = not bool(getattr(args, "insecure", False))
+    client = RailwayGovClient(verify_ssl=verify_ssl)
+    stop_evt = threading.Event()
+    try:
+        for batch in client.stream_train_positions(
+            reconnect_delay=0.0,
+            stop_event=stop_evt,
+            timeout=10.0,
+        ):
+            stop_evt.set()
+            return list(batch)
+    except (RailwayAPIError, urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
+        logger.warning("Failed to fetch live fleet snapshot for CLI audit: %s", exc)
+    return []
+
+
 def run_sensor_health_mode(args: argparse.Namespace) -> int:
     """Execute the headless fleet sensor health inspection CLI command (F-5.2).
 
@@ -4036,7 +4138,7 @@ def run_sensor_health_mode(args: argparse.Namespace) -> int:
         Exit code: 0 on clean execution.
     """
     from tui.geo import GeoPoint, evaluate_sensor_health
-    from tui.mock_engine import MockTelemetryEngine, load_stations
+    from tui.mock_engine import load_stations
     from storage.cli_formatters import format_sensor_health_table
 
     is_ascii = bool(getattr(args, "ascii", False))
@@ -4047,8 +4149,7 @@ def run_sensor_health_mode(args: argparse.Namespace) -> int:
     stations = list(load_stations().values())
     now_ts = time.time()
 
-    engine = MockTelemetryEngine()
-    train_positions = engine.step(1.0)
+    train_positions = _collect_audit_positions(args)
 
     evaluations: List[Tuple[Any, Any]] = []
     for pos in train_positions:
@@ -4114,7 +4215,7 @@ def run_conflicts_mode(args: argparse.Namespace) -> int:
         Exit code: 0 on clean execution.
     """
     from tui.geo import evaluate_train_conflicts, ConflictSeverity
-    from tui.mock_engine import MockTelemetryEngine, load_stations, load_tracks
+    from tui.mock_engine import load_stations, load_tracks
     from storage.cli_formatters import format_conflict_table, format_conflict_json
 
     is_ascii = bool(getattr(args, "ascii", False))
@@ -4124,8 +4225,7 @@ def run_conflicts_mode(args: argparse.Namespace) -> int:
 
     stations = list(load_stations().values())
     tracks = load_tracks()
-    engine = MockTelemetryEngine()
-    train_positions = engine.step(1.0)
+    train_positions = _collect_audit_positions(args)
 
     alerts = evaluate_train_conflicts(
         active_trains=train_positions,
@@ -4275,27 +4375,61 @@ def run_watch_mode(args: argparse.Namespace) -> int:
 
         last_ticker_time = 0.0
         matching_pos: Optional[TrainPosition] = None
+        batch_queue: queue.Queue[Optional[List[TrainPosition]]] = queue.Queue(maxsize=32)
+
+        def _watch_stream_reader() -> None:
+            try:
+                for incoming_batch in stream:
+                    if stop_event.is_set():
+                        break
+                    try:
+                        batch_queue.put(list(incoming_batch), timeout=0.5)
+                    except queue.Full:
+                        pass
+            except (RailwayAPIError, urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
+                logger.warning("Watch stream reader terminated: %s", exc)
+            finally:
+                try:
+                    batch_queue.put(None, timeout=0.5)
+                except queue.Full:
+                    pass
+
+        reader_thread = threading.Thread(
+            target=_watch_stream_reader,
+            name="railmon-watch-reader",
+            daemon=True,
+        )
+        reader_thread.start()
 
         try:
-            for batch in stream:
-                if stop_event.is_set():
+            from railmon_watchdog import matches_train_number
+
+            while not stop_event.is_set():
+                try:
+                    batch = batch_queue.get(timeout=1.0)
+                except queue.Empty:
+                    batch = []
+
+                if batch is None:
                     break
 
                 now_mono = time.time()
                 for pos in batch:
+                    if matches_train_number(pos.train_number, pos.id, train_num):
+                        matching_pos = pos
                     events = evaluator.evaluate_position(pos, now=now_mono)
                     if not events:
                         continue
-                    matching_pos = pos
                     should_exit = _emit_watch_events(evaluator, events, output_json, is_ascii)
                     if should_exit:
                         if not output_json and not headless:
                             sys.stdout.write(
                                 f"\nDestination arrived: Train {train_num}. Watchdog exiting (--once).\n"
                             )
+                        stop_event.set()
                         return 0
 
-                # Check for train telemetry timeout
+                # Check for train telemetry timeout even during stalled streams
                 timeout_event = evaluator.evaluate_timeout(now=now_mono)
                 if timeout_event:
                     _emit_watch_events(evaluator, [timeout_event], output_json, is_ascii)
@@ -4313,15 +4447,17 @@ def run_watch_mode(args: argparse.Namespace) -> int:
                         sys.stdout.write(f"\n{ticker_box}\n")
                         sys.stdout.flush()
 
-                if stop_event.wait(timeout=1.0):
-                    break
-
         except KeyboardInterrupt:
+            stop_event.set()
             if not output_json and not headless:
                 sys.stdout.write("\nWatchdog stopped by user.\n")
             return 0
         except BrokenPipeError:
+            stop_event.set()
             return 0
+        finally:
+            stop_event.set()
+            reader_thread.join(timeout=1.5)
 
     return 0
 

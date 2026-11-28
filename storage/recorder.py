@@ -94,6 +94,7 @@ class TelemetryRecorder:
         self._queue: queue.Queue[Optional[Union[TrainPosition, List[TrainPosition]]]] = (
             queue.Queue(maxsize=self.config.queue_maxsize)
         )
+        self._queued_items: int = 0
         self._thread: Optional[threading.Thread] = None
         self._archive_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -322,6 +323,12 @@ class TelemetryRecorder:
 
         if self._thread:
             self._thread.join(timeout=timeout_sec)
+            if self._thread.is_alive():
+                logger.error(
+                    "TelemetryRecorder worker thread did not exit within %.1fs; skipping unsafe DB finalization.",
+                    timeout_sec,
+                )
+                return
 
         with self._archive_lock:
             arch_thread = self._archive_thread
@@ -367,10 +374,22 @@ class TelemetryRecorder:
         """
         if not self.is_running or self._disk_full_tripped or self._stop_event.is_set():
             return False
+        with self._lock:
+            if self._queued_items + 1 > self.config.queue_maxsize:
+                logger.warning(
+                    "TelemetryRecorder queue saturated (%d/%d items). Dropping position for %s",
+                    self._queued_items,
+                    self.config.queue_maxsize,
+                    position.train_number,
+                )
+                return False
+            self._queued_items += 1
         try:
             self._queue.put_nowait(position)
             return True
         except queue.Full:
+            with self._lock:
+                self._queued_items = max(0, self._queued_items - 1)
             logger.warning(
                 "TelemetryRecorder queue saturated. Dropping position for %s",
                 position.train_number,
@@ -379,17 +398,31 @@ class TelemetryRecorder:
 
     def enqueue_batch(self, positions: List[TrainPosition]) -> int:
         """
-        Enqueue a batch of positions. Non-blocking; returns count of successfully enqueued items.
+        Enqueue a batch of positions bounded by total item count. Non-blocking.
         """
         if not self.is_running or self._disk_full_tripped or self._stop_event.is_set() or not positions:
             return 0
+        with self._lock:
+            available = self.config.queue_maxsize - self._queued_items
+            if available <= 0:
+                logger.warning(
+                    "TelemetryRecorder queue item capacity saturated (%d/%d). Dropping batch of %d positions",
+                    self._queued_items,
+                    self.config.queue_maxsize,
+                    len(positions),
+                )
+                return 0
+            accepted = list(positions[:available])
+            self._queued_items += len(accepted)
         try:
-            self._queue.put_nowait(positions)
-            return len(positions)
+            self._queue.put_nowait(accepted)
+            return len(accepted)
         except queue.Full:
+            with self._lock:
+                self._queued_items = max(0, self._queued_items - len(accepted))
             logger.warning(
                 "TelemetryRecorder queue saturated. Dropping batch of %d positions",
-                len(positions),
+                len(accepted),
             )
             return 0
 
@@ -408,8 +441,12 @@ class TelemetryRecorder:
 
                 if isinstance(item, list):
                     buffer.extend(item)
+                    with self._lock:
+                        self._queued_items = max(0, self._queued_items - len(item))
                 else:
                     buffer.append(item)
+                    with self._lock:
+                        self._queued_items = max(0, self._queued_items - 1)
 
                 self._queue.task_done()
             except queue.Empty:

@@ -833,6 +833,121 @@ class TestConflictWatchdogGeo(unittest.TestCase):
         self.assertEqual(len(alerts_bad_ts), 1)
         self.assertEqual(alerts_bad_ts[0].severity, ConflictSeverity.CRITICAL)
 
+    def test_tc_wdg_19_gis_polyline_alignment_and_terminal_ids(self) -> None:
+        """TC-WDG-19: All TSRs, tunnels, and TERMINAL_STATION_IDS align with tracks.json / stations.json."""
+        import json
+        from pathlib import Path
+        from tui.geo import (
+            TERMINAL_STATION_IDS,
+            project_point_to_corridor_chainage,
+        )
+
+        data_dir = Path(__file__).resolve().parent.parent / "tui" / "data"
+        tracks = json.loads((data_dir / "tracks.json").read_text(encoding="utf-8"))
+        speed_limits = json.loads((data_dir / "speed_limits.json").read_text(encoding="utf-8"))
+        infra = json.loads((data_dir / "infrastructure.json").read_text(encoding="utf-8"))
+        stations = json.loads((data_dir / "stations.json").read_text(encoding="utf-8"))
+
+        station_ids = {s["id"].lower() for s in stations.get("stations", [])}
+        for tid in TERMINAL_STATION_IDS:
+            self.assertIn(tid, station_ids, f"Unknown terminal station id: {tid}")
+
+        for tsr in speed_limits.get("slow_orders", []):
+            cid = tsr["corridor_id"]
+            for pt in tsr.get("points", []):
+                proj = project_point_to_corridor_chainage(
+                    GeoPoint(lat=pt[0], lng=pt[1]), cid, tracks
+                )
+                self.assertIsNotNone(proj)
+                assert proj is not None
+                self.assertLessEqual(
+                    proj[1],
+                    35.0,
+                    f"TSR {tsr['id']} vertex {pt} drifted {proj[1]:.1f}m off {cid}",
+                )
+
+        corridor_ids = [c["id"] for c in tracks.get("corridors", [])]
+        for feat in infra.get("features", []):
+            props = feat.get("properties", {})
+            if props.get("type") != "tunnel":
+                continue
+            for coord in feat.get("geometry", {}).get("coordinates", []):
+                gp = GeoPoint(lat=coord[1], lng=coord[0])
+                best_d = min(
+                    proj[1]
+                    for cid in corridor_ids
+                    for proj in [project_point_to_corridor_chainage(gp, cid, tracks)]
+                    if proj is not None
+                )
+                self.assertLessEqual(
+                    best_d,
+                    35.0,
+                    f"Tunnel {props.get('id')} vertex drifted {best_d:.1f}m off tracks.json",
+                )
+
+    def test_tc_wdg_20_shared_trunk_and_double_track_chalkida(self) -> None:
+        """TC-WDG-20: Chalkida train on SKA-Inoi double-track trunk avoids opposing false alarm; shared single-track trunk detects conflict."""
+        from tui.mock_engine import load_tracks
+
+        tracks = load_tracks()
+        now = 1700000000.0
+        # Two Chalkida trains on SKA-Inoi double-track trunk (38.15..38.20) moving opposite directions
+        c1 = _make_pos("ch1", "1550", 38.150, 23.720, speed=90.0, course=0.0, corridor="proastiakos-chalkida")
+        c2 = _make_pos("ch2", "1551", 38.190, 23.720, speed=90.0, course=180.0, corridor="proastiakos-chalkida")
+        alerts_double = evaluate_train_conflicts(
+            [(c1, now), (c2, now)], tracks_data=tracks, stations=[], config=self.config, now=now
+        )
+        self.assertEqual(
+            [a for a in alerts_double if a.conflict_type == ConflictType.OPPOSING_COLLISION],
+            [],
+        )
+
+        # Shared single-track trunk north of Thessaloniki (northern-corridor vs thessaloniki-idomeni)
+        n1 = _make_pos("n1", "IC600", 40.750, 22.860, speed=90.0, course=0.0, corridor="northern-corridor")
+        n2 = _make_pos("n2", "IC335", 40.780, 22.860, speed=90.0, course=180.0, corridor="thessaloniki-idomeni")
+        alerts_shared = evaluate_train_conflicts(
+            [(n1, now), (n2, now)], tracks_data=tracks, stations=[], config=self.config, now=now
+        )
+        self.assertEqual(len(alerts_shared), 1)
+        self.assertEqual(alerts_shared[0].conflict_type, ConflictType.OPPOSING_COLLISION)
+
+    def test_tc_wdg_21_watchdog_hysteresis_bell_escalation_f10_and_pause(self) -> None:
+        """TC-WDG-21: FROZEN hysteresis, (alert_id, severity) bell escalation, F-10.1 strict ID, and PAUSED pruning suspension."""
+        from train_tracker import DelayUpdate
+        from tui.geo import SensorHealthState, evaluate_sensor_health
+        from tui.state import ConnectionStatus, TrainStateStore
+
+        now = 1700000000.0
+        anchor = GeoPoint(lat=38.5000, lng=22.9000)
+        # 25m jitter while previously FROZEN stays FROZEN (hysteresis >= 50m)
+        jittered = GeoPoint(lat=38.50022, lng=22.9000)
+        assess, _, _, _ = evaluate_sensor_health(
+            point=jittered,
+            current_speed=80.0,
+            last_updated=now,
+            last_moved_pt=anchor,
+            last_moved_time=now - 120.0,
+            station_dwell_start=None,
+            stations=[],
+            now=now,
+            previous_state=SensorHealthState.FROZEN,
+        )
+        self.assertEqual(assess.state, SensorHealthState.FROZEN)
+
+        # F-10.1 strict train_id precedence + PAUSED pruning suspension
+        store = TrainStateStore()
+        p_a = _make_pos("consist-a", "2232", 38.400, 23.600, speed=80.0, course=30.0, corridor="proastiakos-chalkida")
+        p_b = _make_pos("consist-b", "2232", 38.415, 23.610, speed=80.0, course=210.0, corridor="proastiakos-chalkida")
+        store.update_positions([p_a, p_b])
+        store.apply_delay_updates([DelayUpdate(train_id="consist-a", train_number="2232", delay=12)], now=now + 1.0)
+        self.assertEqual(store.get_train("consist-a").position.delay, 12)  # type: ignore[union-attr]
+        self.assertEqual(store.get_train("consist-b").position.delay, 0)  # type: ignore[union-attr]
+
+        # PAUSED suspends automatic stale-train pruning
+        store.set_connection_status(ConnectionStatus.PAUSED, "Paused")
+        self.assertEqual(store.prune_stale_trains(now=now + 10000.0), 0)
+        self.assertIsNotNone(store.get_train("consist-a"))
+
 
 if __name__ == "__main__":
     unittest.main()

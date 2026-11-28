@@ -474,17 +474,21 @@ class WebMapRequestHandler(BoundedHTTPRequestHandler):
             last_ping_time = time.time()
             while self.server.is_running:
                 try:
-                    event_type, event_data = client_conn.queue.get(timeout=1.0)
+                    item = client_conn.queue.get(timeout=1.0)
+                    if item is None:
+                        break
+                    event_type, event_data = item
                     self._send_sse_frame(event_type, event_data)
                     client_conn.frames_sent += 1
                     client_conn.touch()
                 except queue.Empty:
                     pass
 
-                # Keepalive heartbeat every 15 seconds of silence
+                # Keepalive heartbeat every 15 seconds of silence (touch on successful flush)
                 now = time.time()
                 if now - last_ping_time >= 15.0:
                     self._send_sse_raw(":ping\n\n")
+                    client_conn.touch()
                     last_ping_time = now
 
         except (TimeoutError, socket.timeout):
@@ -585,6 +589,8 @@ class WebMapRequestHandler(BoundedHTTPRequestHandler):
             }
         ).encode("utf-8")
         self.send_response(code)
+        if code == 405:
+            self.send_header("Allow", "GET, HEAD, OPTIONS")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(error_body)))
         if retry_after is not None:
@@ -593,7 +599,8 @@ class WebMapRequestHandler(BoundedHTTPRequestHandler):
         self._add_security_headers(csp_policy=_API_CSP_POLICY)
         self._add_cors_headers()
         self.end_headers()
-        self.wfile.write(error_body)
+        if getattr(self, "command", "GET") != "HEAD":
+            self.wfile.write(error_body)
 
     def _add_security_headers(self, csp_policy: Optional[str] = None) -> None:
         """Attach baseline HTTP security headers to responses."""
@@ -610,5 +617,5 @@ class WebMapRequestHandler(BoundedHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Content-Type, Accept, Authorization",
+                "Content-Type, Accept, Authorization, If-None-Match",
             )

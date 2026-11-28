@@ -1133,7 +1133,7 @@ class SimulatedTrain:
             next_station=self.next_station_name or self.destination,
             speed=round(self.current_speed_kmh, 1),
             course=round(course, 1),
-            track_heading=round(track_heading, 1),
+            track_heading=round(course, 1),
             lat=point.lat,
             lng=point.lng,
             altitude=None,

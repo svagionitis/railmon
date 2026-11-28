@@ -359,29 +359,29 @@ class TestGeoProjector(unittest.TestCase):
         self.assertAlmostEqual(haversine_distance_km(athens, thessaloniki), 302.3, delta=1.5)
 
     def test_get_km_per_cell_and_conformal_latitude_scaling(self):
-        """TC-F34-01 & TC-F34-02: Verify conformal km_per_cell formula, zoom scaling, and latitude variation."""
+        """TC-F34-01, TC-F34-02 & TC-TUI-16: Verify conformal km_per_cell matches geodesic haversine distance."""
         self.viewport.center = GeoPoint(lat=39.5, lng=22.5)
         self.viewport.zoom = 1.0
         km_z1 = self.projector.get_km_per_cell()
-        expected_z1 = (
-            2.0
-            / (self.projector.get_scale_x() * math.cos(math.radians(39.5)))
-            * KM_PER_DEGREE_LAT
+        cy = self.projector.sub_height // 2
+        geodesic_cell_km = haversine_distance_km(
+            self.projector.subpixel_to_geo(0, cy),
+            self.projector.subpixel_to_geo(2, cy),
         )
-        self.assertAlmostEqual(km_z1, expected_z1, places=6)
+        self.assertAlmostEqual(km_z1, geodesic_cell_km, delta=geodesic_cell_km * 0.01)
 
         # Doubling zoom halves km_per_cell
         self.viewport.zoom = 2.0
         km_z2 = self.projector.get_km_per_cell()
         self.assertAlmostEqual(km_z2, km_z1 / 2.0, places=6)
 
-        # Panning from Athens (37.9926 deg N) to Northern Greece (41.30 deg N) scales with 1/cos(phi_0)
+        # Panning from Athens (37.9926 deg N) to Northern Greece (41.30 deg N) scales with cos(phi_center)
         self.viewport.zoom = 1.0
         self.viewport.center = GeoPoint(lat=37.9926, lng=23.7203)
         km_athens = self.projector.get_km_per_cell()
         self.viewport.center = GeoPoint(lat=41.30, lng=23.7203)
         km_north = self.projector.get_km_per_cell()
-        expected_ratio = math.cos(math.radians(37.9926)) / math.cos(math.radians(41.30))
+        expected_ratio = math.cos(math.radians(41.30)) / math.cos(math.radians(37.9926))
         self.assertAlmostEqual(km_north / km_athens, expected_ratio, places=6)
 
         # Polar latitude defensive clamping prevents ZeroDivisionError
@@ -389,6 +389,23 @@ class TestGeoProjector(unittest.TestCase):
         km_pole = self.projector.get_km_per_cell()
         self.assertTrue(math.isfinite(km_pole))
         self.assertGreater(km_pole, 0.0)
+
+    def test_tc_tui_16_liang_barsky_clipping_and_southbound_mock_heading(self):
+        """TC-TUI-16: Extreme off-screen lines clip in O(1) and southbound mock trains flip track_heading."""
+        import time as _time
+        from tui.mock_engine import MockTelemetryEngine
+
+        canvas = BrailleCanvas(width_cells=40, height_cells=20)
+        t0 = _time.perf_counter()
+        canvas.draw_line(-10_000_000, -10_000_000, 10_000_000, 10_000_000)
+        elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+        self.assertLess(elapsed_ms, 50.0)
+
+        engine = MockTelemetryEngine()
+        sb_trains = [t for t in engine.trains if t.direction == -1]
+        self.assertGreater(len(sb_trains), 0)
+        pos = sb_trains[0].step(1.0)
+        self.assertEqual(pos.track_heading, pos.course)
 
     def test_compute_scale_bar_snapping_across_zoom_range(self):
         """TC-F34-03: Verify compute_scale_bar snaps to distinct standard intervals across 1.25x zoom steps."""

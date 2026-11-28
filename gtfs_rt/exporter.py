@@ -34,18 +34,32 @@ def serialize_feed(msg: FeedMessage, fmt: OutputFormat) -> bytes:
 
 
 def write_atomic_bytes(path: str, payload: bytes) -> str:
-    """Validate destination path and write bytes atomically via temp file + os.replace."""
+    """Validate destination path and write bytes atomically via mkstemp + Windows-safe os.replace."""
+    import sys
+    import tempfile
+
     abs_path = validate_export_path(path)
-    tmp_path = f"{abs_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    parent_dir = os.path.dirname(abs_path) or "."
+    base_name = os.path.basename(abs_path)
+    fd, tmp_path = tempfile.mkstemp(prefix=f".{base_name}.", suffix=".tmp", dir=parent_dir)
     try:
-        with open(tmp_path, "wb") as fh:
+        with os.fdopen(fd, "wb") as fh:
             fh.write(payload)
             fh.flush()
             try:
                 os.fsync(fh.fileno())
             except OSError:
                 logger.debug("os.fsync unsupported on target filesystem for %s", tmp_path)
-        os.replace(tmp_path, abs_path)
+
+        max_attempts = 5 if sys.platform == "win32" else 1
+        for attempt in range(max_attempts):
+            try:
+                os.replace(tmp_path, abs_path)
+                break
+            except PermissionError:
+                if attempt + 1 >= max_attempts:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
     except Exception:
         if os.path.exists(tmp_path):
             try:
@@ -165,14 +179,12 @@ def inspect_pb_file(path: str) -> Dict[str, Any]:
     if not os.path.isfile(abs_path):
         raise FileNotFoundError(f"GTFS-RT protobuf file not found: '{abs_path}'")
 
-    size_bytes = os.path.getsize(abs_path)
-    if size_bytes > MAX_INSPECT_BYTES:
-        raise ValueError(
-            f"GTFS-RT file exceeds maximum allowed inspection size ({MAX_INSPECT_BYTES} bytes): {size_bytes}"
-        )
-
     with open(abs_path, "rb") as fh:
-        raw = fh.read()
+        raw = fh.read(MAX_INSPECT_BYTES + 1)
+    if len(raw) > MAX_INSPECT_BYTES:
+        raise ValueError(
+            f"GTFS-RT file exceeds maximum allowed inspection size ({MAX_INSPECT_BYTES} bytes)"
+        )
 
     msg = FeedMessage.from_proto(raw)
     vp_count = sum(1 for e in msg.entity if e.vehicle is not None)

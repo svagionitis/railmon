@@ -217,7 +217,7 @@ def matches_train_number(
     candidate_id: Optional[str],
     target_query: str,
 ) -> bool:
-    """Check if candidate train matches target query with Greek rail conventions."""
+    """Check if candidate train matches target query with strict/anchored Greek rail matching."""
     target_norm = normalize_train_query(target_query)
     if not target_norm:
         return False
@@ -230,18 +230,19 @@ def matches_train_number(
     if c_id_norm and c_id_norm == target_norm:
         return True
 
-    # Check for prefix or suffix containment when length >= 3
-    if len(target_norm) >= 3:
-        if c_num_norm and (c_num_norm in target_norm or target_norm in c_num_norm):
-            return True
-        if c_id_norm and (c_id_norm in target_norm or target_norm in c_id_norm):
-            return True
-
-    # Numeric match (e.g. '52' matches 'IC52' or '1597')
-    target_digits = re.sub(r"\D", "", target_norm)
-    c_digits = re.sub(r"\D", "", c_num_norm)
-    if target_digits and c_digits and target_digits == c_digits:
-        return True
+    # Bare-digit query (e.g. '52') matches anchored prefix+digits (e.g. 'IC52', '052'),
+    # and prefixed query (e.g. 'IC52') matches bare-digit candidate ('52'), never 'IC520', 'R52', '5', or '2'.
+    target_match = re.match(r"^([A-Z]*)0*(\d+)$", target_norm)
+    if target_match:
+        t_prefix, t_digits = target_match.group(1), target_match.group(2)
+        for cand in (c_num_norm, c_id_norm):
+            if not cand:
+                continue
+            c_match = re.match(r"^([A-Z]*)0*(\d+)$", cand)
+            if c_match and c_match.group(2) == t_digits:
+                c_prefix = c_match.group(1)
+                if not t_prefix or not c_prefix or t_prefix == c_prefix:
+                    return True
 
     return False
 

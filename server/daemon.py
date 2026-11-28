@@ -166,7 +166,8 @@ class WebMapServer(BoundedHTTPServer):
             return
         logger.info("Shutting down WebMapServer...")
         self._shutdown_event.set()
-        self.shutdown()
+        self.broadcaster.shutdown()
+        self.safe_shutdown()
         self.server_close()
         if self._server_thread is not None and self._server_thread.is_alive():
             self._server_thread.join(timeout=3.0)

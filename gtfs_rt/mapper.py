@@ -6,12 +6,13 @@ bounded caching and zero third-party dependencies.
 """
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 import json
 import logging
 import math
 import re
+import secrets
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -78,12 +79,47 @@ _PROAST_TOKENS: Tuple[str, ...] = (
 _IC_TOKENS: Tuple[str, ...] = ("intercity", "ic", "express", "etr")
 
 
+class _AthensFallbackTZ(tzinfo):
+    """Zero-dependency EU EET (UTC+2) / EEST (UTC+3) tzinfo fallback when tzdata is absent.
+
+    Follows EU Directive 2000/84/EC: DST starts last Sunday of March at 01:00 UTC
+    and ends last Sunday of October at 01:00 UTC.
+    """
+
+    _ZERO = timedelta(0)
+    _HOUR = timedelta(hours=1)
+    _STD = timedelta(hours=2)
+
+    @staticmethod
+    def _last_sunday(year: int, month: int) -> int:
+        last_day = datetime(year, month, 31)
+        return 31 - ((last_day.weekday() + 1) % 7)
+
+    def _is_dst(self, dt: Optional[datetime]) -> bool:
+        if dt is None:
+            return False
+        year = dt.year
+        dst_start = datetime(year, 3, self._last_sunday(year, 3), 3, 0)
+        dst_end = datetime(year, 10, self._last_sunday(year, 10), 4, 0)
+        naive = dt.replace(tzinfo=None)
+        return dst_start <= naive < dst_end
+
+    def dst(self, dt: Optional[datetime]) -> timedelta:
+        return self._HOUR if self._is_dst(dt) else self._ZERO
+
+    def utcoffset(self, dt: Optional[datetime]) -> timedelta:
+        return self._STD + self.dst(dt)
+
+    def tzname(self, dt: Optional[datetime]) -> str:
+        return "EEST" if self._is_dst(dt) else "EET"
+
+
 def _resolve_athens_tz() -> tzinfo:
-    """Resolve Europe/Athens tzinfo with fixed UTC+2 fallback if tzdata is absent."""
+    """Resolve Europe/Athens tzinfo with EU EET/EEST DST fallback if tzdata is absent."""
     try:
         return ZoneInfo("Europe/Athens")
     except (ZoneInfoNotFoundError, KeyError, OSError):
-        return timezone(timedelta(hours=2))
+        return _AthensFallbackTZ()
 
 
 ATHENS_TZ: tzinfo = _resolve_athens_tz()
@@ -345,14 +381,19 @@ class GtfsRtMapper:
         ref_epoch: int,
         sched: Optional[Dict[str, Any]] = None,
     ) -> TripDescriptor:
-        """Build GTFS-RT TripDescriptor aligned to Europe/Athens service date."""
+        """Build GTFS-RT TripDescriptor anchored to scheduledDeparture date (prevents midnight flips)."""
         start_time: Optional[str] = None
+        service_epoch = ref_epoch
         if sched and sched.get("scheduledDeparture"):
-            start_time = _local_start_time(str(sched["scheduledDeparture"]))
+            raw_dep = str(sched["scheduledDeparture"])
+            start_time = _local_start_time(raw_dep)
+            dep_epoch = parse_iso_to_epoch(raw_dep)
+            if dep_epoch is not None:
+                service_epoch = dep_epoch
         return TripDescriptor(
-            trip_id=self._trip_id_for(pos, ref_epoch),
+            trip_id=self._trip_id_for(pos, service_epoch),
             start_time=start_time,
-            start_date=_local_service_date(ref_epoch),
+            start_date=_local_service_date(service_epoch),
             schedule_relationship=ScheduleRel.SCHEDULED,
             route_id=_resolve_route_id(pos),
         )
@@ -980,27 +1021,45 @@ class GtfsRtMapper:
 
 @dataclass(frozen=True)
 class CachedFeed:
-    """Serialized GTFS-RT protobuf and ProtoJSON cache entry for a snapshot version."""
+    """Serialized GTFS-RT protobuf and lazy ProtoJSON cache entry for a snapshot version."""
 
     version: int
     feed_kind: FeedKind
     pb_bytes: bytes
-    json_bytes: bytes
     etag_pb: str
     etag_json: str
     entity_count: int
     timestamp: int
     build_ms: float
+    _msg: Optional[FeedMessage] = field(default=None, repr=False, compare=False)
+    _json_box: List[Optional[bytes]] = field(
+        default_factory=lambda: [None], repr=False, compare=False
+    )
+
+    @property
+    def json_bytes(self) -> bytes:
+        """Lazily serialize ProtoJSON bytes on demand so .pb scrapes avoid JSON overhead."""
+        cached = self._json_box[0]
+        if cached is None:
+            if self._msg is not None:
+                cached = json.dumps(
+                    self._msg.to_dict(), ensure_ascii=False, indent=2
+                ).encode("utf-8")
+            else:
+                cached = b"{}"
+            self._json_box[0] = cached
+        return cached
 
 
 class FeedCache:
-    """Thread-safe version-keyed serialization cache avoiding redundant encoding."""
+    """Thread-safe strictly monotonic version-keyed serialization cache with boot-nonce ETags."""
 
     def __init__(self, mapper: GtfsRtMapper) -> None:
         self._mapper = mapper
         self._lock = threading.RLock()
         self._active_version: int = -1
         self._entries: Dict[FeedKind, CachedFeed] = {}
+        self._boot_nonce: str = secrets.token_hex(4)
 
     def get_or_build(
         self,
@@ -1016,7 +1075,6 @@ class FeedCache:
         t0 = time.perf_counter()
         msg = self._mapper.build_feed(snapshot, feed_kind=feed_kind, now=now)
         pb_bytes = msg.to_proto()
-        json_bytes = json.dumps(msg.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         ts = msg.header.timestamp or int(now if now is not None else time.time())
@@ -1024,17 +1082,19 @@ class FeedCache:
             version=snapshot.version,
             feed_kind=feed_kind,
             pb_bytes=pb_bytes,
-            json_bytes=json_bytes,
-            etag_pb=f'"gtfsrt-{snapshot.version}-{feed_kind.value}-pb"',
-            etag_json=f'"gtfsrt-{snapshot.version}-{feed_kind.value}-json"',
+            etag_pb=f'"gtfsrt-{self._boot_nonce}-{snapshot.version}-{feed_kind.value}-pb"',
+            etag_json=f'"gtfsrt-{self._boot_nonce}-{snapshot.version}-{feed_kind.value}-json"',
             entity_count=len(msg.entity),
             timestamp=ts,
             build_ms=round(elapsed_ms, 3),
+            _msg=msg,
         )
 
         with self._lock:
-            if snapshot.version != self._active_version:
+            if snapshot.version > self._active_version:
                 self._entries.clear()
                 self._active_version = snapshot.version
-            self._entries[feed_kind] = cached
+                self._entries[feed_kind] = cached
+            elif snapshot.version == self._active_version:
+                self._entries[feed_kind] = cached
         return cached

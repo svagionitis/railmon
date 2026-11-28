@@ -8,9 +8,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.5585, 38.7270],
-          [22.5320, 38.7620],
-          [22.5015, 38.7960]
+          [
+            22.560367,
+            38.72796
+          ],
+          [
+            22.532,
+            38.762
+          ],
+          [
+            22.50187,
+            38.796201
+          ]
         ]
       },
       "properties": {
@@ -23,12 +32,18 @@
         "portals": [
           {
             "name": "South Portal (Tithorea)",
-            "coordinates": [22.5585, 38.7270],
+            "coordinates": [
+              22.5585,
+              38.727
+            ],
             "altitude_m": 160.0
           },
           {
             "name": "North Portal (Molos/Lianokladi)",
-            "coordinates": [22.5015, 38.7960],
+            "coordinates": [
+              22.5015,
+              38.796
+            ],
             "altitude_m": 50.0
           }
         ]
@@ -40,9 +55,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.3740, 38.9650],
-          [22.3680, 39.0050],
-          [22.3665, 39.0275]
+          [
+            22.374,
+            38.965
+          ],
+          [
+            22.362577,
+            39.004028
+          ],
+          [
+            22.355203,
+            39.025031
+          ]
         ]
       },
       "properties": {
@@ -55,11 +79,17 @@
         "portals": [
           {
             "name": "South Portal (Stirfaka)",
-            "coordinates": [22.3740, 38.9650]
+            "coordinates": [
+              22.374,
+              38.965
+            ]
           },
           {
             "name": "North Portal (Xyniada)",
-            "coordinates": [22.3665, 39.0275]
+            "coordinates": [
+              22.3665,
+              39.0275
+            ]
           }
         ]
       }
@@ -70,9 +100,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.5760, 39.8620],
-          [22.5950, 39.8850],
-          [22.6139, 39.9056]
+          [
+            22.576,
+            39.862
+          ],
+          [
+            22.595684,
+            39.884645
+          ],
+          [
+            22.6139,
+            39.9056
+          ]
         ]
       },
       "properties": {
@@ -85,11 +124,17 @@
         "portals": [
           {
             "name": "South Portal",
-            "coordinates": [22.5760, 39.8620]
+            "coordinates": [
+              22.576,
+              39.862
+            ]
           },
           {
             "name": "North Portal",
-            "coordinates": [22.6139, 39.9056]
+            "coordinates": [
+              22.6139,
+              39.9056
+            ]
           }
         ]
       }
@@ -100,9 +145,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.6139, 39.9056],
-          [22.6260, 39.9420],
-          [22.6290, 39.9750]
+          [
+            22.6139,
+            39.9056
+          ],
+          [
+            22.626,
+            39.942
+          ],
+          [
+            22.629,
+            39.975
+          ]
         ]
       },
       "properties": {
@@ -115,11 +169,17 @@
         "portals": [
           {
             "name": "South Portal",
-            "coordinates": [22.6139, 39.9056]
+            "coordinates": [
+              22.6139,
+              39.9056
+            ]
           },
           {
             "name": "North Portal",
-            "coordinates": [22.6290, 39.9750]
+            "coordinates": [
+              22.629,
+              39.975
+            ]
           }
         ]
       }
@@ -130,9 +190,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.6030, 40.0080],
-          [22.5810, 40.0350],
-          [22.5614, 40.0603]
+          [
+            22.603,
+            40.008
+          ],
+          [
+            22.581,
+            40.035
+          ],
+          [
+            22.5614,
+            40.0603
+          ]
         ]
       },
       "properties": {
@@ -145,11 +214,17 @@
         "portals": [
           {
             "name": "South Portal",
-            "coordinates": [22.6030, 40.0080]
+            "coordinates": [
+              22.603,
+              40.008
+            ]
           },
           {
             "name": "North Portal",
-            "coordinates": [22.5614, 40.0603]
+            "coordinates": [
+              22.5614,
+              40.0603
+            ]
           }
         ]
       }
@@ -160,9 +235,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [23.2660, 37.9730],
-          [23.2280, 37.9620],
-          [23.1920, 37.9495]
+          [
+            23.266,
+            37.973
+          ],
+          [
+            23.228,
+            37.962
+          ],
+          [
+            23.192,
+            37.9495
+          ]
         ]
       },
       "properties": {
@@ -175,11 +259,17 @@
         "portals": [
           {
             "name": "East Portal",
-            "coordinates": [23.2660, 37.9730]
+            "coordinates": [
+              23.266,
+              37.973
+            ]
           },
           {
             "name": "West Portal",
-            "coordinates": [23.1920, 37.9495]
+            "coordinates": [
+              23.192,
+              37.9495
+            ]
           }
         ]
       }
@@ -190,8 +280,14 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.4480, 38.8460],
-          [22.3986, 38.8872]
+          [
+            22.448,
+            38.846
+          ],
+          [
+            22.3986,
+            38.8872
+          ]
         ]
       },
       "properties": {
@@ -209,8 +305,14 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.4350, 38.8550],
-          [22.4150, 38.8720]
+          [
+            22.436172,
+            38.855864
+          ],
+          [
+            22.415969,
+            38.872714
+          ]
         ]
       },
       "properties": {
@@ -228,8 +330,14 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.9700, 37.9242],
-          [22.9306, 37.9236]
+          [
+            22.97,
+            37.9242
+          ],
+          [
+            22.9306,
+            37.9236
+          ]
         ]
       },
       "properties": {
@@ -247,8 +355,14 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.5240, 40.1880],
-          [22.5150, 40.2300]
+          [
+            22.524,
+            40.188
+          ],
+          [
+            22.515,
+            40.23
+          ]
         ]
       },
       "properties": {
@@ -266,8 +380,14 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.8550, 40.6900],
-          [22.8350, 40.7150]
+          [
+            22.85983,
+            40.693547
+          ],
+          [
+            22.838942,
+            40.71699
+          ]
         ]
       },
       "properties": {
@@ -285,8 +405,14 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [22.4720, 39.7280],
-          [22.5020, 39.7740]
+          [
+            22.472,
+            39.728
+          ],
+          [
+            22.502,
+            39.774
+          ]
         ]
       },
       "properties": {
@@ -303,7 +429,10 @@
       "id": "sig-skau",
       "geometry": {
         "type": "Point",
-        "coordinates": [23.7550, 38.0900]
+        "coordinates": [
+          23.754782,
+          38.090162
+        ]
       },
       "properties": {
         "id": "sig-skau",
@@ -319,7 +448,10 @@
       "id": "sig-inoi",
       "geometry": {
         "type": "Point",
-        "coordinates": [23.6150, 38.3100]
+        "coordinates": [
+          23.6162,
+          38.31083
+        ]
       },
       "properties": {
         "id": "sig-inoi",
@@ -335,7 +467,10 @@
       "id": "sig-tithorea",
       "geometry": {
         "type": "Point",
-        "coordinates": [22.6340, 38.6380]
+        "coordinates": [
+          22.634,
+          38.638
+        ]
       },
       "properties": {
         "id": "sig-tithorea",
@@ -351,7 +486,10 @@
       "id": "sig-lianokladi",
       "geometry": {
         "type": "Point",
-        "coordinates": [22.3850, 38.9250]
+        "coordinates": [
+          22.385,
+          38.925
+        ]
       },
       "properties": {
         "id": "sig-lianokladi",
@@ -367,7 +505,10 @@
       "id": "sig-domokos",
       "geometry": {
         "type": "Point",
-        "coordinates": [22.3620, 39.0850]
+        "coordinates": [
+          22.33541,
+          39.078907
+        ]
       },
       "properties": {
         "id": "sig-domokos",
@@ -383,7 +524,10 @@
       "id": "sig-larissa",
       "geometry": {
         "type": "Point",
-        "coordinates": [22.4460, 39.6820]
+        "coordinates": [
+          22.446,
+          39.682
+        ]
       },
       "properties": {
         "id": "sig-larissa",
@@ -399,7 +543,10 @@
       "id": "sig-platy",
       "geometry": {
         "type": "Point",
-        "coordinates": [22.5150, 40.5500]
+        "coordinates": [
+          22.520676,
+          40.553543
+        ]
       },
       "properties": {
         "id": "sig-platy",
@@ -415,7 +562,10 @@
       "id": "sig-thessaloniki",
       "geometry": {
         "type": "Point",
-        "coordinates": [22.8800, 40.6600]
+        "coordinates": [
+          22.879297,
+          40.65813
+        ]
       },
       "properties": {
         "id": "sig-thessaloniki",
